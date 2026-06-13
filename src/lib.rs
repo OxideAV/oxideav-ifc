@@ -26,8 +26,20 @@
 //! * **DoS hardening** — input-size / instance-count / nesting-depth /
 //!   string-length caps via [`StepLimits`].
 //!
-//! Schema-aware typing (attribute names per the IFC EXPRESS schemas)
-//! is Phase 2; geometry extraction into `Scene3D` is Phase 3.
+//! ## Phase 2 (this release): EXPRESS schema typing
+//!
+//! [`schema`] layers the IFC 4 EXPRESS schema over the positional
+//! instance graph for the core entity slice (spatial structure +
+//! common building elements + placements + representation refs):
+//!
+//! * [`TypedEntity`] — names each positional argument per the entity's
+//!   inheritance-resolved attribute order, with typed accessors
+//!   (`global_id`, `name`, `object_placement`, …).
+//! * [`Model`] — folds `IfcRelAggregates` +
+//!   `IfcRelContainedInSpatialStructure` into a navigable
+//!   project → site → building → storey → space → element tree.
+//!
+//! Geometry extraction into `Scene3D` is Phase 3.
 //!
 //! ## Standalone build
 //!
@@ -51,6 +63,7 @@ pub mod error;
 pub mod header;
 mod lexer;
 pub mod parser;
+pub mod schema;
 pub mod value;
 
 #[cfg(feature = "registry")]
@@ -61,6 +74,7 @@ pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use parser::{
     parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
 };
+pub use schema::{schema_of, EntityKind, EntitySchema, Model, SpatialKind, TypedEntity, SCHEMA};
 pub use value::Value;
 
 #[cfg(feature = "registry")]

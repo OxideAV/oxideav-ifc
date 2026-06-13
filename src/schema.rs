@@ -1,0 +1,840 @@
+//! Phase 2: EXPRESS schema typing over the Phase-1 STEP parser.
+//!
+//! Phase 1 ([`crate::parser`]) turns a `.ifc` file into a positional
+//! instance graph: every `#id = KEYWORD(args);` record is a
+//! [`ParsedInstance`](crate::ParsedInstance) whose `args` are an
+//! ordered list of [`Value`]s with no attribute names attached. The
+//! wire format carries position only — the IFC EXPRESS schema is what
+//! gives each positional slot a *name* and a *type*.
+//!
+//! This module supplies that schema layer for the core IFC 4 entity
+//! slice (the spatial-structure backbone plus the common building
+//! elements, placements, and representation references). It does two
+//! things:
+//!
+//! * [`EntitySchema`] — a static table mapping an entity keyword to its
+//!   ordered attribute names. The order is the EXPRESS serialisation
+//!   order: a subtype's argument list is its inheritance chain's
+//!   attributes concatenated **parent-first** (ISO 10303-11 / EXPRESS
+//!   digest §7). So `IFCWALL` reads `IfcRoot` → `IfcObject` →
+//!   `IfcProduct` → `IfcElement` → `IfcWall` attributes in that order.
+//!   The table is hand-transcribed from the staged IFC 4 EXPRESS schema
+//!   (`docs/3d/ifc/IFC4_ADD2.exp`) entity declarations.
+//!
+//! * [`TypedEntity`] — a borrowing view of one [`ParsedInstance`] that
+//!   resolves attribute *names* to their positional [`Value`] via the
+//!   schema, plus convenience typed-accessors for the IFC-common
+//!   attributes (GlobalId, Name, ObjectPlacement reference, …).
+//!
+//! Geometry extraction (turning representation items into meshes) stays
+//! Phase 3. This layer stops at typed *attribute resolution* and the
+//! spatial-structure graph ([`Model`]).
+
+use std::collections::BTreeMap;
+
+use crate::parser::{ParsedInstance, StepFile};
+use crate::value::Value;
+
+/// The ordered attribute names of one IFC entity, in EXPRESS
+/// serialisation order (inheritance chain concatenated parent-first).
+///
+/// `kind` classifies the entity into the small set of structural roles
+/// the typed layer cares about; `attrs` are the positional attribute
+/// names matching the wire argument order one-for-one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EntitySchema {
+    /// Upper-cased entity keyword (`"IFCWALL"`).
+    pub keyword: &'static str,
+    /// Structural role of the entity.
+    pub kind: EntityKind,
+    /// Ordered attribute names; index *i* names argument *i*.
+    pub attrs: &'static [&'static str],
+}
+
+/// Structural classification of a typed entity — the coarse role the
+/// spatial-model builder routes on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntityKind {
+    /// `IfcProject` — the single model root context.
+    Project,
+    /// A spatial-structure element: site / building / storey / space.
+    Spatial(SpatialKind),
+    /// A physical product placed in the spatial structure (wall, door,
+    /// window, column, slab, beam, opening, …).
+    Product,
+    /// `IfcRelAggregates` — composition (project→site→building→storey).
+    RelAggregates,
+    /// `IfcRelContainedInSpatialStructure` — element containment.
+    RelContained,
+    /// A placement entity (`IfcLocalPlacement`).
+    Placement,
+    /// A representation / context entity referenced by a product.
+    Representation,
+    /// Any other typed entity in the table with named attributes but no
+    /// special structural role.
+    Other,
+}
+
+/// The four IFC spatial-structure levels.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpatialKind {
+    /// `IfcSite`.
+    Site,
+    /// `IfcBuilding`.
+    Building,
+    /// `IfcBuildingStorey`.
+    Storey,
+    /// `IfcSpace`.
+    Space,
+}
+
+// ---------------------------------------------------------------------
+// Attribute chains (parent-first), transcribed from IFC4_ADD2.exp.
+//
+// Common ancestor segments are named once and concatenated per entity
+// so the inheritance order is auditable against the schema text.
+// ---------------------------------------------------------------------
+
+/// `IfcRoot` — GlobalId, OwnerHistory, Name, Description.
+const ROOT: &[&str] = &["GlobalId", "OwnerHistory", "Name", "Description"];
+
+macro_rules! chain {
+    ($($seg:expr),+ $(,)?) => {{
+        // Build a flat &'static [&str] at compile time by const concat.
+        const N: usize = 0 $(+ $seg.len())+;
+        const A: [&str; N] = {
+            let mut out = [""; N];
+            let mut i = 0;
+            $(
+                let seg = $seg;
+                let mut j = 0;
+                while j < seg.len() {
+                    out[i] = seg[j];
+                    i += 1;
+                    j += 1;
+                }
+            )+
+            out
+        };
+        &A
+    }};
+}
+
+// IfcRoot → IfcObjectDefinition(none) → IfcObject(ObjectType) →
+//   IfcProduct(ObjectPlacement, Representation)
+const OBJECT_TAIL: &[&str] = &["ObjectType"];
+const PRODUCT_TAIL: &[&str] = &["ObjectPlacement", "Representation"];
+// IfcSpatialElement(LongName) → IfcSpatialStructureElement(CompositionType)
+const SPATIAL_TAIL: &[&str] = &["LongName"];
+const SPATIAL_STRUCT_TAIL: &[&str] = &["CompositionType"];
+// IfcElement(Tag)
+const ELEMENT_TAIL: &[&str] = &["Tag"];
+// IfcContext(ObjectType, LongName, Phase, RepresentationContexts, UnitsInContext)
+const CONTEXT_TAIL: &[&str] = &[
+    "ObjectType",
+    "LongName",
+    "Phase",
+    "RepresentationContexts",
+    "UnitsInContext",
+];
+
+/// Master schema table for the core IFC 4 entity slice.
+///
+/// Every entry's `attrs` length equals the EXPRESS serialised argument
+/// count for that entity; the [`schema_of`] lookup is exact (no
+/// supertype fallback) so an unknown keyword resolves to `None` and the
+/// caller keeps the positional view.
+pub const SCHEMA: &[EntitySchema] = &[
+    // ---- Project / context ----
+    EntitySchema {
+        keyword: "IFCPROJECT",
+        kind: EntityKind::Project,
+        // IfcRoot + IfcContext.
+        attrs: chain!(ROOT, CONTEXT_TAIL),
+    },
+    // ---- Spatial structure ----
+    EntitySchema {
+        keyword: "IFCSITE",
+        kind: EntityKind::Spatial(SpatialKind::Site),
+        // IfcRoot + ObjectType + ObjectPlacement,Representation + LongName
+        // + CompositionType + IfcSite(5).
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            SPATIAL_TAIL,
+            SPATIAL_STRUCT_TAIL,
+            &[
+                "RefLatitude",
+                "RefLongitude",
+                "RefElevation",
+                "LandTitleNumber",
+                "SiteAddress"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCBUILDING",
+        kind: EntityKind::Spatial(SpatialKind::Building),
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            SPATIAL_TAIL,
+            SPATIAL_STRUCT_TAIL,
+            &[
+                "ElevationOfRefHeight",
+                "ElevationOfTerrain",
+                "BuildingAddress"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCBUILDINGSTOREY",
+        kind: EntityKind::Spatial(SpatialKind::Storey),
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            SPATIAL_TAIL,
+            SPATIAL_STRUCT_TAIL,
+            &["Elevation"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCSPACE",
+        kind: EntityKind::Spatial(SpatialKind::Space),
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            SPATIAL_TAIL,
+            SPATIAL_STRUCT_TAIL,
+            &["PredefinedType", "ElevationWithFlooring"]
+        ),
+    },
+    // ---- Building elements (IfcRoot+Object+Product+Element + own) ----
+    EntitySchema {
+        keyword: "IFCWALL",
+        kind: EntityKind::Product,
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCWALLSTANDARDCASE",
+        kind: EntityKind::Product,
+        // IfcWallStandardCase adds no attributes over IfcWall.
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCCOLUMN",
+        kind: EntityKind::Product,
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCBEAM",
+        kind: EntityKind::Product,
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCSLAB",
+        kind: EntityKind::Product,
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCDOOR",
+        kind: EntityKind::Product,
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &[
+                "OverallHeight",
+                "OverallWidth",
+                "PredefinedType",
+                "OperationType",
+                "UserDefinedOperationType"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCWINDOW",
+        kind: EntityKind::Product,
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &[
+                "OverallHeight",
+                "OverallWidth",
+                "PredefinedType",
+                "PartitioningType",
+                "UserDefinedPartitioningType"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCOPENINGELEMENT",
+        kind: EntityKind::Product,
+        // IfcFeatureElement/Subtraction add no attributes; own:
+        // PredefinedType.
+        attrs: chain!(
+            ROOT,
+            OBJECT_TAIL,
+            PRODUCT_TAIL,
+            ELEMENT_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    // ---- Relationships ----
+    EntitySchema {
+        keyword: "IFCRELAGGREGATES",
+        kind: EntityKind::RelAggregates,
+        // IfcRoot + IfcRelDecomposes(none) + RelatingObject, RelatedObjects.
+        attrs: chain!(ROOT, &["RelatingObject", "RelatedObjects"]),
+    },
+    EntitySchema {
+        keyword: "IFCRELCONTAINEDINSPATIALSTRUCTURE",
+        kind: EntityKind::RelContained,
+        // IfcRoot + IfcRelConnects(none) + RelatedElements, RelatingStructure.
+        attrs: chain!(ROOT, &["RelatedElements", "RelatingStructure"]),
+    },
+    // ---- Placement ----
+    EntitySchema {
+        keyword: "IFCLOCALPLACEMENT",
+        kind: EntityKind::Placement,
+        attrs: chain!(&["PlacementRelTo", "RelativePlacement"]),
+    },
+    // ---- Representation / context ----
+    EntitySchema {
+        keyword: "IFCPRODUCTDEFINITIONSHAPE",
+        kind: EntityKind::Representation,
+        attrs: chain!(&["Name", "Description", "Representations"]),
+    },
+    EntitySchema {
+        keyword: "IFCGEOMETRICREPRESENTATIONCONTEXT",
+        kind: EntityKind::Representation,
+        // IfcRepresentationContext(ContextIdentifier, ContextType) +
+        // IfcGeometricRepresentationContext(4).
+        attrs: chain!(
+            &["ContextIdentifier", "ContextType"],
+            &[
+                "CoordinateSpaceDimension",
+                "Precision",
+                "WorldCoordinateSystem",
+                "TrueNorth"
+            ]
+        ),
+    },
+];
+
+/// Look up the [`EntitySchema`] for an entity keyword
+/// (case-insensitive). Returns `None` for keywords outside the typed
+/// core slice — the caller keeps the positional view in that case.
+pub fn schema_of(keyword: &str) -> Option<&'static EntitySchema> {
+    let want = keyword.to_ascii_uppercase();
+    SCHEMA.iter().find(|s| s.keyword == want)
+}
+
+/// A schema-typed view of one parsed instance: positional [`Value`]s
+/// resolved to attribute names per the IFC 4 EXPRESS schema.
+///
+/// Construct via [`TypedEntity::new`] (returns `None` when the keyword
+/// is outside the typed slice). The view borrows the instance; cloning
+/// it is cheap (two references).
+#[derive(Debug, Clone, Copy)]
+pub struct TypedEntity<'a> {
+    inst: &'a ParsedInstance,
+    schema: &'static EntitySchema,
+}
+
+impl<'a> TypedEntity<'a> {
+    /// Build a typed view, or `None` if the instance's keyword has no
+    /// schema entry in the core slice.
+    pub fn new(inst: &'a ParsedInstance) -> Option<Self> {
+        schema_of(&inst.keyword).map(|schema| Self { inst, schema })
+    }
+
+    /// The underlying parsed instance.
+    pub fn instance(&self) -> &'a ParsedInstance {
+        self.inst
+    }
+
+    /// The instance id (`#id`).
+    pub fn id(&self) -> u64 {
+        self.inst.id
+    }
+
+    /// The entity keyword (upper-cased, `"IFCWALL"`).
+    pub fn keyword(&self) -> &'a str {
+        &self.inst.keyword
+    }
+
+    /// The entity's structural role.
+    pub fn kind(&self) -> EntityKind {
+        self.schema.kind
+    }
+
+    /// Resolve an attribute by EXPRESS name (case-sensitive — names
+    /// match the schema declaration exactly, e.g. `"GlobalId"`).
+    ///
+    /// Returns `None` when the name is not an attribute of this entity,
+    /// or when the instance's argument list is shorter than the schema
+    /// (a truncated record — the trailing optional attributes are then
+    /// treated as absent).
+    pub fn attr(&self, name: &str) -> Option<&'a Value> {
+        let idx = self.schema.attrs.iter().position(|a| *a == name)?;
+        self.inst.args.get(idx)
+    }
+
+    /// Iterate `(attribute_name, value)` pairs in serialisation order.
+    /// Stops at the shorter of the schema length and the argument count
+    /// (so a truncated record yields only the attributes it carries).
+    pub fn attrs(&self) -> impl Iterator<Item = (&'static str, &'a Value)> {
+        self.schema.attrs.iter().copied().zip(self.inst.args.iter())
+    }
+
+    /// The `GlobalId` (IfcRoot.GlobalId) as a string, when present.
+    pub fn global_id(&self) -> Option<&'a str> {
+        self.attr("GlobalId")?.as_str()
+    }
+
+    /// The `Name` (IfcRoot.Name) as a string, when present and set.
+    pub fn name(&self) -> Option<&'a str> {
+        self.attr("Name")?.as_str()
+    }
+
+    /// The `Description` (IfcRoot.Description) as a string, when set.
+    pub fn description(&self) -> Option<&'a str> {
+        self.attr("Description")?.as_str()
+    }
+
+    /// The `#id` of the entity's `ObjectPlacement`, when it carries one
+    /// (products / spatial elements). `None` for entities without the
+    /// attribute or when it is `$`.
+    pub fn object_placement(&self) -> Option<u64> {
+        self.attr("ObjectPlacement")?.as_reference()
+    }
+
+    /// The `#id` of the entity's shape `Representation`
+    /// (`IfcProductDefinitionShape`), when present and set.
+    pub fn representation(&self) -> Option<u64> {
+        self.attr("Representation")?.as_reference()
+    }
+
+    /// The `PredefinedType` enum literal, when the entity declares one
+    /// and it is set (e.g. `"OPENING"` on an opening element).
+    pub fn predefined_type(&self) -> Option<&'a str> {
+        self.attr("PredefinedType")?.as_enum()
+    }
+}
+
+/// A resolved spatial-structure model: the typed entity graph with the
+/// composition + containment relationships followed into a navigable
+/// tree.
+///
+/// Built by [`Model::from_step`]. It does not copy the instance graph —
+/// it indexes into the borrowed [`StepFile`], recording the parent /
+/// child edges the two structural relationships imply.
+#[derive(Debug, Clone)]
+pub struct Model<'a> {
+    step: &'a StepFile,
+    /// The `#id` of the `IfcProject` root, if exactly one is present.
+    project: Option<u64>,
+    /// `parent -> children` composition edges from `IfcRelAggregates`
+    /// (project→site→building→storey→space).
+    aggregates: BTreeMap<u64, Vec<u64>>,
+    /// `spatial-structure -> contained products` edges from
+    /// `IfcRelContainedInSpatialStructure`.
+    contains: BTreeMap<u64, Vec<u64>>,
+}
+
+impl<'a> Model<'a> {
+    /// Resolve the typed spatial model from a parsed STEP file.
+    ///
+    /// Classifies instances via [`schema_of`], picks the single
+    /// `IfcProject` (if exactly one exists), and folds every
+    /// `IfcRelAggregates` / `IfcRelContainedInSpatialStructure` record
+    /// into parent→children edges. Relationship records that reference
+    /// missing ids are skipped (the dangling edge is dropped, not an
+    /// error — use [`StepFile::dangling_references`] for validation).
+    pub fn from_step(step: &'a StepFile) -> Self {
+        let mut project = None;
+        let mut aggregates: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut contains: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+
+        for inst in step.instances.values() {
+            let Some(view) = TypedEntity::new(inst) else {
+                continue;
+            };
+            match view.kind() {
+                EntityKind::Project => {
+                    // Exactly-one semantics: a second project clears the
+                    // slot to `None` (ambiguous root).
+                    project = match project {
+                        None => Some(inst.id),
+                        Some(_) => None,
+                    };
+                }
+                EntityKind::RelAggregates => {
+                    if let (Some(rel), Some(items)) =
+                        (view.attr("RelatingObject"), view.attr("RelatedObjects"))
+                    {
+                        if let Some(parent) = rel.as_reference() {
+                            let kids = aggregates.entry(parent).or_default();
+                            push_refs(items, kids);
+                        }
+                    }
+                }
+                EntityKind::RelContained => {
+                    if let (Some(items), Some(structure)) =
+                        (view.attr("RelatedElements"), view.attr("RelatingStructure"))
+                    {
+                        if let Some(parent) = structure.as_reference() {
+                            let kids = contains.entry(parent).or_default();
+                            push_refs(items, kids);
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        Self {
+            step,
+            project,
+            aggregates,
+            contains,
+        }
+    }
+
+    /// The backing parsed file.
+    pub fn step(&self) -> &'a StepFile {
+        self.step
+    }
+
+    /// The `#id` of the `IfcProject` root, when the file has exactly
+    /// one.
+    pub fn project_id(&self) -> Option<u64> {
+        self.project
+    }
+
+    /// A typed view of the project root.
+    pub fn project(&self) -> Option<TypedEntity<'a>> {
+        let id = self.project?;
+        TypedEntity::new(self.step.get(id)?)
+    }
+
+    /// Typed view of any instance by id, when it is in the typed slice.
+    pub fn typed(&self, id: u64) -> Option<TypedEntity<'a>> {
+        TypedEntity::new(self.step.get(id)?)
+    }
+
+    /// The composition children of `id` (the `IfcRelAggregates`
+    /// decomposition: site under project, building under site, …).
+    /// Empty when `id` aggregates nothing.
+    pub fn aggregated_children(&self, id: u64) -> &[u64] {
+        self.aggregates.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The products contained directly in the spatial structure `id`
+    /// via `IfcRelContainedInSpatialStructure`. Empty when nothing is
+    /// contained there.
+    pub fn contained_elements(&self, id: u64) -> &[u64] {
+        self.contains.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Every spatial-structure element (site / building / storey /
+    /// space) in the model, as typed views, in ascending id order.
+    pub fn spatial_elements(&self) -> impl Iterator<Item = TypedEntity<'a>> + '_ {
+        self.step.instances.values().filter_map(|inst| {
+            let view = TypedEntity::new(inst)?;
+            matches!(view.kind(), EntityKind::Spatial(_)).then_some(view)
+        })
+    }
+
+    /// Every physical product (`EntityKind::Product`) in the model, as
+    /// typed views, in ascending id order.
+    pub fn products(&self) -> impl Iterator<Item = TypedEntity<'a>> + '_ {
+        self.step.instances.values().filter_map(|inst| {
+            let view = TypedEntity::new(inst)?;
+            matches!(view.kind(), EntityKind::Product).then_some(view)
+        })
+    }
+}
+
+/// Append every `#id` referenced by `value` (a single reference, or the
+/// elements of an aggregate of references) to `out`.
+fn push_refs(value: &Value, out: &mut Vec<u64>) {
+    match value {
+        Value::Reference(id) => out.push(*id),
+        Value::List(items) => {
+            for item in items {
+                if let Value::Reference(id) = item {
+                    out.push(*id);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::parser::parse_step;
+
+    /// Wrap a DATA-section body in a minimal valid IFC4 exchange
+    /// structure.
+    fn wrap(data: &str) -> String {
+        format!(
+            "ISO-10303-21;\nHEADER;\n\
+             FILE_DESCRIPTION((''),'2;1');\n\
+             FILE_NAME('t.ifc','2026-06-12T00:00:00',('a'),('o'),'p','s','auth');\n\
+             FILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n{data}\nENDSEC;\nEND-ISO-10303-21;\n"
+        )
+    }
+
+    fn parse(data: &str) -> StepFile {
+        parse_step(wrap(data).as_bytes()).expect("parse failed")
+    }
+
+    #[test]
+    fn schema_lookup_is_case_insensitive() {
+        assert_eq!(schema_of("IfcWall").unwrap().keyword, "IFCWALL");
+        assert_eq!(schema_of("IFCWALL").unwrap().kind, EntityKind::Product);
+        assert!(schema_of("IFCNOSUCHENTITY").is_none());
+    }
+
+    #[test]
+    fn attr_chain_lengths_match_schema_text() {
+        // The serialised argument counts read off IFC4_ADD2.exp
+        // inheritance chains.
+        let lens = [
+            ("IFCPROJECT", 9), // IfcRoot(4) + IfcContext(5)
+            ("IFCSITE", 14),   // Root4 + Object1 + Product2 + Spatial1 + Struct1 + Site5
+            ("IFCBUILDING", 12),
+            ("IFCBUILDINGSTOREY", 10),
+            ("IFCSPACE", 11),
+            ("IFCWALL", 9), // Root4 + Object1 + Product2 + Element1 + Wall1
+            ("IFCCOLUMN", 9),
+            ("IFCDOOR", 13),   // ...Element1 + Door5
+            ("IFCWINDOW", 13), // ...Element1 + Window5
+            ("IFCOPENINGELEMENT", 9),
+            ("IFCRELAGGREGATES", 6),                  // Root4 + 2
+            ("IFCRELCONTAINEDINSPATIALSTRUCTURE", 6), // Root4 + 2
+            ("IFCLOCALPLACEMENT", 2),
+            ("IFCGEOMETRICREPRESENTATIONCONTEXT", 6),
+        ];
+        for (kw, want) in lens {
+            assert_eq!(
+                schema_of(kw).unwrap().attrs.len(),
+                want,
+                "attr count for {kw}"
+            );
+        }
+    }
+
+    #[test]
+    fn root_attributes_always_lead() {
+        for s in SCHEMA {
+            if s.keyword == "IFCLOCALPLACEMENT"
+                || s.keyword == "IFCGEOMETRICREPRESENTATIONCONTEXT"
+                || s.keyword == "IFCPRODUCTDEFINITIONSHAPE"
+            {
+                continue; // not IfcRoot subtypes
+            }
+            assert_eq!(
+                &s.attrs[..4],
+                ROOT,
+                "{} should lead with IfcRoot",
+                s.keyword
+            );
+        }
+    }
+
+    #[test]
+    fn typed_entity_resolves_named_attributes() {
+        // IfcWall: GlobalId, OwnerHistory, Name, Description, ObjectType,
+        // ObjectPlacement, Representation, Tag, PredefinedType.
+        let f = parse(
+            "#1=IFCWALL('3ZYW',#2,'My Wall','desc',$,#46,#48,$,.STANDARD.);\n\
+             #2=IFCOWNERHISTORY();\n#46=IFCLOCALPLACEMENT($,#47);",
+        );
+        let w = TypedEntity::new(f.get(1).unwrap()).unwrap();
+        assert_eq!(w.kind(), EntityKind::Product);
+        assert_eq!(w.global_id(), Some("3ZYW"));
+        assert_eq!(w.name(), Some("My Wall"));
+        assert_eq!(w.description(), Some("desc"));
+        assert_eq!(w.object_placement(), Some(46));
+        assert_eq!(w.representation(), Some(48));
+        assert_eq!(w.predefined_type(), Some("STANDARD"));
+        // OwnerHistory is a reference, ObjectType is $.
+        assert_eq!(w.attr("OwnerHistory").unwrap().as_reference(), Some(2));
+        assert!(w.attr("ObjectType").unwrap().is_unset());
+        assert!(w.attr("NoSuchAttr").is_none());
+    }
+
+    #[test]
+    fn typed_entity_iterates_in_serialisation_order() {
+        let f = parse("#1=IFCBUILDINGSTOREY('g',$,'Ground',$,$,$,$,$,.ELEMENT.,0.);");
+        let s = TypedEntity::new(f.get(1).unwrap()).unwrap();
+        let names: Vec<&str> = s.attrs().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "GlobalId",
+                "OwnerHistory",
+                "Name",
+                "Description",
+                "ObjectType",
+                "ObjectPlacement",
+                "Representation",
+                "LongName",
+                "CompositionType",
+                "Elevation",
+            ]
+        );
+        assert_eq!(
+            s.attr("CompositionType").unwrap().as_enum(),
+            Some("ELEMENT")
+        );
+        assert_eq!(s.attr("Elevation").unwrap().as_number(), Some(0.0));
+    }
+
+    #[test]
+    fn model_resolves_spatial_hierarchy() {
+        // project → site → building → storey, with a wall contained in
+        // the storey, linked through IfcRelAggregates +
+        // IfcRelContainedInSpatialStructure.
+        let f = parse(
+            "#1=IFCPROJECT('p',$,'Proj',$,$,$,$,(#20),$);\n\
+             #20=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,1.E-5,$,$);\n\
+             #31=IFCSITE('s',$,'Site',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);\n\
+             #34=IFCBUILDING('b',$,'Bldg',$,$,$,$,$,.ELEMENT.,$,$,$);\n\
+             #38=IFCBUILDINGSTOREY('f',$,'Floor',$,$,$,$,$,.ELEMENT.,0.);\n\
+             #45=IFCWALL('w',$,'Wall',$,$,$,$,$,$);\n\
+             #41=IFCRELAGGREGATES('a1',$,$,$,#34,(#38));\n\
+             #42=IFCRELAGGREGATES('a2',$,$,$,#31,(#34));\n\
+             #43=IFCRELAGGREGATES('a3',$,$,$,#1,(#31));\n\
+             #44=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#45),#38);",
+        );
+        let m = Model::from_step(&f);
+        assert_eq!(m.project_id(), Some(1));
+        assert_eq!(m.project().unwrap().name(), Some("Proj"));
+        assert_eq!(m.aggregated_children(1), &[31]);
+        assert_eq!(m.aggregated_children(31), &[34]);
+        assert_eq!(m.aggregated_children(34), &[38]);
+        assert_eq!(m.contained_elements(38), &[45]);
+        // Walk from project to the wall through both relationship kinds.
+        let site = m.aggregated_children(1)[0];
+        let bldg = m.aggregated_children(site)[0];
+        let storey = m.aggregated_children(bldg)[0];
+        let wall = m.contained_elements(storey)[0];
+        assert_eq!(m.typed(wall).unwrap().global_id(), Some("w"));
+        // Enumerations.
+        assert_eq!(m.spatial_elements().count(), 3); // site/building/storey
+        assert_eq!(m.products().count(), 1); // the wall
+        let kinds: Vec<_> = m.spatial_elements().map(|e| e.kind()).collect();
+        assert!(kinds.contains(&EntityKind::Spatial(SpatialKind::Site)));
+        assert!(kinds.contains(&EntityKind::Spatial(SpatialKind::Building)));
+        assert!(kinds.contains(&EntityKind::Spatial(SpatialKind::Storey)));
+    }
+
+    #[test]
+    fn product_contained_directly_in_site() {
+        // A product can be contained directly in any spatial element,
+        // not only a storey (the column-in-site fixture shape).
+        let f = parse(
+            "#37=IFCPROJECT('p',$,'Project',$,$,$,$,(#40),$);\n\
+             #40=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Plan',3,$,$,$);\n\
+             #44=IFCSITE('s',$,'Site #1',$,$,$,$,$,.ELEMENT.,$,$,$,$,$);\n\
+             #71=IFCCOLUMN('col',$,'Column #1',$,$,#121,#111,$,.COLUMN.);\n\
+             #45=IFCRELAGGREGATES('a',$,$,$,#37,(#44));\n\
+             #116=IFCRELCONTAINEDINSPATIALSTRUCTURE('c',$,$,$,(#71),#44);",
+        );
+        let m = Model::from_step(&f);
+        assert_eq!(m.contained_elements(44), &[71]);
+        let col = m.typed(71).unwrap();
+        assert_eq!(col.kind(), EntityKind::Product);
+        assert_eq!(col.predefined_type(), Some("COLUMN"));
+        assert_eq!(col.object_placement(), Some(121));
+        assert_eq!(col.representation(), Some(111));
+    }
+
+    #[test]
+    fn ambiguous_double_project_clears_root() {
+        let f = parse(
+            "#1=IFCPROJECT('p1',$,'A',$,$,$,$,$,$);\n\
+             #2=IFCPROJECT('p2',$,'B',$,$,$,$,$,$);",
+        );
+        let m = Model::from_step(&f);
+        assert_eq!(m.project_id(), None);
+    }
+
+    #[test]
+    fn untyped_keyword_yields_no_view() {
+        let f = parse("#1=IFCCARTESIANPOINT((0.,0.,0.));");
+        assert!(TypedEntity::new(f.get(1).unwrap()).is_none());
+        let m = Model::from_step(&f);
+        assert!(m.typed(1).is_none());
+        assert_eq!(m.products().count(), 0);
+    }
+
+    #[test]
+    fn truncated_record_treats_trailing_optionals_as_absent() {
+        // A writer that omits trailing optional attributes: only 5 args.
+        let f = parse("#1=IFCWALL('g',$,'Short',$,$);");
+        let w = TypedEntity::new(f.get(1).unwrap()).unwrap();
+        assert_eq!(w.global_id(), Some("g"));
+        assert_eq!(w.name(), Some("Short"));
+        // ObjectPlacement / PredefinedType not serialised → None.
+        assert_eq!(w.object_placement(), None);
+        assert_eq!(w.predefined_type(), None);
+        assert_eq!(w.attrs().count(), 5);
+    }
+
+    #[test]
+    fn dangling_relationship_edges_are_skipped() {
+        let f = parse(
+            "#1=IFCPROJECT('p',$,'P',$,$,$,$,$,$);\n\
+             #41=IFCRELAGGREGATES('a',$,$,$,#1,(#999));",
+        );
+        let m = Model::from_step(&f);
+        // The edge is still recorded (id-level), but resolving #999 is
+        // None — the model does not invent the target.
+        assert_eq!(m.aggregated_children(1), &[999]);
+        assert!(m.typed(999).is_none());
+    }
+}
