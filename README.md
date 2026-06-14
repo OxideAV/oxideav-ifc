@@ -19,7 +19,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations | ✅ this release (tessellation slice); swept solids / Breps / placement transforms later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations + `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + placement slices); swept solids / Breps later |
 
 ## Phase 1 surface
 
@@ -131,18 +131,32 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `IfcShapeRepresentation.Items`, merging the supported items and
   skipping unsupported styles (an axis/box/swept-solid representation
   alongside the tessellated body is the common case).
+* `placement_transform(step, id)` → a [`Transform`] (a 3×3 linear part +
+  translation) for an `IfcObjectPlacement`, folding the
+  `IfcLocalPlacement.PlacementRelTo` chain from a leaf up to the absolute
+  root. Each `IfcAxis2Placement3D(Location, Axis, RefDirection)` becomes
+  an affine map whose rotation columns are the orthonormal placement axes
+  derived by the EXPRESS `IfcBuildAxes` function (Z = normalise(`Axis`),
+  X = `RefDirection` projected ⟂ to Z and normalised, Y = Z × X; absent
+  `Axis`/`RefDirection` default to world Z/X). `TriMesh::transformed` /
+  `TriMesh::transform` apply it to a mesh; cyclic `PlacementRelTo` chains
+  are bounded by a depth cap.
 
 With the `registry` feature, `IfcDecoder` walks every
-`IfcProductDefinitionShape` and emits one `Scene3D` node + mesh per
-tessellated body. The five fixture models decode to 8/24-vertex boxes
-(cube proxy, column, colour cube) and the dense basin mesh; the
-swept-solid wall model reports `Unsupported` (no tessellation present).
+`IfcProductDefinitionShape`, tessellates its supported body items, and
+positions the result in **world space** via the owning product's
+`IfcLocalPlacement` chain — one `Scene3D` node + mesh per tessellated
+body. The product owning a shape is found by back-scanning for the
+instance whose `Representation` references the shape (so geometry-bearing
+products outside the typed schema slice, e.g. `IfcBuildingElementProxy`,
+are still placed). The five fixture models decode to 8/24-vertex boxes
+(cube proxy, column, colour cube) and the dense basin mesh; the column
+body lands at its placed origin `(432, 288, 48)`. The swept-solid wall
+model reports `Unsupported` (no tessellation present).
 
 Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), Breps
-(`IfcFacetedBrep`), boolean results, mapped items, `IfcLocalPlacement`
-world-positioning, and EXPRESS WHERE-rule validation. Tessellated
-vertices are currently emitted in their local space (no placement
-transform applied).
+(`IfcFacetedBrep`), boolean results, mapped items, and EXPRESS WHERE-rule
+validation.
 
 ## Cargo features
 

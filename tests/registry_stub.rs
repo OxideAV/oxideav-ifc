@@ -50,6 +50,39 @@ fn decode_column_fixture_yields_scene() {
 }
 
 #[test]
+fn decode_column_positions_body_in_world_space() {
+    // The column body's local vertices range ±4 in X/Y; its product
+    // placement translates the body to (432, 288, 48) in world space, so
+    // the decoded scene's vertices must reflect that offset rather than
+    // sitting at the local origin.
+    let mut decoder = make_decoder();
+    let scene = decoder.decode(COLUMN).expect("column fixture decodes");
+
+    let positions: Vec<[f32; 3]> = scene
+        .meshes
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .flat_map(|p| p.positions.iter().copied())
+        .collect();
+    assert_eq!(positions.len(), 24);
+
+    // Local body extents are within ±4 of the placement origin, so every
+    // X is in [428, 436], every Y in [284, 292], every Z in [48, 168].
+    for [x, y, z] in &positions {
+        assert!((428.0..=436.0).contains(x), "x out of placed range: {x}");
+        assert!((284.0..=292.0).contains(y), "y out of placed range: {y}");
+        assert!((48.0..=168.0).contains(z), "z out of placed range: {z}");
+    }
+    // At least one vertex sits at the minimum corner (428, 292, 48).
+    assert!(
+        positions
+            .iter()
+            .any(|p| (p[0] - 428.0).abs() < 1e-3 && (p[2] - 48.0).abs() < 1e-3),
+        "expected a vertex at the placed base corner"
+    );
+}
+
+#[test]
 fn decode_swept_solid_model_reports_unsupported() {
     let mut decoder = make_decoder();
     match decoder.decode(WALL) {

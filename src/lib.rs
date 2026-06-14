@@ -50,11 +50,15 @@
 //! * [`mesh_from_shape_representation`] / [`mesh_from_product_shape`] —
 //!   the walk from a product's `Representation` down to its body items,
 //!   merging supported items and skipping unsupported geometry styles.
+//! * [`placement_transform`] — the world [`Transform`] for an
+//!   `IfcObjectPlacement`, folding the `IfcLocalPlacement.PlacementRelTo`
+//!   chain with each `IfcAxis2Placement3D` resolved through the EXPRESS
+//!   `IfcBuildAxes` axis derivation.
 //!
 //! With the `registry` feature, [`IfcDecoder`] lifts every tessellated
-//! product shape into an `oxideav_mesh3d::Scene3D`. Swept solids,
-//! Breps, boolean results, mapped items, and `IfcLocalPlacement`
-//! world-positioning are later Phase-3 slices.
+//! product shape into an `oxideav_mesh3d::Scene3D`, positioned in world
+//! space by the owning product's placement chain. Swept solids, Breps,
+//! boolean results, and mapped items are later Phase-3 slices.
 //!
 //! ## Standalone build
 //!
@@ -87,8 +91,8 @@ pub mod decoder;
 
 pub use error::{Error, Result};
 pub use geometry::{
-    mesh_from_product_shape, mesh_from_shape_representation, tessellate_item, GeometryError,
-    TriMesh,
+    mesh_from_product_shape, mesh_from_shape_representation, placement_transform, tessellate_item,
+    GeometryError, Transform, TriMesh,
 };
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use parser::{

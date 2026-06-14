@@ -2,7 +2,10 @@
 //! (buildingSMART Sample-Test-Files, CC-BY 4.0 — see README). These
 //! exercise the std-only `geometry` API; no `registry` feature needed.
 
-use oxideav_ifc::{parse_step, tessellate_item, GeometryError, TriMesh};
+use oxideav_ifc::{
+    mesh_from_product_shape, parse_step, placement_transform, tessellate_item, GeometryError,
+    TriMesh,
+};
 
 const BASIN: &[u8] = include_bytes!("fixtures/ifc4-basin-tessellation.ifc");
 const COLUMN: &[u8] = include_bytes!("fixtures/ifc4-column-straight-rectangle-tessellation.ifc");
@@ -61,6 +64,31 @@ fn basin_mesh_indices_all_in_range() {
     for [a, b, c] in &m.triangles {
         assert!((*a as usize) < n && (*b as usize) < n && (*c as usize) < n);
     }
+}
+
+#[test]
+fn column_placement_positions_body_in_world_space() {
+    // The column #71 is placed by #121 = IFCLOCALPLACEMENT(#67, #126),
+    // where #126 = IFCAXIS2PLACEMENT3D((432,288,48), Z=[0,0,1], X=[1,0,0])
+    // relative to #67 = IFCLOCALPLACEMENT($, #69) at the origin. So the
+    // world transform is a pure translation by (432, 288, 48).
+    let f = parse_step(COLUMN).expect("parse");
+    let t = placement_transform(&f, 121).expect("placement");
+
+    // Local body vertex #287 row 1 = (-4, 4, 0) → world (428, 292, 48).
+    let local = mesh_from_product_shape(&f, 111).expect("body mesh");
+    let world = local.transformed(&t);
+    assert_eq!(world.vertex_count(), local.vertex_count());
+    assert_eq!(world.triangles, local.triangles);
+
+    let w0 = world.positions[0];
+    assert!((w0[0] - 428.0).abs() < 1e-9, "x {w0:?}");
+    assert!((w0[1] - 292.0).abs() < 1e-9, "y {w0:?}");
+    assert!((w0[2] - 48.0).abs() < 1e-9, "z {w0:?}");
+
+    // Local top row #287 entry 5 = (-4, 4, 120) → world (428, 292, 168).
+    let w_top = world.positions[4];
+    assert!((w_top[2] - 168.0).abs() < 1e-9, "top z {w_top:?}");
 }
 
 #[test]

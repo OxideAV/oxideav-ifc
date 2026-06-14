@@ -240,6 +240,320 @@ pub fn mesh_from_product_shape(
     }
 }
 
+impl TriMesh {
+    /// Return a copy of this mesh with every vertex mapped through
+    /// `xform` (triangle connectivity is unchanged).
+    pub fn transformed(&self, xform: &Transform) -> TriMesh {
+        TriMesh {
+            positions: self.positions.iter().map(|p| xform.apply(*p)).collect(),
+            triangles: self.triangles.clone(),
+        }
+    }
+
+    /// Map every vertex through `xform` in place.
+    pub fn transform(&mut self, xform: &Transform) {
+        for p in &mut self.positions {
+            *p = xform.apply(*p);
+        }
+    }
+}
+
+// =====================================================================
+// IfcLocalPlacement world-positioning
+//
+// A product's `ObjectPlacement` is (for the common case) an
+// `IfcLocalPlacement(PlacementRelTo, RelativePlacement)` where
+// `RelativePlacement` is an `IfcAxis2Placement3D(Location, Axis,
+// RefDirection)`. Each placement defines an affine map from the
+// product's local space into the coordinate space of its parent
+// placement (`PlacementRelTo`); chaining the maps from a leaf up to the
+// root (where `PlacementRelTo` is absent) gives the world transform.
+//
+// The rotation columns are the three orthonormal axes derived by the
+// EXPRESS `IfcBuildAxes(Axis, RefDirection)` function (IFC4 EXPRESS,
+// `IfcGeometricConstraintResource` / `IfcGeometryResource`):
+//   Z = normalise(Axis)                     (default [0,0,1])
+//   X = first-proj-axis(Z, RefDirection)    (RefDirection made ⟂ to Z)
+//   Y = normalise(Z × X)
+// and the translation is the placement `Location`.
+// =====================================================================
+
+/// A 3-D affine transform: a 3×3 linear part (column-major: `cols[0]`
+/// is the image of the local X axis, etc.) plus a translation.
+///
+/// Built from an `IfcAxis2Placement3D`, where the columns are the
+/// orthonormal placement axes (`P[1]`, `P[2]`, `P[3]`) derived per the
+/// EXPRESS `IfcBuildAxes` function and the translation is the placement
+/// `Location`. Composition follows the `IfcLocalPlacement.PlacementRelTo`
+/// chain.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Transform {
+    /// Column-major 3×3 linear part: `cols[i]` is the world-space image
+    /// of local basis vector *i* (X, Y, Z).
+    pub cols: [[f64; 3]; 3],
+    /// Translation (the placement origin in parent space).
+    pub translation: [f64; 3],
+}
+
+impl Default for Transform {
+    fn default() -> Self {
+        Self::IDENTITY
+    }
+}
+
+impl Transform {
+    /// The identity transform (no rotation, no translation).
+    pub const IDENTITY: Transform = Transform {
+        cols: [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]],
+        translation: [0.0, 0.0, 0.0],
+    };
+
+    /// Map a local point into this transform's parent space:
+    /// `R · p + t`.
+    pub fn apply(&self, p: [f64; 3]) -> [f64; 3] {
+        let [cx, cy, cz] = self.cols;
+        [
+            cx[0] * p[0] + cy[0] * p[1] + cz[0] * p[2] + self.translation[0],
+            cx[1] * p[0] + cy[1] * p[1] + cz[1] * p[2] + self.translation[1],
+            cx[2] * p[0] + cy[2] * p[1] + cz[2] * p[2] + self.translation[2],
+        ]
+    }
+
+    /// Compose two transforms: `self ∘ other` applies `other` first,
+    /// then `self` (i.e. `self.compose(other).apply(p) ==
+    /// self.apply(other.apply(p))`). Used to fold a child placement into
+    /// its parent's coordinate space.
+    pub fn compose(&self, other: &Transform) -> Transform {
+        let mut cols = [[0.0; 3]; 3];
+        for (j, col) in other.cols.iter().enumerate() {
+            // The image of `other`'s j-th column under `self`'s linear
+            // part (no translation — these are direction vectors).
+            let [sx, sy, sz] = self.cols;
+            cols[j] = [
+                sx[0] * col[0] + sy[0] * col[1] + sz[0] * col[2],
+                sx[1] * col[0] + sy[1] * col[1] + sz[1] * col[2],
+                sx[2] * col[0] + sy[2] * col[1] + sz[2] * col[2],
+            ];
+        }
+        Transform {
+            cols,
+            translation: self.apply(other.translation),
+        }
+    }
+}
+
+/// Resolve the **world** transform of an `IfcObjectPlacement` id by
+/// folding its `IfcLocalPlacement.PlacementRelTo` chain from this
+/// placement up to the (absolute) root.
+///
+/// `world = root ∘ … ∘ parent ∘ self`. A placement whose `PlacementRelTo`
+/// is `$` is absolute (its transform is composed against the identity).
+/// A self-referential or cyclic `PlacementRelTo` chain is broken at the
+/// `max_depth` cap and the partial composition returned (the file is
+/// malformed, but extraction stays bounded).
+///
+/// Only `IfcLocalPlacement` with an `IfcAxis2Placement3D` relative
+/// placement is interpreted; any other placement kind (grid / linear /
+/// 2-D) contributes identity, so its geometry stays in local space
+/// rather than being dropped.
+pub fn placement_transform(step: &StepFile, placement_id: u64) -> Result<Transform, GeometryError> {
+    // Walk parent-ward collecting each link's local transform, then fold
+    // root-first so the outermost placement is applied last.
+    const MAX_DEPTH: usize = 4096;
+    let mut chain: Vec<Transform> = Vec::new();
+    let mut current = Some(placement_id);
+    let mut depth = 0usize;
+    while let Some(id) = current {
+        if depth >= MAX_DEPTH {
+            break;
+        }
+        depth += 1;
+        let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+        match inst.keyword.as_str() {
+            "IFCLOCALPLACEMENT" => {
+                // (PlacementRelTo, RelativePlacement)
+                let rel_id = inst
+                    .args
+                    .get(1)
+                    .and_then(Value::as_reference)
+                    .ok_or(GeometryError::BadCoordinates)?;
+                chain.push(axis2_placement_3d(step, rel_id)?);
+                current = inst.args.first().and_then(Value::as_reference);
+            }
+            // Non-local placement kinds are not interpreted in this slice;
+            // treat as identity (geometry stays in its local frame).
+            _ => break,
+        }
+    }
+    // Fold root-first: world = root ∘ … ∘ leaf.
+    let mut world = Transform::IDENTITY;
+    for link in chain.iter().rev() {
+        world = world.compose(link);
+    }
+    Ok(world)
+}
+
+/// Build the affine transform of one `IfcAxis2Placement3D`
+/// (`Location`, `Axis`, `RefDirection`) per the EXPRESS `IfcBuildAxes`
+/// derivation. `$`/absent `Axis` and `RefDirection` default to the
+/// world Z and X directions.
+fn axis2_placement_3d(step: &StepFile, id: u64) -> Result<Transform, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCAXIS2PLACEMENT3D" {
+        // A 2-D or other placement is out of this slice's scope — keep
+        // the geometry in local space rather than mis-transforming it.
+        return Ok(Transform::IDENTITY);
+    }
+    let location = cartesian_point(step, inst.args.first())?;
+    let axis = direction(step, inst.args.get(1))?;
+    let ref_dir = direction(step, inst.args.get(2))?;
+    let [x, y, z] = build_axes(axis, ref_dir);
+    Ok(Transform {
+        cols: [x, y, z],
+        translation: location,
+    })
+}
+
+/// Resolve an `IfcCartesianPoint` reference to a 3-D coordinate,
+/// zero-padding a 2-D point's Z to 0.
+fn cartesian_point(step: &StepFile, arg: Option<&Value>) -> Result<[f64; 3], GeometryError> {
+    let id = arg
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCCARTESIANPOINT" {
+        return Err(GeometryError::BadCoordinates);
+    }
+    let comps = inst
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinate)?;
+    if comps.len() < 2 || comps.len() > 3 {
+        return Err(GeometryError::BadCoordinate);
+    }
+    let mut out = [0.0f64; 3];
+    for (i, c) in comps.iter().enumerate() {
+        out[i] = c.as_number().ok_or(GeometryError::BadCoordinate)?;
+    }
+    Ok(out)
+}
+
+/// Resolve an optional `IfcDirection` reference to a 3-D ratio vector
+/// (`$`/absent → `None`), zero-padding a 2-D direction's Z to 0.
+fn direction(step: &StepFile, arg: Option<&Value>) -> Result<Option<[f64; 3]>, GeometryError> {
+    let id = match arg {
+        None | Some(Value::Unset) => return Ok(None),
+        Some(v) => v.as_reference().ok_or(GeometryError::BadCoordinates)?,
+    };
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCDIRECTION" {
+        return Err(GeometryError::BadCoordinates);
+    }
+    let comps = inst
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinate)?;
+    if comps.len() < 2 || comps.len() > 3 {
+        return Err(GeometryError::BadCoordinate);
+    }
+    let mut out = [0.0f64; 3];
+    for (i, c) in comps.iter().enumerate() {
+        out[i] = c.as_number().ok_or(GeometryError::BadCoordinate)?;
+    }
+    Ok(Some(out))
+}
+
+// --- EXPRESS placement-axis derivation (IfcBuildAxes) ---------------
+//
+// These mirror the EXPRESS functions IfcBuildAxes / IfcFirstProjAxis /
+// IfcNormalise / IfcCrossProduct / IfcDotProduct, restricted to the 3-D
+// real-vector case (no IfcVector magnitude wrapper — every input here is
+// an IfcDirection).
+
+/// `IfcBuildAxes(Axis, RefDirection)` → the orthonormal placement axes
+/// `[X, Y, Z]` (returned as `[P1, P2, P3]`).
+fn build_axes(axis: Option<[f64; 3]>, ref_dir: Option<[f64; 3]>) -> [[f64; 3]; 3] {
+    // D1 = NVL(normalise(Axis), [0,0,1]); the default Z direction.
+    let d1 = axis.and_then(normalise).unwrap_or([0.0, 0.0, 1.0]);
+    let d2 = first_proj_axis(d1, ref_dir);
+    // P2 = normalise(D1 × D2); D1 and D2 are already orthonormal so the
+    // cross product has unit magnitude, but normalise for numerical
+    // hygiene. P3 = D1 (the Z axis).
+    let p2 = normalise(cross(d1, d2)).unwrap_or_else(|| cross(d1, d2));
+    [d2, p2, d1]
+}
+
+/// `IfcFirstProjAxis(ZAxis, Arg)` → the placement X axis: `Arg` (or a
+/// default) projected into the plane ⟂ `ZAxis`, then normalised.
+fn first_proj_axis(z_axis: [f64; 3], arg: Option<[f64; 3]>) -> [f64; 3] {
+    let z = normalise(z_axis).unwrap_or([0.0, 0.0, 1.0]);
+    // Choose V: the given RefDirection (normalised), or a world axis not
+    // parallel to Z when RefDirection is absent.
+    let v = match arg.and_then(normalise) {
+        Some(v) => v,
+        None => {
+            if z != [1.0, 0.0, 0.0] {
+                [1.0, 0.0, 0.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            }
+        }
+    };
+    // XVec = (V · Z) · Z ; XAxis = normalise(V − XVec).
+    let vz = dot(v, z);
+    let x_vec = [vz * z[0], vz * z[1], vz * z[2]];
+    let diff = [v[0] - x_vec[0], v[1] - x_vec[1], v[2] - x_vec[2]];
+    // If V is parallel to Z the difference is ~0; fall back to a world
+    // axis ⟂ to Z so the basis stays well-formed.
+    normalise(diff).unwrap_or_else(|| {
+        let fallback = if z != [1.0, 0.0, 0.0] {
+            [1.0, 0.0, 0.0]
+        } else {
+            [0.0, 1.0, 0.0]
+        };
+        let d = dot(fallback, z);
+        let proj = [
+            fallback[0] - d * z[0],
+            fallback[1] - d * z[1],
+            fallback[2] - d * z[2],
+        ];
+        normalise(proj).unwrap_or([1.0, 0.0, 0.0])
+    })
+}
+
+/// `IfcNormalise` for a 3-D direction: unit vector, or `None` for a
+/// zero-magnitude input.
+fn normalise(v: [f64; 3]) -> Option<[f64; 3]> {
+    let mag = (v[0] * v[0] + v[1] * v[1] + v[2] * v[2]).sqrt();
+    if mag > 0.0 {
+        Some([v[0] / mag, v[1] / mag, v[2] / mag])
+    } else {
+        None
+    }
+}
+
+/// `IfcDotProduct` of two 3-D directions (both normalised first, per the
+/// EXPRESS definition).
+fn dot(a: [f64; 3], b: [f64; 3]) -> f64 {
+    let a = normalise(a).unwrap_or(a);
+    let b = normalise(b).unwrap_or(b);
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// `IfcCrossProduct` orientation of two 3-D directions (both normalised
+/// first, per the EXPRESS definition; the magnitude wrapper is dropped).
+fn cross(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    let a = normalise(a).unwrap_or(a);
+    let b = normalise(b).unwrap_or(b);
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 /// Append `src` onto `dst`, offsetting `src`'s triangle indices by the
 /// vertex count already in `dst`.
 fn append_mesh(dst: &mut TriMesh, src: TriMesh) {
@@ -524,6 +838,146 @@ mod tests {
             tessellate_item(&f, 2).unwrap_err(),
             GeometryError::IndexOutOfRange
         );
+    }
+
+    fn approx(a: [f64; 3], b: [f64; 3]) {
+        for i in 0..3 {
+            assert!((a[i] - b[i]).abs() < 1e-9, "axis {i}: {a:?} != {b:?}");
+        }
+    }
+
+    #[test]
+    fn default_axes_are_world_identity() {
+        // Axis = $, RefDirection = $ → X=[1,0,0] Y=[0,1,0] Z=[0,0,1].
+        let [x, y, z] = build_axes(None, None);
+        approx(x, [1.0, 0.0, 0.0]);
+        approx(y, [0.0, 1.0, 0.0]);
+        approx(z, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn explicit_z_and_x_axes_round_trip() {
+        // Axis=[0,0,1] RefDirection=[1,0,0] is the canonical identity
+        // basis, just written out explicitly.
+        let [x, y, z] = build_axes(Some([0.0, 0.0, 1.0]), Some([1.0, 0.0, 0.0]));
+        approx(x, [1.0, 0.0, 0.0]);
+        approx(y, [0.0, 1.0, 0.0]);
+        approx(z, [0.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn ref_direction_is_orthogonalised_against_axis() {
+        // Z=[0,0,1], RefDirection=[1,1,0] (not unit, not ⟂ to Z but
+        // already in-plane): X must be normalised [1,1,0], Y = Z×X.
+        let [x, y, z] = build_axes(Some([0.0, 0.0, 1.0]), Some([1.0, 1.0, 0.0]));
+        let s = 1.0 / 2f64.sqrt();
+        approx(x, [s, s, 0.0]);
+        approx(z, [0.0, 0.0, 1.0]);
+        // Y = Z × X = [-s, s, 0].
+        approx(y, [-s, s, 0.0]);
+    }
+
+    #[test]
+    fn ref_direction_projected_out_of_plane_component() {
+        // Z=[0,0,1], RefDirection=[1,0,1]: the Z component is projected
+        // away, leaving X=[1,0,0].
+        let [x, _y, z] = build_axes(Some([0.0, 0.0, 1.0]), Some([1.0, 0.0, 1.0]));
+        approx(z, [0.0, 0.0, 1.0]);
+        approx(x, [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn rotated_axis_builds_orthonormal_basis() {
+        // Z pointing along world +X. Default RefDirection handling must
+        // still yield an orthonormal right-handed basis.
+        let [x, y, z] = build_axes(Some([1.0, 0.0, 0.0]), None);
+        approx(z, [1.0, 0.0, 0.0]);
+        // X ⟂ Z, Y = Z × X — verify orthonormality + handedness.
+        assert!((dot(x, z)).abs() < 1e-9);
+        assert!((dot(y, z)).abs() < 1e-9);
+        assert!((dot(x, y)).abs() < 1e-9);
+        approx(cross(z, x), y);
+    }
+
+    #[test]
+    fn placement_transform_translates_to_location() {
+        // A single absolute IfcLocalPlacement at (10,20,30), identity
+        // rotation → a point at local origin maps to (10,20,30).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((10.,20.,30.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCLOCALPLACEMENT($,#2);",
+        );
+        let t = placement_transform(&f, 3).unwrap();
+        approx(t.apply([0.0, 0.0, 0.0]), [10.0, 20.0, 30.0]);
+        approx(t.apply([1.0, 2.0, 3.0]), [11.0, 22.0, 33.0]);
+    }
+
+    #[test]
+    fn placement_transform_composes_chain() {
+        // Parent translates by (100,0,0); child translates by (0,5,0)
+        // relative to parent → world (100,5,0) for the child origin.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((100.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCLOCALPLACEMENT($,#2);\n\
+             #4=IFCCARTESIANPOINT((0.,5.,0.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCLOCALPLACEMENT(#3,#5);",
+        );
+        let t = placement_transform(&f, 6).unwrap();
+        approx(t.apply([0.0, 0.0, 0.0]), [100.0, 5.0, 0.0]);
+        approx(t.apply([1.0, 1.0, 1.0]), [101.0, 6.0, 1.0]);
+    }
+
+    #[test]
+    fn placement_transform_rotation_then_translation() {
+        // Z=+Y (90° rotation mapping local +Z onto world +Y) with a
+        // translation: verify the rotation is applied to local axes
+        // before the translation.
+        // Axis (local Z) = world +Y; RefDirection (local X) = world +X.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCDIRECTION((0.,1.,0.));\n\
+             #3=IFCDIRECTION((1.,0.,0.));\n\
+             #4=IFCAXIS2PLACEMENT3D(#1,#2,#3);\n\
+             #5=IFCLOCALPLACEMENT($,#4);",
+        );
+        let t = placement_transform(&f, 5).unwrap();
+        // local +Z (0,0,1) → world +Y (0,1,0).
+        approx(t.apply([0.0, 0.0, 1.0]), [0.0, 1.0, 0.0]);
+        // local +X (1,0,0) → world +X (1,0,0).
+        approx(t.apply([1.0, 0.0, 0.0]), [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn placement_cycle_is_bounded() {
+        // A self-referential PlacementRelTo must not loop forever.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCLOCALPLACEMENT(#3,#2);",
+        );
+        // Should return Ok within the depth cap (identity translation).
+        let t = placement_transform(&f, 3).unwrap();
+        approx(t.apply([7.0, 8.0, 9.0]), [7.0, 8.0, 9.0]);
+    }
+
+    #[test]
+    fn trimesh_transform_applies_to_all_vertices() {
+        let mut m = TriMesh {
+            positions: vec![[0.0, 0.0, 0.0], [1.0, 0.0, 0.0]],
+            triangles: vec![],
+        };
+        let t = Transform {
+            cols: Transform::IDENTITY.cols,
+            translation: [5.0, 0.0, 0.0],
+        };
+        let moved = m.transformed(&t);
+        approx(moved.positions[0], [5.0, 0.0, 0.0]);
+        approx(moved.positions[1], [6.0, 0.0, 0.0]);
+        m.transform(&t);
+        approx(m.positions[0], [5.0, 0.0, 0.0]);
     }
 
     #[test]

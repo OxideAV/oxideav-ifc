@@ -6,6 +6,32 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (placement slice): `IfcLocalPlacement` world-positioning.
+  - `Transform { cols, translation }` — a 3-D affine map (column-major
+    3×3 linear part + translation) with `apply` / `compose` and an
+    `IDENTITY` constant.
+  - `placement_transform(step, id)` — folds an `IfcObjectPlacement`'s
+    `IfcLocalPlacement.PlacementRelTo` chain (leaf → absolute root) into
+    one world transform. Each `IfcAxis2Placement3D(Location, Axis,
+    RefDirection)` resolves its orthonormal rotation columns through the
+    EXPRESS `IfcBuildAxes` derivation (Z = normalise(`Axis`),
+    X = `RefDirection` projected ⟂ to Z and normalised, Y = Z × X;
+    `IfcFirstProjAxis` / `IfcNormalise` / `IfcCrossProduct` /
+    `IfcDotProduct` implemented for the 3-D direction case). Absent
+    `Axis`/`RefDirection` default to world Z/X; cyclic `PlacementRelTo`
+    chains are bounded by a depth cap.
+  - `TriMesh::transformed` / `TriMesh::transform` — map a mesh's
+    vertices through a `Transform`.
+  - `registry` decoder now positions each tessellated body in world
+    space: the owning product (found by back-scanning for the instance
+    whose `Representation` references the shape, so proxy products
+    outside the typed slice are covered) supplies the placement chain.
+    The column fixture's body lands at its placed origin `(432,288,48)`.
+  - 11 placement unit tests (default + explicit + rotated axes,
+    `RefDirection` orthogonalisation, chain composition, rotation-then-
+    translation, cycle bounding, `TriMesh` transform) + a fixture test
+    asserting the column's world coordinates + a decoder test asserting
+    the placed scene extents.
 - Phase 3 (tessellation slice): geometry extraction
   (`oxideav_ifc::geometry`) turning the tessellation representation
   items a product points at into plain triangle meshes. Std-only, so
