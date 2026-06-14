@@ -19,7 +19,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations first, swept solids / Breps later | planned |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations | ✅ this release (tessellation slice); swept solids / Breps / placement transforms later |
 
 ## Phase 1 surface
 
@@ -101,16 +101,58 @@ for site in model.aggregated_children(project.id()) {
   and the two structural relationships. Keywords outside the slice
   resolve to `None` — the positional Phase-1 view is always available.
 
-Still Phase 3: EXPRESS WHERE-rule validation and geometry resolution.
+## Phase 3 surface — tessellated geometry
+
+`oxideav_ifc::geometry` turns the tessellation representation items a
+product points at into plain triangle meshes. It is std-only (available
+in `--no-default-features` builds); the `registry` decoder lifts the
+result into a `Scene3D`.
+
+```rust
+let step = oxideav_ifc::parse_step(&bytes)?;
+let mesh = oxideav_ifc::tessellate_item(&step, face_set_id)?;
+println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
+```
+
+* `TriMesh { positions: Vec<[f64;3]>, triangles: Vec<[u32;3]> }` — a
+  flat indexed mesh in the representation item's local coordinate space.
+  Triangles are **zero-based** (the one-based STEP `CoordIndex` plus any
+  optional `PnIndex` indirection are resolved during extraction).
+* `tessellate_item(step, id)` — one `IfcTriangulatedFaceSet`
+  (`Coordinates`, `Normals`, `Closed`, `CoordIndex`, `PnIndex`) or
+  `IfcPolygonalFaceSet` (`Coordinates`, `Closed`, `Faces`, `PnIndex`,
+  with each `IfcIndexedPolygonalFace` fan-triangulated) → a `TriMesh`.
+  Both read their vertices from the shared `IfcCartesianPointList3D`
+  reached through the `IfcTessellatedFaceSet.Coordinates` supertype
+  attribute. Any other keyword → `GeometryError::Unsupported`.
+* `mesh_from_shape_representation` / `mesh_from_product_shape` — the walk
+  from a product's `Representation` down through
+  `IfcProductDefinitionShape.Representations` →
+  `IfcShapeRepresentation.Items`, merging the supported items and
+  skipping unsupported styles (an axis/box/swept-solid representation
+  alongside the tessellated body is the common case).
+
+With the `registry` feature, `IfcDecoder` walks every
+`IfcProductDefinitionShape` and emits one `Scene3D` node + mesh per
+tessellated body. The five fixture models decode to 8/24-vertex boxes
+(cube proxy, column, colour cube) and the dense basin mesh; the
+swept-solid wall model reports `Unsupported` (no tessellation present).
+
+Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), Breps
+(`IfcFacetedBrep`), boolean results, mapped items, `IfcLocalPlacement`
+world-positioning, and EXPRESS WHERE-rule validation. Tessellated
+vertices are currently emitted in their local space (no placement
+transform applied).
 
 ## Cargo features
 
 * `registry` *(default)* — pulls `oxideav-core` + `oxideav-mesh3d`
   and exposes `IfcDecoder` (a `Mesh3DDecoder`), the `make_decoder()`
   direct constructor, and `register_mesh3d(&mut Mesh3DRegistry)`
-  (format id `"ifc"`, extension `.ifc`). The Phase-1 decoder probes
-  the magic, fully parses + validates the exchange structure, and
-  reports geometry extraction as unsupported until Phase 3.
+  (format id `"ifc"`, extension `.ifc`). The decoder probes the magic,
+  fully parses + validates the exchange structure, and extracts every
+  tessellated product shape into the `Scene3D`; a model with no
+  tessellation (only swept solids / Breps) decodes to `Unsupported`.
 * `--no-default-features` — standalone STEP parser only, std types,
   zero dependencies.
 

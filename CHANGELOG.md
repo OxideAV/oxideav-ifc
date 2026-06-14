@@ -6,6 +6,33 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (tessellation slice): geometry extraction
+  (`oxideav_ifc::geometry`) turning the tessellation representation
+  items a product points at into plain triangle meshes. Std-only, so
+  available in `--no-default-features` builds.
+  - `TriMesh { positions, triangles }` — flat indexed mesh in local
+    coordinate space; triangles are zero-based with the one-based STEP
+    `CoordIndex` and any optional `PnIndex` indirection resolved.
+  - `tessellate_item` — one `IfcTriangulatedFaceSet`
+    (`Coordinates`, `Normals`, `Closed`, `CoordIndex`, `PnIndex`) or
+    `IfcPolygonalFaceSet` (`Coordinates`, `Closed`, `Faces`, `PnIndex`,
+    each `IfcIndexedPolygonalFace` fan-triangulated) → `TriMesh`, both
+    reading the shared `IfcCartesianPointList3D` via the
+    `IfcTessellatedFaceSet.Coordinates` supertype attribute. Other
+    keywords → `GeometryError::Unsupported`.
+  - `mesh_from_shape_representation` / `mesh_from_product_shape` — walk
+    a product's `Representation` →
+    `IfcProductDefinitionShape.Representations` →
+    `IfcShapeRepresentation.Items`, merging supported items and
+    skipping unsupported geometry styles.
+  - `registry` decoder now builds a real `Scene3D`: one node + mesh per
+    tessellated `IfcProductDefinitionShape`. Vertices are emitted in
+    local space (placement transforms are a later slice); a model with
+    no tessellation reports `Unsupported`.
+  - 8 geometry unit tests (incl. `PnIndex` indirection, fan
+    triangulation, out-of-range / zero-index rejection) + 5 fixture
+    integration tests over the real buildingSMART meshes + updated
+    registry-decoder tests asserting populated scenes.
 - Phase 2: EXPRESS schema typing (`oxideav_ifc::schema`) over the
   Phase-1 positional instance graph, for the core IFC 4 entity slice.
   - `EntitySchema` / `SCHEMA` / `schema_of` — static table mapping
@@ -43,8 +70,7 @@ All notable changes to this project will be documented in this file.
   nesting-depth, and string-length caps.
 - `registry` feature (default-on): `IfcDecoder` implementing
   `oxideav_mesh3d::Mesh3DDecoder` (magic probe + structure
-  validation; geometry extraction reports unsupported until
-  Phase 3), `make_decoder()`, and `register_mesh3d()` under format
+  validation), `make_decoder()`, and `register_mesh3d()` under format
   id `"ifc"` / extension `.ifc`.
 - Test suite: 31 unit tests + 10 integration tests, including the
   five buildingSMART IFC 4 sample fixtures (CC-BY 4.0) parsed with

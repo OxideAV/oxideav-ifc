@@ -39,7 +39,22 @@
 //!   `IfcRelContainedInSpatialStructure` into a navigable
 //!   project → site → building → storey → space → element tree.
 //!
-//! Geometry extraction into `Scene3D` is Phase 3.
+//! ## Phase 3 (this release): tessellated-geometry extraction
+//!
+//! [`geometry`] turns the tessellation representation items a product
+//! points at into plain triangle meshes:
+//!
+//! * [`tessellate_item`] — one `IfcTriangulatedFaceSet` /
+//!   `IfcPolygonalFaceSet` → a [`TriMesh`] (one-based STEP indices and
+//!   `PnIndex` indirection resolved).
+//! * [`mesh_from_shape_representation`] / [`mesh_from_product_shape`] —
+//!   the walk from a product's `Representation` down to its body items,
+//!   merging supported items and skipping unsupported geometry styles.
+//!
+//! With the `registry` feature, [`IfcDecoder`] lifts every tessellated
+//! product shape into an `oxideav_mesh3d::Scene3D`. Swept solids,
+//! Breps, boolean results, mapped items, and `IfcLocalPlacement`
+//! world-positioning are later Phase-3 slices.
 //!
 //! ## Standalone build
 //!
@@ -60,6 +75,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod error;
+pub mod geometry;
 pub mod header;
 mod lexer;
 pub mod parser;
@@ -70,6 +86,10 @@ pub mod value;
 pub mod decoder;
 
 pub use error::{Error, Result};
+pub use geometry::{
+    mesh_from_product_shape, mesh_from_shape_representation, tessellate_item, GeometryError,
+    TriMesh,
+};
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use parser::{
     parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
