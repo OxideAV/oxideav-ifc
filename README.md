@@ -100,6 +100,18 @@ for site in model.aggregated_children(project.id()) {
   `IfcProductDefinitionShape`, `IfcGeometricRepresentationContext`,
   and the two structural relationships. Keywords outside the slice
   resolve to `None` — the positional Phase-1 view is always available.
+* Geometric-representation-item primitives (`EntityKind::Geometry`):
+  `IfcCartesianPoint` (`coordinates()`), `IfcDirection`
+  (`direction_ratios()`), `IfcAxis2Placement2D`/`IfcAxis2Placement3D`
+  (`location()`, `axis()`, `ref_direction()`), `IfcPolyline`
+  (`points()`), and `IfcShapeRepresentation` (`context_of_items()`,
+  `representation_identifier()`, `representation_type()`, `items()`).
+  Each attribute order is the EXPRESS inheritance chain (IfcPoint /
+  IfcPlacement / IfcCurve / IfcBoundedCurve / IfcRepresentation /
+  IfcShapeModel supertypes add no serialised attributes). These let the
+  product → shape → placement → point/direction chain be walked entirely
+  by attribute name; they are typed but stay out of the spatial-model
+  `products()` / `spatial_elements()` enumerations.
 
 ## Phase 3 surface — tessellated geometry
 

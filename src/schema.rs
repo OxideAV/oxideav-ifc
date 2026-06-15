@@ -70,6 +70,11 @@ pub enum EntityKind {
     Placement,
     /// A representation / context entity referenced by a product.
     Representation,
+    /// A geometric-representation-item primitive — the core point /
+    /// direction / placement / curve set a representation is built from
+    /// (`IfcCartesianPoint`, `IfcDirection`, `IfcAxis2Placement2D`,
+    /// `IfcAxis2Placement3D`, `IfcPolyline`).
+    Geometry,
     /// Any other typed entity in the table with named attributes but no
     /// special structural role.
     Other,
@@ -357,6 +362,49 @@ pub const SCHEMA: &[EntitySchema] = &[
             ]
         ),
     },
+    EntitySchema {
+        keyword: "IFCSHAPEREPRESENTATION",
+        kind: EntityKind::Representation,
+        // IfcRepresentation(ContextOfItems, RepresentationIdentifier,
+        // RepresentationType, Items); IfcShapeModel /
+        // IfcShapeRepresentation add no serialised attributes.
+        attrs: chain!(&[
+            "ContextOfItems",
+            "RepresentationIdentifier",
+            "RepresentationType",
+            "Items"
+        ]),
+    },
+    // ---- Geometric representation items (core primitive slice) ----
+    EntitySchema {
+        keyword: "IFCCARTESIANPOINT",
+        kind: EntityKind::Geometry,
+        // IfcPoint adds nothing; IfcCartesianPoint(Coordinates).
+        attrs: chain!(&["Coordinates"]),
+    },
+    EntitySchema {
+        keyword: "IFCDIRECTION",
+        kind: EntityKind::Geometry,
+        attrs: chain!(&["DirectionRatios"]),
+    },
+    EntitySchema {
+        keyword: "IFCAXIS2PLACEMENT2D",
+        kind: EntityKind::Geometry,
+        // IfcPlacement(Location) + IfcAxis2Placement2D(RefDirection).
+        attrs: chain!(&["Location", "RefDirection"]),
+    },
+    EntitySchema {
+        keyword: "IFCAXIS2PLACEMENT3D",
+        kind: EntityKind::Geometry,
+        // IfcPlacement(Location) + IfcAxis2Placement3D(Axis, RefDirection).
+        attrs: chain!(&["Location", "Axis", "RefDirection"]),
+    },
+    EntitySchema {
+        keyword: "IFCPOLYLINE",
+        kind: EntityKind::Geometry,
+        // IfcCurve / IfcBoundedCurve add nothing; IfcPolyline(Points).
+        attrs: chain!(&["Points"]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -457,6 +505,94 @@ impl<'a> TypedEntity<'a> {
     /// and it is set (e.g. `"OPENING"` on an opening element).
     pub fn predefined_type(&self) -> Option<&'a str> {
         self.attr("PredefinedType")?.as_enum()
+    }
+
+    // ---- Geometric-primitive accessors -----------------------------
+    //
+    // These read the `EntityKind::Geometry` slice (IfcCartesianPoint /
+    // IfcDirection / IfcAxis2Placement2D/3D / IfcPolyline). Each returns
+    // `None` when called on an entity that does not carry the attribute,
+    // so a non-geometry view simply yields nothing.
+
+    /// The numeric values of an aggregate attribute (a `LIST OF
+    /// IfcLengthMeasure` / `IfcReal`), e.g. an `IfcCartesianPoint`'s
+    /// `Coordinates` or an `IfcDirection`'s `DirectionRatios`.
+    ///
+    /// Each element is read through [`Value::as_number`] so an integer
+    /// literal where the schema says REAL is accepted (a common writer
+    /// deviation). Returns `None` when the attribute is missing or not an
+    /// aggregate; non-numeric members are skipped.
+    fn number_list(&self, name: &str) -> Option<Vec<f64>> {
+        let list = self.attr(name)?.as_list()?;
+        Some(list.iter().filter_map(Value::as_number).collect())
+    }
+
+    /// An `IfcCartesianPoint`'s `Coordinates` as a numeric vector
+    /// (length 2 or 3 per the EXPRESS `LIST [1:3]`), when present.
+    pub fn coordinates(&self) -> Option<Vec<f64>> {
+        self.number_list("Coordinates")
+    }
+
+    /// An `IfcDirection`'s `DirectionRatios` as a numeric vector
+    /// (length 2 or 3 per the EXPRESS `LIST [2:3]`), when present.
+    pub fn direction_ratios(&self) -> Option<Vec<f64>> {
+        self.number_list("DirectionRatios")
+    }
+
+    /// The `#id` of an `IfcPlacement`'s `Location`
+    /// (`IfcAxis2Placement2D` / `IfcAxis2Placement3D` → an
+    /// `IfcCartesianPoint`), when present and set.
+    pub fn location(&self) -> Option<u64> {
+        self.attr("Location")?.as_reference()
+    }
+
+    /// The `#id` of an `IfcAxis2Placement3D`'s `Axis`
+    /// (an `IfcDirection`), when present and set.
+    pub fn axis(&self) -> Option<u64> {
+        self.attr("Axis")?.as_reference()
+    }
+
+    /// The `#id` of an `IfcAxis2Placement2D/3D`'s `RefDirection`
+    /// (an `IfcDirection`), when present and set.
+    pub fn ref_direction(&self) -> Option<u64> {
+        self.attr("RefDirection")?.as_reference()
+    }
+
+    /// The `#id`s of an `IfcPolyline`'s `Points` (a `LIST OF
+    /// IfcCartesianPoint`), in serialisation order, when present.
+    pub fn points(&self) -> Option<Vec<u64>> {
+        self.reference_list("Points")
+    }
+
+    /// The `#id`s of an `IfcShapeRepresentation`'s `Items` (a `SET OF
+    /// IfcRepresentationItem`), when present.
+    pub fn items(&self) -> Option<Vec<u64>> {
+        self.reference_list("Items")
+    }
+
+    /// The `RepresentationIdentifier` label of an
+    /// `IfcShapeRepresentation` (e.g. `"Body"`, `"Axis"`), when set.
+    pub fn representation_identifier(&self) -> Option<&'a str> {
+        self.attr("RepresentationIdentifier")?.as_str()
+    }
+
+    /// The `RepresentationType` label of an `IfcShapeRepresentation`
+    /// (e.g. `"Tessellation"`, `"Curve2D"`), when set.
+    pub fn representation_type(&self) -> Option<&'a str> {
+        self.attr("RepresentationType")?.as_str()
+    }
+
+    /// The `#id` of an `IfcShapeRepresentation`'s `ContextOfItems`
+    /// (an `IfcRepresentationContext`), when present and set.
+    pub fn context_of_items(&self) -> Option<u64> {
+        self.attr("ContextOfItems")?.as_reference()
+    }
+
+    /// Resolve an aggregate-of-references attribute to the ordered list
+    /// of referenced `#id`s, skipping any non-reference members.
+    fn reference_list(&self, name: &str) -> Option<Vec<u64>> {
+        let list = self.attr(name)?.as_list()?;
+        Some(list.iter().filter_map(Value::as_reference).collect())
     }
 }
 
@@ -656,6 +792,12 @@ mod tests {
             ("IFCRELCONTAINEDINSPATIALSTRUCTURE", 6), // Root4 + 2
             ("IFCLOCALPLACEMENT", 2),
             ("IFCGEOMETRICREPRESENTATIONCONTEXT", 6),
+            ("IFCSHAPEREPRESENTATION", 4), // IfcRepresentation(4)
+            ("IFCCARTESIANPOINT", 1),
+            ("IFCDIRECTION", 1),
+            ("IFCAXIS2PLACEMENT2D", 2), // Location + RefDirection
+            ("IFCAXIS2PLACEMENT3D", 3), // Location + Axis + RefDirection
+            ("IFCPOLYLINE", 1),         // Points
         ];
         for (kw, want) in lens {
             assert_eq!(
@@ -669,11 +811,15 @@ mod tests {
     #[test]
     fn root_attributes_always_lead() {
         for s in SCHEMA {
-            if s.keyword == "IFCLOCALPLACEMENT"
-                || s.keyword == "IFCGEOMETRICREPRESENTATIONCONTEXT"
-                || s.keyword == "IFCPRODUCTDEFINITIONSHAPE"
-            {
-                continue; // not IfcRoot subtypes
+            if !matches!(
+                s.kind,
+                EntityKind::Project
+                    | EntityKind::Spatial(_)
+                    | EntityKind::Product
+                    | EntityKind::RelAggregates
+                    | EntityKind::RelContained
+            ) {
+                continue; // not an IfcRoot subtype
             }
             assert_eq!(
                 &s.attrs[..4],
@@ -805,11 +951,132 @@ mod tests {
 
     #[test]
     fn untyped_keyword_yields_no_view() {
-        let f = parse("#1=IFCCARTESIANPOINT((0.,0.,0.));");
+        // IfcOwnerHistory is outside the typed slice — no view, and it is
+        // neither a product nor a spatial element.
+        let f = parse("#1=IFCOWNERHISTORY();");
         assert!(TypedEntity::new(f.get(1).unwrap()).is_none());
         let m = Model::from_step(&f);
         assert!(m.typed(1).is_none());
         assert_eq!(m.products().count(), 0);
+    }
+
+    #[test]
+    fn cartesian_point_and_direction_are_typed() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((1.,2.,3.));\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCDIRECTION((1,0));", // integer ratios + 2-D vector
+        );
+        let p = TypedEntity::new(f.get(1).unwrap()).unwrap();
+        assert_eq!(p.kind(), EntityKind::Geometry);
+        assert_eq!(p.coordinates(), Some(vec![1.0, 2.0, 3.0]));
+        // A point carries no direction ratios.
+        assert_eq!(p.direction_ratios(), None);
+
+        let d = TypedEntity::new(f.get(2).unwrap()).unwrap();
+        assert_eq!(d.kind(), EntityKind::Geometry);
+        assert_eq!(d.direction_ratios(), Some(vec![0.0, 0.0, 1.0]));
+
+        // Integer-valued ratios widen to f64; 2-D direction stays 2-D.
+        let d2 = TypedEntity::new(f.get(3).unwrap()).unwrap();
+        assert_eq!(d2.direction_ratios(), Some(vec![1.0, 0.0]));
+    }
+
+    #[test]
+    fn axis2placement3d_resolves_location_axis_refdir() {
+        // The common writer form: only Location set, Axis/RefDirection $.
+        let f = parse(
+            "#8=IFCAXIS2PLACEMENT3D(#9,$,$);\n\
+             #9=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #10=IFCAXIS2PLACEMENT3D(#9,#11,#12);\n\
+             #11=IFCDIRECTION((0.,0.,1.));\n\
+             #12=IFCDIRECTION((1.,0.,0.));",
+        );
+        let a = TypedEntity::new(f.get(8).unwrap()).unwrap();
+        assert_eq!(a.kind(), EntityKind::Geometry);
+        assert_eq!(a.location(), Some(9));
+        assert_eq!(a.axis(), None); // $ → None
+        assert_eq!(a.ref_direction(), None);
+
+        let b = TypedEntity::new(f.get(10).unwrap()).unwrap();
+        assert_eq!(b.location(), Some(9));
+        assert_eq!(b.axis(), Some(11));
+        assert_eq!(b.ref_direction(), Some(12));
+    }
+
+    #[test]
+    fn axis2placement2d_has_location_then_refdirection() {
+        let f = parse(
+            "#1=IFCAXIS2PLACEMENT2D(#2,#3);\n\
+             #2=IFCCARTESIANPOINT((0.,0.));\n\
+             #3=IFCDIRECTION((1.,0.));",
+        );
+        let a = TypedEntity::new(f.get(1).unwrap()).unwrap();
+        let names: Vec<&str> = a.attrs().map(|(n, _)| n).collect();
+        assert_eq!(names, ["Location", "RefDirection"]);
+        assert_eq!(a.location(), Some(2));
+        assert_eq!(a.ref_direction(), Some(3));
+        // 2-D placement has no Axis attribute at all.
+        assert_eq!(a.axis(), None);
+        assert!(a.attr("Axis").is_none());
+    }
+
+    #[test]
+    fn polyline_lists_point_references() {
+        let f = parse(
+            "#67=IFCPOLYLINE((#68,#69,#70));\n\
+             #68=IFCCARTESIANPOINT((0.,0.));\n\
+             #69=IFCCARTESIANPOINT((1.,0.));\n\
+             #70=IFCCARTESIANPOINT((1.,1.));",
+        );
+        let pl = TypedEntity::new(f.get(67).unwrap()).unwrap();
+        assert_eq!(pl.kind(), EntityKind::Geometry);
+        assert_eq!(pl.points(), Some(vec![68, 69, 70]));
+        // Each point resolves and carries 2-D coordinates.
+        let first = TypedEntity::new(f.get(68).unwrap()).unwrap();
+        assert_eq!(first.coordinates(), Some(vec![0.0, 0.0]));
+    }
+
+    #[test]
+    fn shape_representation_resolves_context_and_items() {
+        let f = parse(
+            "#154=IFCSHAPEREPRESENTATION(#41,'Body','Tessellation',(#288,#289));\n\
+             #41=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,$,$,$);",
+        );
+        let r = TypedEntity::new(f.get(154).unwrap()).unwrap();
+        assert_eq!(r.kind(), EntityKind::Representation);
+        assert_eq!(r.context_of_items(), Some(41));
+        assert_eq!(r.representation_identifier(), Some("Body"));
+        assert_eq!(r.representation_type(), Some("Tessellation"));
+        assert_eq!(r.items(), Some(vec![288, 289]));
+        let names: Vec<&str> = r.attrs().map(|(n, _)| n).collect();
+        assert_eq!(
+            names,
+            [
+                "ContextOfItems",
+                "RepresentationIdentifier",
+                "RepresentationType",
+                "Items",
+            ]
+        );
+    }
+
+    #[test]
+    fn geometry_primitives_stay_out_of_spatial_model() {
+        // Geometry-kind entities are typed but never enter the
+        // product / spatial enumerations the spatial model exposes.
+        let f = parse(
+            "#1=IFCPROJECT('p',$,'P',$,$,$,$,$,$);\n\
+             #2=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #3=IFCDIRECTION((0.,0.,1.));\n\
+             #4=IFCAXIS2PLACEMENT3D(#2,$,$);",
+        );
+        let m = Model::from_step(&f);
+        assert_eq!(m.products().count(), 0);
+        assert_eq!(m.spatial_elements().count(), 0);
+        // …but each is individually typed.
+        assert_eq!(m.typed(2).unwrap().kind(), EntityKind::Geometry);
+        assert_eq!(m.typed(4).unwrap().location(), Some(2));
     }
 
     #[test]

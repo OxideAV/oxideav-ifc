@@ -6,6 +6,34 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 2 (geometry-primitive slice): the core geometric-representation-
+  item entities are now in the typed schema layer
+  (`oxideav_ifc::schema`).
+  - New `EntityKind::Geometry` plus `SCHEMA` entries for
+    `IfcCartesianPoint` (`Coordinates`), `IfcDirection`
+    (`DirectionRatios`), `IfcAxis2Placement2D` (`Location`,
+    `RefDirection`), `IfcAxis2Placement3D` (`Location`, `Axis`,
+    `RefDirection`), `IfcPolyline` (`Points`), and
+    `IfcShapeRepresentation` (`ContextOfItems`,
+    `RepresentationIdentifier`, `RepresentationType`, `Items`).
+    Attribute orders transcribed from the staged `IFC4_ADD2.exp`
+    inheritance chains (IfcPoint / IfcPlacement / IfcCurve /
+    IfcBoundedCurve / IfcRepresentation / IfcShapeModel supertypes add
+    no serialised attributes).
+  - `TypedEntity` accessors over the new slice: `coordinates`,
+    `direction_ratios`, `location`, `axis`, `ref_direction`, `points`,
+    `items`, `context_of_items`, `representation_identifier`,
+    `representation_type` (integer literals where REAL is expected are
+    widened via `Value::as_number`; `$` slots and missing attributes
+    yield `None`).
+  - Geometry-kind entities are typed but never enter the spatial-model
+    `products()` / `spatial_elements()` enumerations.
+  - 6 new schema unit tests (point/direction typing, 2-D + 3-D axis
+    placements, polyline point lists, shape-representation resolution,
+    spatial-model exclusion) + 2 fixture integration tests walking the
+    column's product→shape→placement chain to its placed origin
+    `(432, 288, 48)` and the wall's `Axis` polyline — all through the
+    typed layer.
 - Phase 3 (placement slice): `IfcLocalPlacement` world-positioning.
   - `Transform { cols, translation }` — a 3-D affine map (column-major
     3×3 linear part + translation) with `apply` / `compose` and an

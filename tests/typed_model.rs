@@ -137,3 +137,81 @@ fn tessellated_item_fixture_containment() {
     let host = m.typed(500).unwrap();
     assert!(matches!(host.kind(), EntityKind::Spatial(_)));
 }
+
+#[test]
+fn column_geometry_primitive_chain_is_typed() {
+    // Walk the column's product → shape → placement geometry entirely
+    // through the typed schema layer (no positional indexing).
+    let f = parse_step(COLUMN).expect("parse");
+    let m = Model::from_step(&f);
+
+    let column = m.typed(71).unwrap();
+    let shape = m.typed(column.representation().unwrap()).unwrap(); // #111
+    assert_eq!(shape.keyword(), "IFCPRODUCTDEFINITIONSHAPE");
+    // IfcProductDefinitionShape.Representations → the shape reps.
+    let reps = shape.attr("Representations").unwrap().as_list().unwrap();
+    let rep_id = reps[0].as_reference().unwrap(); // #154
+
+    let rep = m.typed(rep_id).unwrap();
+    assert_eq!(rep.keyword(), "IFCSHAPEREPRESENTATION");
+    assert_eq!(rep.kind(), EntityKind::Representation);
+    assert_eq!(rep.representation_identifier(), Some("Body"));
+    assert_eq!(rep.representation_type(), Some("Tessellation"));
+    // #41 is the (sub)context this representation sits in.
+    assert_eq!(rep.context_of_items(), Some(41));
+    // One tessellated item.
+    assert_eq!(rep.items().unwrap().len(), 1);
+
+    // The placement chain: IfcLocalPlacement(#121) → RelativePlacement
+    // #126 IfcAxis2Placement3D(Location #125, Axis #119, RefDirection #120).
+    let lp = m.typed(column.object_placement().unwrap()).unwrap(); // #121
+    assert_eq!(lp.keyword(), "IFCLOCALPLACEMENT");
+    let a2p_id = lp
+        .attr("RelativePlacement")
+        .unwrap()
+        .as_reference()
+        .unwrap();
+    let a2p = m.typed(a2p_id).unwrap(); // #126
+    assert_eq!(a2p.keyword(), "IFCAXIS2PLACEMENT3D");
+    assert_eq!(a2p.kind(), EntityKind::Geometry);
+
+    // Location is the column's placed origin (432, 288, 48).
+    let loc = m.typed(a2p.location().unwrap()).unwrap(); // #125
+    assert_eq!(loc.keyword(), "IFCCARTESIANPOINT");
+    assert_eq!(loc.coordinates(), Some(vec![432.0, 288.0, 48.0]));
+
+    // Axis = +Z, RefDirection = +X.
+    let axis = m.typed(a2p.axis().unwrap()).unwrap(); // #119
+    assert_eq!(axis.direction_ratios(), Some(vec![0.0, 0.0, 1.0]));
+    let refdir = m.typed(a2p.ref_direction().unwrap()).unwrap(); // #120
+    assert_eq!(refdir.direction_ratios(), Some(vec![1.0, 0.0, 0.0]));
+}
+
+#[test]
+fn wall_axis_polyline_is_typed() {
+    // The wall body carries an "Axis" curve representation whose item is
+    // an IfcPolyline of two IfcCartesianPoints — fully typed here.
+    let f = parse_step(WALL).expect("parse");
+    let m = Model::from_step(&f);
+
+    // Find any IfcPolyline in the model via the typed layer and verify
+    // its points resolve to typed cartesian points.
+    let polyline = f
+        .instances
+        .values()
+        .filter_map(TypedEntity::new)
+        .find(|e| e.keyword() == "IFCPOLYLINE")
+        .expect("a polyline in the wall fixture");
+    assert_eq!(polyline.kind(), EntityKind::Geometry);
+    let pts = polyline.points().expect("polyline points");
+    assert!(pts.len() >= 2, "a polyline has at least two points");
+    for pid in pts {
+        let p = m.typed(pid).expect("point in typed slice");
+        assert_eq!(p.keyword(), "IFCCARTESIANPOINT");
+        let coords = p.coordinates().expect("coordinates");
+        assert!(
+            coords.len() == 2 || coords.len() == 3,
+            "cartesian point is 2-D or 3-D"
+        );
+    }
+}
