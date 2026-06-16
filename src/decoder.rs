@@ -2,15 +2,17 @@
 //! implementation plus the [`Mesh3DRegistry`] registration helper.
 //!
 //! Phase 3 (this release) extracts tessellated geometry
-//! (`IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET`) into a
+//! (`IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET`) and faceted
+//! boundary representations (`IFCFACETEDBREP`(`WITHVOIDS`),
+//! `IFCFACEBASEDSURFACEMODEL`, `IFCSHELLBASEDSURFACEMODEL`) into a
 //! [`Scene3D`]: the decoder probes the `ISO-10303-21;` magic, fully
 //! parses + validates the exchange structure, then walks every
-//! `IfcProductDefinitionShape` to its tessellated body items and emits
+//! `IfcProductDefinitionShape` to its supported body items and emits
 //! one scene node + mesh per shape. Each shape's vertices are then
 //! positioned in **world space** by resolving the owning product's
 //! `IfcLocalPlacement` chain (`placement_transform`); a shape with no
 //! discoverable product placement stays in its local frame. Swept-solid
-//! / Brep / boolean / mapped-item geometry styles remain later
+//! / advanced-brep / boolean / mapped-item geometry styles remain later
 //! Phase-3 slices.
 
 use oxideav_core::Error as CoreError;

@@ -19,7 +19,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations + `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + placement slices); swept solids / Breps later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, faceted Breps (`IfcFacetedBrep`(`WithVoids`)) + face/shell surface models, and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + Brep + placement slices); swept solids later |
 
 ## Phase 1 surface
 
@@ -137,6 +137,22 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   Both read their vertices from the shared `IfcCartesianPointList3D`
   reached through the `IfcTessellatedFaceSet.Coordinates` supertype
   attribute. Any other keyword → `GeometryError::Unsupported`.
+* `tessellate_item` additionally evaluates the **faceted boundary
+  representation** family, whose faces are explicit polygons of
+  `IfcCartesianPoint` references rather than indices into a shared list:
+  `IfcFacetedBrep` / `IfcFacetedBrepWithVoids` (`Outer` + optional
+  `Voids` `IfcClosedShell`s), `IfcFaceBasedSurfaceModel` (`FbsmFaces`),
+  and `IfcShellBasedSurfaceModel` (`SbsmBoundary`, the `IfcShell` SELECT
+  of `IfcClosedShell` / `IfcOpenShell`). Each shell
+  (`IfcConnectedFaceSet.CfsFaces`) is walked to its `IfcFace`s; every
+  face's outer `IfcFaceBound` / `IfcFaceOuterBound` resolves to an
+  `IfcPolyLoop` (`Polygon : LIST [3:?] OF IfcCartesianPoint`) that is
+  fan-triangulated. The shared vertex table is de-duplicated by
+  `IfcCartesianPoint` id, so a point referenced by several loops (the
+  §8.8.3.18 invariant guarantees at least three) becomes one mesh
+  vertex. Per-bound `Orientation` flags and `Voids` boolean subtraction
+  are not yet applied — the outer surface is meshed as authored; advanced
+  (curved) breps and `IfcFaceSurface` faces remain `Unsupported`.
 * `mesh_from_shape_representation` / `mesh_from_product_shape` — the walk
   from a product's `Representation` down through
   `IfcProductDefinitionShape.Representations` →
@@ -164,11 +180,13 @@ products outside the typed schema slice, e.g. `IfcBuildingElementProxy`,
 are still placed). The five fixture models decode to 8/24-vertex boxes
 (cube proxy, column, colour cube) and the dense basin mesh; the column
 body lands at its placed origin `(432, 288, 48)`. The swept-solid wall
-model reports `Unsupported` (no tessellation present).
+model reports `Unsupported` (no tessellation or Brep present). Faceted
+Breps and face/shell surface models flow through the same product-shape
+walk and lift into the scene identically.
 
-Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), Breps
-(`IfcFacetedBrep`), boolean results, mapped items, and EXPRESS WHERE-rule
-validation.
+Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), advanced
+(curved) breps (`IfcAdvancedBrep` / `IfcFaceSurface`), boolean results,
+mapped items, `Voids` subtraction, and EXPRESS WHERE-rule validation.
 
 ## Cargo features
 
@@ -177,8 +195,9 @@ validation.
   direct constructor, and `register_mesh3d(&mut Mesh3DRegistry)`
   (format id `"ifc"`, extension `.ifc`). The decoder probes the magic,
   fully parses + validates the exchange structure, and extracts every
-  tessellated product shape into the `Scene3D`; a model with no
-  tessellation (only swept solids / Breps) decodes to `Unsupported`.
+  tessellated / faceted-Brep product shape into the `Scene3D`; a model with
+  no extractable geometry (only swept solids / advanced breps) decodes to
+  `Unsupported`.
 * `--no-default-features` — standalone STEP parser only, std types,
   zero dependencies.
 

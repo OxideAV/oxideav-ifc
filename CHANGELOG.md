@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (faceted-Brep slice): `tessellate_item` now evaluates the
+  faceted boundary-representation family in addition to the index-based
+  tessellations, so faceted-Brep bodies flow through the same
+  `mesh_from_product_shape` / registry-decoder path into a `Scene3D`.
+  - `IfcFacetedBrep` / `IfcFacetedBrepWithVoids` (`IfcManifoldSolidBrep.
+    Outer : IfcClosedShell` + optional `Voids`), `IfcFaceBasedSurfaceModel`
+    (`FbsmFaces`) and `IfcShellBasedSurfaceModel` (`SbsmBoundary`, the
+    `IfcShell` SELECT of `IfcClosedShell` / `IfcOpenShell`).
+  - Each shell (`IfcConnectedFaceSet.CfsFaces : SET OF IfcFace`) is walked
+    to its faces; every face's outer `IfcFaceBound` / `IfcFaceOuterBound`
+    resolves to an `IfcPolyLoop` (`Polygon : LIST [3:?] OF
+    IfcCartesianPoint`) which is fan-triangulated. Vertices are pooled
+    in a `HashMap`-deduplicated table keyed by `IfcCartesianPoint` id, so
+    a point shared by several loops (§8.8.3.18 guarantees ≥3) becomes one
+    mesh vertex. Attribute orders transcribed from `IFC4_ADD2.exp`.
+  - Per-bound `Orientation` and `Voids` boolean subtraction are not yet
+    applied (outer surface meshed as authored); advanced (curved) breps
+    (`IfcAdvancedBrep` / `IfcFaceSurface`) stay `Unsupported`.
+  - 9 new geometry unit tests (tetra point-dedup, quad fan, outer-bound
+    preference, `…WithVoids`, face/shell surface models, degenerate-loop
+    rejection, Brep-via-`IfcShapeRepresentation`).
 - Phase 2 (geometry-primitive slice): the core geometric-representation-
   item entities are now in the typed schema layer
   (`oxideav_ifc::schema`).

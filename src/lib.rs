@@ -46,7 +46,11 @@
 //!
 //! * [`tessellate_item`] — one `IfcTriangulatedFaceSet` /
 //!   `IfcPolygonalFaceSet` → a [`TriMesh`] (one-based STEP indices and
-//!   `PnIndex` indirection resolved).
+//!   `PnIndex` indirection resolved); also the faceted boundary-
+//!   representation family (`IfcFacetedBrep`/`…WithVoids`,
+//!   `IfcFaceBasedSurfaceModel`, `IfcShellBasedSurfaceModel`) whose
+//!   `IfcPolyLoop` faces are fan-triangulated over a point-id-deduplicated
+//!   vertex table.
 //! * [`mesh_from_shape_representation`] / [`mesh_from_product_shape`] —
 //!   the walk from a product's `Representation` down to its body items,
 //!   merging supported items and skipping unsupported geometry styles.
@@ -55,10 +59,11 @@
 //!   chain with each `IfcAxis2Placement3D` resolved through the EXPRESS
 //!   `IfcBuildAxes` axis derivation.
 //!
-//! With the `registry` feature, [`IfcDecoder`] lifts every tessellated
-//! product shape into an `oxideav_mesh3d::Scene3D`, positioned in world
-//! space by the owning product's placement chain. Swept solids, Breps,
-//! boolean results, and mapped items are later Phase-3 slices.
+//! With the `registry` feature, [`IfcDecoder`] lifts every tessellated /
+//! faceted-Brep product shape into an `oxideav_mesh3d::Scene3D`,
+//! positioned in world space by the owning product's placement chain.
+//! Swept solids, advanced (curved) breps, boolean results, and mapped
+//! items are later Phase-3 slices.
 //!
 //! ## Standalone build
 //!
