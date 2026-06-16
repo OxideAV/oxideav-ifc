@@ -27,9 +27,34 @@
 //! is available in `--no-default-features` builds. The `registry`
 //! decoder lifts it into an `oxideav_mesh3d::Scene3D`.
 //!
-//! Only the tessellation styles are handled here; swept solids
-//! (`IfcExtrudedAreaSolid`), Breps (`IfcFacetedBrep`), boolean results,
-//! and mapped items are later Phase-3 work and are reported as
+//! Alongside the two tessellation entities this module also evaluates
+//! the **explicit faceted boundary-representation** family:
+//!
+//! * **`IfcFacetedBrep`** (`Outer : IfcClosedShell`) and
+//!   **`IfcFacetedBrepWithVoids`** (`Outer`, `Voids : SET OF
+//!   IfcClosedShell`) — a manifold solid whose faces are all planar
+//!   bounded polygons (ISO 16739 §8.8.3.18 / IFC4 EXPRESS
+//!   `IfcManifoldSolidBrep`).
+//! * **`IfcFaceBasedSurfaceModel`** (`FbsmFaces : SET OF
+//!   IfcConnectedFaceSet`) and **`IfcShellBasedSurfaceModel`**
+//!   (`SbsmBoundary : SET OF IfcShell`) — open/closed shells of the same
+//!   faces, used for surface (non-solid) bodies.
+//!
+//! Each shell is an `IfcConnectedFaceSet` (`CfsFaces : SET OF IfcFace`);
+//! each `IfcFace` carries `Bounds : SET OF IfcFaceBound`, whose
+//! `IfcFaceOuterBound` (or any bound when none is flagged outer) wraps an
+//! `IfcPolyLoop(Polygon : LIST [3:?] OF IfcCartesianPoint)`. The outer
+//! loop is fan-triangulated; the `IfcFaceBound.Orientation` flag reverses
+//! the loop winding when `.F.`. Points are referenced directly (not
+//! through a `IfcCartesianPointList`), so the extractor builds the mesh
+//! vertex table on the fly, sharing a vertex across loops by its
+//! `IfcCartesianPoint` `#id`.
+//!
+//! Inner face bounds (holes, and the `Voids` of a
+//! `…BrepWithVoids`) are **not** subtracted in this slice — the outer
+//! loop of every face is emitted. Swept solids
+//! (`IfcExtrudedAreaSolid`), advanced Breps, boolean results, and mapped
+//! items remain later Phase-3 work and are reported as
 //! [`GeometryError::Unsupported`] rather than silently dropped.
 
 use crate::parser::StepFile;
@@ -107,18 +132,62 @@ impl std::error::Error for GeometryError {}
 
 /// Resolve and tessellate one geometric-representation item by id.
 ///
-/// Dispatches on the entity keyword: `IFCTRIANGULATEDFACESET` and
-/// `IFCPOLYGONALFACESET` produce a [`TriMesh`]; any other keyword is a
-/// [`GeometryError::Unsupported`]. This is the lowest-level entry —
-/// most callers want [`mesh_from_shape_representation`] or the
-/// `Model`-level walk.
+/// Dispatches on the entity keyword: the two tessellation face sets
+/// (`IFCTRIANGULATEDFACESET`, `IFCPOLYGONALFACESET`) and the explicit
+/// faceted-Brep family (`IFCFACETEDBREP`, `IFCFACETEDBREPWITHVOIDS`,
+/// `IFCFACEBASEDSURFACEMODEL`, `IFCSHELLBASEDSURFACEMODEL`) produce a
+/// [`TriMesh`]; any other keyword is a [`GeometryError::Unsupported`].
+/// This is the lowest-level entry — most callers want
+/// [`mesh_from_shape_representation`] or the `Model`-level walk.
 pub fn tessellate_item(step: &StepFile, id: u64) -> Result<TriMesh, GeometryError> {
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
     match inst.keyword.as_str() {
         "IFCTRIANGULATEDFACESET" => triangulated_face_set(step, &inst.args),
         "IFCPOLYGONALFACESET" => polygonal_face_set(step, &inst.args),
+        // Explicit faceted boundary representation: a solid (one outer
+        // closed shell, plus ignored void shells) or a surface model
+        // (a set of connected face sets / shells). All reduce to a set
+        // of `IfcFace`s walked by `faceted_brep`.
+        "IFCFACETEDBREP" | "IFCFACETEDBREPWITHVOIDS" => {
+            // IfcManifoldSolidBrep.Outer is the first attribute; the
+            // optional `Voids` of the …WithVoids subtype follow but are
+            // not subtracted in this slice.
+            let outer = inst
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            faceted_brep(step, &[outer])
+        }
+        "IFCFACEBASEDSURFACEMODEL" => {
+            // FbsmFaces : SET OF IfcConnectedFaceSet (first attribute).
+            let shells = inst
+                .args
+                .first()
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadCoordinates)?;
+            faceted_brep(step, &refs(shells)?)
+        }
+        "IFCSHELLBASEDSURFACEMODEL" => {
+            // SbsmBoundary : SET OF IfcShell (IfcOpenShell / IfcClosedShell)
+            // — both are IfcConnectedFaceSet (first attribute).
+            let shells = inst
+                .args
+                .first()
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadCoordinates)?;
+            faceted_brep(step, &refs(shells)?)
+        }
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
+}
+
+/// Collect a list of `#id` references, erroring on any non-reference
+/// element (an aggregate of shells / faces is always a reference list).
+fn refs(list: &[Value]) -> Result<Vec<u64>, GeometryError> {
+    list.iter()
+        .map(|v| v.as_reference().ok_or(GeometryError::BadCoordinates))
+        .collect()
 }
 
 /// Tessellate every supported item of an `IfcShapeRepresentation`,
@@ -647,6 +716,166 @@ fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geomet
     })
 }
 
+// ---------------------------------------------------------------------
+// IfcFacetedBrep / IfcFaceBasedSurfaceModel / IfcShellBasedSurfaceModel
+//
+// Explicit faceted boundary representation. Each input is one or more
+// `IfcConnectedFaceSet` (closed/open shell) #ids; every shell's faces are
+// `IfcFace(Bounds : SET OF IfcFaceBound)`. The bound to triangulate is
+// the `IfcFaceOuterBound` if present, else the single bound; its
+// `Bound : IfcLoop` is an `IfcPolyLoop(Polygon : LIST OF
+// IfcCartesianPoint)`. The polygon is fan-triangulated; a `.F.`
+// `Orientation` reverses the winding. Points are referenced directly, so
+// vertices are interned by `IfcCartesianPoint` #id into a shared table.
+// ---------------------------------------------------------------------
+
+/// Build a [`TriMesh`] from a set of `IfcConnectedFaceSet` (shell) ids —
+/// the shared core of `IfcFacetedBrep` (one outer shell) and the
+/// face-/shell-based surface models (a set of shells).
+fn faceted_brep(step: &StepFile, shell_ids: &[u64]) -> Result<TriMesh, GeometryError> {
+    // Intern points by #id so a vertex shared across faces is emitted once.
+    let mut interner = PointInterner::default();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+
+    for &shell_id in shell_ids {
+        let shell = step
+            .get(shell_id)
+            .ok_or(GeometryError::MissingInstance(shell_id))?;
+        // IfcConnectedFaceSet.CfsFaces is the first attribute (closed and
+        // open shells add no serialised attributes of their own).
+        let faces = shell
+            .args
+            .first()
+            .and_then(Value::as_list)
+            .ok_or(GeometryError::BadCoordinates)?;
+        for face_ref in faces {
+            let face_id = face_ref
+                .as_reference()
+                .ok_or(GeometryError::BadCoordinates)?;
+            face_triangles(step, face_id, &mut interner, &mut triangles)?;
+        }
+    }
+
+    Ok(TriMesh {
+        positions: interner.positions,
+        triangles,
+    })
+}
+
+/// Fan-triangulate the outer bound of one `IfcFace`, appending triangles
+/// (with interned vertices) to `out`.
+fn face_triangles(
+    step: &StepFile,
+    face_id: u64,
+    interner: &mut PointInterner,
+    out: &mut Vec<[u32; 3]>,
+) -> Result<(), GeometryError> {
+    let face = step
+        .get(face_id)
+        .ok_or(GeometryError::MissingInstance(face_id))?;
+    if face.keyword != "IFCFACE" && face.keyword != "IFCFACESURFACE" {
+        return Err(GeometryError::Unsupported(face.keyword.clone()));
+    }
+    // IfcFace.Bounds : SET OF IfcFaceBound (first attribute).
+    let bounds = face
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+
+    // Prefer the IfcFaceOuterBound; fall back to the sole bound when no
+    // bound is flagged outer (a single-loop face). Inner bounds (holes)
+    // are not subtracted in this slice.
+    let mut outer: Option<u64> = None;
+    let mut only: Option<u64> = None;
+    let mut count = 0usize;
+    for b in bounds {
+        let bid = b.as_reference().ok_or(GeometryError::BadCoordinates)?;
+        count += 1;
+        only = Some(bid);
+        let binst = step.get(bid).ok_or(GeometryError::MissingInstance(bid))?;
+        if binst.keyword == "IFCFACEOUTERBOUND" {
+            outer = Some(bid);
+        }
+    }
+    let bound_id = match (outer, count) {
+        (Some(id), _) => id,
+        (None, 1) => only.ok_or(GeometryError::BadCoordinates)?,
+        // Multiple bounds, none flagged outer: ambiguous which is the
+        // outer loop — emit nothing rather than guess.
+        (None, _) => return Ok(()),
+    };
+
+    let bound = step
+        .get(bound_id)
+        .ok_or(GeometryError::MissingInstance(bound_id))?;
+    // IfcFaceBound: (Bound : IfcLoop, Orientation : IfcBoolean).
+    let loop_id = bound
+        .args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    // Orientation `.F.` reverses the polygon sense; absent / `.T.` keeps it.
+    let reversed = matches!(bound.args.get(1).and_then(Value::as_enum), Some("F"));
+
+    let loop_inst = step
+        .get(loop_id)
+        .ok_or(GeometryError::MissingInstance(loop_id))?;
+    if loop_inst.keyword != "IFCPOLYLOOP" {
+        // Vertex/edge loops are not modelled in this slice.
+        return Err(GeometryError::Unsupported(loop_inst.keyword.clone()));
+    }
+    // IfcPolyLoop.Polygon : LIST [3:?] OF IfcCartesianPoint (first attr).
+    let polygon = loop_inst
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+    if polygon.len() < 3 {
+        return Err(GeometryError::IndexOutOfRange);
+    }
+
+    // Intern each polygon vertex to a mesh index.
+    let mut idx: Vec<u32> = Vec::with_capacity(polygon.len());
+    for p in polygon {
+        let pid = p.as_reference().ok_or(GeometryError::BadCoordinates)?;
+        idx.push(interner.intern(step, pid)?);
+    }
+    if reversed {
+        idx.reverse();
+    }
+    // Fan-triangulate the (planar, assumed convex) loop.
+    let v0 = idx[0];
+    for w in idx[1..].windows(2) {
+        out.push([v0, w[0], w[1]]);
+    }
+    Ok(())
+}
+
+/// Builds the mesh vertex table for a faceted Brep, mapping each
+/// `IfcCartesianPoint` `#id` to a single vertex index so a point shared
+/// across faces (every Brep vertex is, by topology) is emitted once.
+#[derive(Default)]
+struct PointInterner {
+    positions: Vec<[f64; 3]>,
+    by_id: std::collections::HashMap<u64, u32>,
+}
+
+impl PointInterner {
+    /// Return the vertex index for an `IfcCartesianPoint` `#id`, resolving
+    /// and appending it the first time it is seen.
+    fn intern(&mut self, step: &StepFile, point_id: u64) -> Result<u32, GeometryError> {
+        if let Some(&i) = self.by_id.get(&point_id) {
+            return Ok(i);
+        }
+        let coord = cartesian_point(step, Some(&Value::Reference(point_id)))?;
+        let i = self.positions.len() as u32;
+        self.positions.push(coord);
+        self.by_id.insert(point_id, i);
+        Ok(i)
+    }
+}
+
 /// Resolve the `Coordinates` reference (the first face-set attribute) to
 /// the `IfcCartesianPointList3D` point rows.
 fn coordinates(
@@ -787,6 +1016,180 @@ mod tests {
         assert_eq!(m.triangle_count(), 2);
         assert_eq!(m.triangles[0], [0, 1, 2]);
         assert_eq!(m.triangles[1], [0, 2, 3]);
+    }
+
+    #[test]
+    fn faceted_brep_single_triangle_face() {
+        // One closed shell, one triangular face, outer poly-loop of three
+        // directly-referenced cartesian points.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2,#3));\n\
+             #5=IFCFACEOUTERBOUND(#4,.T.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCCLOSEDSHELL((#6));\n\
+             #8=IFCFACETEDBREP(#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_eq!(m.vertex_count(), 3);
+        assert_eq!(m.triangle_count(), 1);
+        assert_eq!(m.triangles[0], [0, 1, 2]);
+        assert_eq!(m.positions[1], [1.0, 0.0, 0.0]);
+    }
+
+    #[test]
+    fn faceted_brep_shares_vertices_across_faces() {
+        // Two faces of a tetrahedron sharing an edge (#1,#2): the shared
+        // points are interned once → 4 verts, 2 triangles.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCCARTESIANPOINT((0.,0.,1.));\n\
+             #10=IFCPOLYLOOP((#1,#2,#3));\n\
+             #11=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #12=IFCFACE((#11));\n\
+             #13=IFCPOLYLOOP((#1,#2,#4));\n\
+             #14=IFCFACEOUTERBOUND(#13,.T.);\n\
+             #15=IFCFACE((#14));\n\
+             #16=IFCCLOSEDSHELL((#12,#15));\n\
+             #17=IFCFACETEDBREP(#16);",
+        );
+        let m = tessellate_item(&f, 17).unwrap();
+        assert_eq!(m.vertex_count(), 4);
+        assert_eq!(m.triangle_count(), 2);
+        // Face 1 → (0,1,2); face 2 shares #1,#2 (verts 0,1), adds #4 (3).
+        assert_eq!(m.triangles[0], [0, 1, 2]);
+        assert_eq!(m.triangles[1], [0, 1, 3]);
+    }
+
+    #[test]
+    fn faceted_brep_quad_face_fans() {
+        // A 4-vertex outer bound fan-triangulates into 2 triangles.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((1.,1.,0.));\n\
+             #4=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #5=IFCPOLYLOOP((#1,#2,#3,#4));\n\
+             #6=IFCFACEOUTERBOUND(#5,.T.);\n\
+             #7=IFCFACE((#6));\n\
+             #8=IFCCLOSEDSHELL((#7));\n\
+             #9=IFCFACETEDBREP(#8);",
+        );
+        let m = tessellate_item(&f, 9).unwrap();
+        assert_eq!(m.triangle_count(), 2);
+        assert_eq!(m.triangles[0], [0, 1, 2]);
+        assert_eq!(m.triangles[1], [0, 2, 3]);
+    }
+
+    #[test]
+    fn faceted_brep_orientation_false_reverses_winding() {
+        // Orientation .F. reverses the loop sense (flips the normal).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2,#3));\n\
+             #5=IFCFACEBOUND(#4,.F.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCCLOSEDSHELL((#6));\n\
+             #8=IFCFACETEDBREP(#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        // Reversed [0,1,2] → [2,1,0]; fan v0=2 → (2,1,0).
+        assert_eq!(m.triangles[0], [2, 1, 0]);
+    }
+
+    #[test]
+    fn faceted_brep_falls_back_to_sole_bound_without_outer() {
+        // A single IfcFaceBound (not flagged outer) is still triangulated.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2,#3));\n\
+             #5=IFCFACEBOUND(#4,.T.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCCLOSEDSHELL((#6));\n\
+             #8=IFCFACETEDBREP(#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_eq!(m.triangle_count(), 1);
+        assert_eq!(m.triangles[0], [0, 1, 2]);
+    }
+
+    #[test]
+    fn faceted_brep_with_voids_uses_outer_shell() {
+        // …WithVoids: only the Outer shell (arg 0) is meshed; the Voids
+        // set (arg 1) is ignored in this slice.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2,#3));\n\
+             #5=IFCFACEOUTERBOUND(#4,.T.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCCLOSEDSHELL((#6));\n\
+             #20=IFCCARTESIANPOINT((9.,9.,9.));\n\
+             #21=IFCFACETEDBREPWITHVOIDS(#7,(#7));",
+        );
+        let m = tessellate_item(&f, 21).unwrap();
+        assert_eq!(m.vertex_count(), 3);
+        assert_eq!(m.triangle_count(), 1);
+    }
+
+    #[test]
+    fn shell_based_surface_model_meshes_all_shells() {
+        // A shell-based surface model with two single-face shells.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2,#3));\n\
+             #5=IFCFACEOUTERBOUND(#4,.T.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCOPENSHELL((#6));\n\
+             #8=IFCSHELLBASEDSURFACEMODEL((#7));",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_eq!(m.triangle_count(), 1);
+    }
+
+    #[test]
+    fn face_based_surface_model_meshes_faces() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2,#3));\n\
+             #5=IFCFACEOUTERBOUND(#4,.T.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCCONNECTEDFACESET((#6));\n\
+             #8=IFCFACEBASEDSURFACEMODEL((#7));",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_eq!(m.triangle_count(), 1);
+    }
+
+    #[test]
+    fn faceted_brep_degenerate_loop_rejected() {
+        // A poly-loop with fewer than three points is malformed.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #4=IFCPOLYLOOP((#1,#2));\n\
+             #5=IFCFACEOUTERBOUND(#4,.T.);\n\
+             #6=IFCFACE((#5));\n\
+             #7=IFCCLOSEDSHELL((#6));\n\
+             #8=IFCFACETEDBREP(#7);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 8).unwrap_err(),
+            GeometryError::IndexOutOfRange
+        );
     }
 
     #[test]

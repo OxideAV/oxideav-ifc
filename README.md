@@ -19,7 +19,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations + `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + placement slices); swept solids / Breps later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, **faceted-Brep** (`IfcFacetedBrep` + face-/shell-based surface models), and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + faceted-Brep + placement slices); swept solids / advanced Breps later |
 
 ## Phase 1 surface
 
@@ -136,7 +136,20 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   with each `IfcIndexedPolygonalFace` fan-triangulated) → a `TriMesh`.
   Both read their vertices from the shared `IfcCartesianPointList3D`
   reached through the `IfcTessellatedFaceSet.Coordinates` supertype
-  attribute. Any other keyword → `GeometryError::Unsupported`.
+  attribute.
+* `tessellate_item` also evaluates the **explicit faceted boundary
+  representation** family: `IfcFacetedBrep` / `IfcFacetedBrepWithVoids`
+  (their `IfcManifoldSolidBrep.Outer` closed shell), `IfcFaceBasedSurfaceModel`
+  (`FbsmFaces`) and `IfcShellBasedSurfaceModel` (`SbsmBoundary`). Each
+  shell is an `IfcConnectedFaceSet` of `IfcFace`s; a face's
+  `IfcFaceOuterBound` (or its sole bound) is an
+  `IfcPolyLoop(Polygon : LIST OF IfcCartesianPoint)`, fan-triangulated
+  with the `IfcFaceBound.Orientation` flag reversing the winding when
+  `.F.`. Points are referenced directly, so vertices are interned by
+  `IfcCartesianPoint` `#id` (a Brep vertex is shared across faces by
+  topology, so it lands once). Inner bounds (holes) and the `Voids`
+  shells are not subtracted in this slice. Any other keyword →
+  `GeometryError::Unsupported`.
 * `mesh_from_shape_representation` / `mesh_from_product_shape` — the walk
   from a product's `Representation` down through
   `IfcProductDefinitionShape.Representations` →
@@ -166,8 +179,9 @@ are still placed). The five fixture models decode to 8/24-vertex boxes
 body lands at its placed origin `(432, 288, 48)`. The swept-solid wall
 model reports `Unsupported` (no tessellation present).
 
-Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), Breps
-(`IfcFacetedBrep`), boolean results, mapped items, and EXPRESS WHERE-rule
+Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), advanced
+Breps (`IfcAdvancedBrep`, curved surfaces), boolean results, mapped
+items, hole/void subtraction in faceted Breps, and EXPRESS WHERE-rule
 validation.
 
 ## Cargo features

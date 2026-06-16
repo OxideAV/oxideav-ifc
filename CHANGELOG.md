@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (faceted-Brep slice): `geometry::tessellate_item` now evaluates
+  the explicit faceted boundary-representation family in addition to the
+  two tessellated face sets.
+  - `IfcFacetedBrep` / `IfcFacetedBrepWithVoids` (via
+    `IfcManifoldSolidBrep.Outer`), `IfcFaceBasedSurfaceModel`
+    (`FbsmFaces`) and `IfcShellBasedSurfaceModel` (`SbsmBoundary`) →
+    `TriMesh`. Each `IfcConnectedFaceSet` shell's `IfcFace`s are
+    triangulated from the `IfcFaceOuterBound` (falling back to a sole
+    `IfcFaceBound`) `IfcPolyLoop`, fan-triangulated with the
+    `IfcFaceBound.Orientation` `.F.` flag reversing the winding.
+  - Directly-referenced `IfcCartesianPoint`s are interned by `#id` so a
+    Brep vertex shared across faces is emitted once. Attribute layouts
+    transcribed from the staged `IFC4_ADD2.exp`
+    (`IfcManifoldSolidBrep`, `IfcConnectedFaceSet`, `IfcFace`,
+    `IfcFaceBound`, `IfcPolyLoop`, face-/shell-based surface models).
+  - Inner face bounds (holes) and `IfcFacetedBrepWithVoids.Voids` are not
+    subtracted in this slice. Through the unchanged
+    `mesh_from_shape_representation` / product-shape walk, the `registry`
+    decoder now lifts faceted-Brep bodies into the `Scene3D`.
+
 - Phase 2 (geometry-primitive slice): the core geometric-representation-
   item entities are now in the typed schema layer
   (`oxideav_ifc::schema`).
