@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-06-16
+
+### Other
+
+- Phase 3 faceted-Brep slice (IfcFacetedBrep + surface models)
+- Phase 2 typed geometry-primitive slice (point/direction/axis-placement/polyline/shape-representation)
+- Phase 3 placement slice: IfcLocalPlacement world-positioning
+- Phase 3 tessellation slice: IfcTriangulatedFaceSet / IfcPolygonalFaceSet → Scene3D
+- Phase 2: EXPRESS schema typing over the STEP/P21 parser
+
 ### Added
 
 - Phase 3 (faceted-Brep slice): `geometry::tessellate_item` now evaluates
