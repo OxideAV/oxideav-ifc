@@ -19,7 +19,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, faceted Breps (`IfcFacetedBrep`(`WithVoids`)) + face/shell surface models, and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + Brep + placement slices); swept solids later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, faceted Breps (`IfcFacetedBrep`(`WithVoids`)) + face/shell surface models, extruded swept solids (`IfcExtrudedAreaSolid`), and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + Brep + extrusion + placement slices); revolved/curved solids later |
 
 ## Phase 1 surface
 
@@ -153,6 +153,20 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   vertex. Per-bound `Orientation` flags and `Voids` boolean subtraction
   are not yet applied — the outer surface is meshed as authored; advanced
   (curved) breps and `IfcFaceSurface` faces remain `Unsupported`.
+* `tessellate_item` also sweeps the **extruded area solid**
+  `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
+  `Depth`): the 2-D profile is resolved to its outer ring — from an
+  `IfcArbitraryClosedProfileDef` whose `OuterCurve` is an `IfcPolyline`
+  (a duplicated closing point is dropped), or an `IfcRectangleProfileDef`
+  (a centred `XDim`×`YDim` rectangle, with its optional 2-D `Position`
+  applied) — and swept into a closed prism: a bottom cap, a
+  `Depth · ExtrudedDirection`-offset top cap, and one side-wall quad per
+  profile edge. The optional `Position` `IfcAxis2Placement3D` re-places
+  the whole solid. The wall fixture's body/opening/window each extrude a
+  polyline profile and now mesh as 8-vertex boxes. Revolved /
+  surface-curve / tapered swept solids, non-rectangle parameterised
+  profiles, curved profile curves, and `Voids` (profile-hole)
+  subtraction remain `Unsupported`.
 * `mesh_from_shape_representation` / `mesh_from_product_shape` — the walk
   from a product's `Representation` down through
   `IfcProductDefinitionShape.Representations` →
@@ -180,11 +194,14 @@ products outside the typed schema slice, e.g. `IfcBuildingElementProxy`,
 are still placed). The five fixture models decode to 8/24-vertex boxes
 (cube proxy, column, colour cube) and the dense basin mesh; the column
 body lands at its placed origin `(432, 288, 48)`. The swept-solid wall
-model reports `Unsupported` (no tessellation or Brep present). Faceted
-Breps and face/shell surface models flow through the same product-shape
-walk and lift into the scene identically.
+model now decodes to three 8-vertex boxes — its wall body, opening and
+window extruded from polyline profiles. Faceted Breps, face/shell surface
+models and extruded swept solids flow through the same product-shape walk
+and lift into the scene identically.
 
-Still later in Phase 3: swept solids (`IfcExtrudedAreaSolid`), advanced
+Still later in Phase 3: the remaining swept solids
+(`IfcRevolvedAreaSolid` / `IfcSurfaceCurveSweptAreaSolid` / the tapered
+extrusion), non-rectangle parameterised + curved-curve profiles, advanced
 (curved) breps (`IfcAdvancedBrep` / `IfcFaceSurface`), boolean results,
 mapped items, `Voids` subtraction, and EXPRESS WHERE-rule validation.
 
@@ -195,9 +212,9 @@ mapped items, `Voids` subtraction, and EXPRESS WHERE-rule validation.
   direct constructor, and `register_mesh3d(&mut Mesh3DRegistry)`
   (format id `"ifc"`, extension `.ifc`). The decoder probes the magic,
   fully parses + validates the exchange structure, and extracts every
-  tessellated / faceted-Brep product shape into the `Scene3D`; a model with
-  no extractable geometry (only swept solids / advanced breps) decodes to
-  `Unsupported`.
+  tessellated / faceted-Brep / extruded-swept-solid product shape into the
+  `Scene3D`; a model with no extractable geometry (only revolved/advanced
+  breps) decodes to `Unsupported`.
 * `--no-default-features` — standalone STEP parser only, std types,
   zero dependencies.
 

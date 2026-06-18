@@ -11,6 +11,7 @@ const BASIN: &[u8] = include_bytes!("fixtures/ifc4-basin-tessellation.ifc");
 const COLUMN: &[u8] = include_bytes!("fixtures/ifc4-column-straight-rectangle-tessellation.ifc");
 const ITEM: &[u8] = include_bytes!("fixtures/ifc4-tessellated-item.ifc");
 const COLORS: &[u8] = include_bytes!("fixtures/ifc4-tessellation-with-individual-colors.ifc");
+const WALL: &[u8] = include_bytes!("fixtures/ifc4-wall-with-opening-and-window.ifc");
 
 /// Tessellate the single `IfcTriangulatedFaceSet` at `face_set_id`.
 fn mesh_of(bytes: &[u8], face_set_id: u64) -> TriMesh {
@@ -89,6 +90,42 @@ fn column_placement_positions_body_in_world_space() {
     // Local top row #287 entry 5 = (-4, 4, 120) → world (428, 292, 168).
     let w_top = world.positions[4];
     assert!((w_top[2] - 168.0).abs() < 1e-9, "top z {w_top:?}");
+}
+
+#[test]
+fn wall_body_extruded_area_solid() {
+    // #71 = IFCEXTRUDEDAREASOLID(#72, #79, #27, 2000.): a 3000×300
+    // rectangle authored as a closed polyline profile (#73, four corners
+    // + repeated closing point) swept +Z by 2000, with Position #79 at
+    // the local origin. Closing point dropped → 4 ring points → an
+    // 8-vertex / 12-triangle prism.
+    let f = parse_step(WALL).expect("parse");
+    let m = tessellate_item(&f, 71).expect("extrude wall body");
+    assert_eq!(m.vertex_count(), 8);
+    assert_eq!(m.triangle_count(), 12);
+    // Bottom ring sits in z = 0, top ring in z = 2000 (Depth).
+    for p in &m.positions[..4] {
+        assert!(p[2].abs() < 1e-6, "bottom ring z {p:?}");
+    }
+    for p in &m.positions[4..] {
+        assert!((p[2] - 2000.0).abs() < 1e-6, "top ring z {p:?}");
+    }
+    // Profile spans X 0..3000, Y 0..300 (the wall footprint).
+    let max_x = m.positions.iter().map(|p| p[0]).fold(0.0_f64, f64::max);
+    let max_y = m.positions.iter().map(|p| p[1]).fold(0.0_f64, f64::max);
+    assert!((max_x - 3000.0).abs() < 1e-6, "footprint X {max_x}");
+    assert!((max_y - 300.0).abs() < 1e-6, "footprint Y {max_y}");
+}
+
+#[test]
+fn wall_product_shape_skips_axis_keeps_body() {
+    // #48 = IFCPRODUCTDEFINITIONSHAPE(.., (#66, #70)) mixes a 'Curve2D'
+    // axis representation (#66, unsupported here) with the 'SweptSolid'
+    // body (#70 → #71). The product-shape walk yields just the body box.
+    let f = parse_step(WALL).expect("parse");
+    let m = mesh_from_product_shape(&f, 48).expect("wall body via product shape");
+    assert_eq!(m.vertex_count(), 8);
+    assert_eq!(m.triangle_count(), 12);
 }
 
 #[test]

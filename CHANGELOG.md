@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (extruded-swept-solid slice): `tessellate_item` now sweeps
+  `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
+  `Depth`) into a closed prism, so extruded bodies flow through the same
+  `mesh_from_product_shape` / registry-decoder path into a `Scene3D`.
+  - The 2-D profile is resolved to its outer ring from
+    `IfcArbitraryClosedProfileDef` (`OuterCurve` an `IfcPolyline`; a
+    duplicated closing point is dropped) or `IfcRectangleProfileDef`
+    (centred `XDim`×`YDim`, optional 2-D `Position` applied via the
+    EXPRESS `IfcBuild2Axes` derivation). Attribute orders transcribed
+    from the staged `IFC4_ADD2.exp` declarations.
+  - The ring is swept along `Depth · normalise(ExtrudedDirection)` into a
+    bottom cap, an offset top cap, and one side-wall quad per profile
+    edge; the optional `Position` `IfcAxis2Placement3D` re-places the
+    whole solid (§8.8.3.15: the direction and profile are in the position
+    coordinate system).
+  - The wall fixture (body / opening / window are polyline-profile
+    extrusions) now decodes to three 8-vertex boxes instead of reporting
+    `Unsupported`. Revolved / surface-curve / tapered solids,
+    non-rectangle parameterised + curved-curve profiles, and `Voids`
+    (profile-hole) subtraction remain `Unsupported`.
+  - New `GeometryError::BadProfile` variant; 9 new geometry unit tests +
+    2 wall-fixture tests; the registry wall test now asserts a 3-box
+    scene.
 - Phase 3 (faceted-Brep slice): `tessellate_item` now evaluates the
   faceted boundary-representation family in addition to the index-based
   tessellations, so faceted-Brep bodies flow through the same

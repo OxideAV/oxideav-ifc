@@ -51,10 +51,26 @@
 //! three poly loops"). `Voids` inner shells and per-bound `Orientation`
 //! flags are not yet applied — the outer surface is meshed as authored.
 //!
+//! Beyond the face-set / Brep families this module also sweeps the
+//! linear **swept area solid**:
+//!
+//! * **`IfcExtrudedAreaSolid`** (`SweptArea`, `Position`,
+//!   `ExtrudedDirection`, `Depth`) — a 2-D profile area swept along a
+//!   direction by a depth into a closed prism (§8.8.3.15). The profile is
+//!   resolved to its outer ring from an `IfcArbitraryClosedProfileDef`
+//!   (`IfcPolyline` outer curve) or an `IfcRectangleProfileDef`
+//!   (centred `XDim`×`YDim`, with an optional 2-D `Position`), then a
+//!   bottom cap, a `Depth · ExtrudedDirection`-offset top cap, and a
+//!   side-wall quad per profile edge are emitted and re-placed by the
+//!   solid's optional `Position` `IfcAxis2Placement3D`.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): swept solids (`IfcExtrudedAreaSolid`),
-//! advanced/curved breps (`IfcAdvancedBrep`, `IfcFaceSurface`), boolean
-//! results, and mapped items.
+//! rather than silently dropped): the other swept solids
+//! (`IfcRevolvedAreaSolid`, `IfcSurfaceCurveSweptAreaSolid`, the tapered
+//! extrusion), parameterised profiles beyond the rectangle, curved
+//! (`IfcIndexedPolyCurve`/circle) profile curves, advanced/curved breps
+//! (`IfcAdvancedBrep`, `IfcFaceSurface`), boolean results, and mapped
+//! items.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -109,6 +125,10 @@ pub enum GeometryError {
     IndexOutOfRange,
     /// A coordinate row did not have three numeric components.
     BadCoordinate,
+    /// A swept-area solid's profile (`SweptArea`) is malformed, of an
+    /// unsupported profile kind, or yields fewer than three planar
+    /// points.
+    BadProfile,
 }
 
 impl core::fmt::Display for GeometryError {
@@ -123,6 +143,7 @@ impl core::fmt::Display for GeometryError {
             }
             Self::IndexOutOfRange => f.write_str("tessellation index out of range"),
             Self::BadCoordinate => f.write_str("coordinate row is not three reals"),
+            Self::BadProfile => f.write_str("swept-area solid profile is malformed or unsupported"),
         }
     }
 }
@@ -146,6 +167,8 @@ pub fn tessellate_item(step: &StepFile, id: u64) -> Result<TriMesh, GeometryErro
         "IFCFACETEDBREP" | "IFCFACETEDBREPWITHVOIDS" => faceted_brep(step, &inst.args),
         // Surface models: collections of IfcConnectedFaceSet / IfcShell.
         "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => surface_model(step, &inst.args),
+        // Swept area solid: sweep a 2-D profile along a direction.
+        "IFCEXTRUDEDAREASOLID" => extruded_area_solid(step, &inst.args),
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
 }
@@ -777,6 +800,241 @@ fn surface_model(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryErr
     })
 }
 
+// ---------------------------------------------------------------------
+// IfcExtrudedAreaSolid
+//
+//   IfcSweptAreaSolid.SweptArea : IfcProfileDef      (attr index 0)
+//   IfcSweptAreaSolid.Position  : OPTIONAL IfcAxis2Placement3D (index 1)
+//   IfcExtrudedAreaSolid.ExtrudedDirection : IfcDirection (index 2)
+//   IfcExtrudedAreaSolid.Depth  : IfcPositiveLengthMeasure (index 3)
+//
+// The profile (a closed 2-D area) is swept along ExtrudedDirection by
+// Depth. Both ExtrudedDirection and the profile are expressed in the
+// solid's `Position` coordinate system (ISO 16739 §8.8.3.15); the whole
+// result is then mapped into the representation's local space by the
+// `Position` IfcAxis2Placement3D affine.
+//
+// The mesh built here is a closed prism over the (assumed convex,
+// planar, CCW) profile ring: a bottom cap, a top cap offset by
+// `Depth · ExtrudedDirection`, and a quad side wall per profile edge.
+// Profile inner boundaries (holes) and the tapered subtype are not yet
+// applied — the outer ring is meshed as authored.
+// ---------------------------------------------------------------------
+fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    // SweptArea (profile) — attribute index 0.
+    let profile_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let ring = profile_ring(step, profile_id)?;
+    if ring.len() < 3 {
+        return Err(GeometryError::BadProfile);
+    }
+
+    // ExtrudedDirection (index 2) and Depth (index 3), both in the
+    // Position coordinate system.
+    let dir = direction(step, args.get(2))?.ok_or(GeometryError::BadCoordinates)?;
+    let depth = args
+        .get(3)
+        .and_then(Value::as_number)
+        .ok_or(GeometryError::BadCoordinate)?;
+    // The sweep vector: Depth times the (normalised) extruded direction.
+    let d = normalise(dir).unwrap_or(dir);
+    let sweep = [d[0] * depth, d[1] * depth, d[2] * depth];
+
+    let n = ring.len();
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n * 2);
+    // Bottom ring (profile plane, local z = 0).
+    for &[x, y] in &ring {
+        positions.push([x, y, 0.0]);
+    }
+    // Top ring (bottom + sweep).
+    for &[x, y] in &ring {
+        positions.push([x + sweep[0], y + sweep[1], sweep[2]]);
+    }
+
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity((n - 2) * 2 + n * 2);
+    // Bottom cap (fan from vertex 0), wound to face away from the sweep
+    // (reversed relative to the top cap).
+    for i in 1..(n - 1) {
+        triangles.push([0, (i + 1) as u32, i as u32]);
+    }
+    // Top cap (fan from the first top vertex), normal winding.
+    let top = n as u32;
+    for i in 1..(n - 1) {
+        triangles.push([top, top + i as u32, top + (i + 1) as u32]);
+    }
+    // Side walls: one quad (two triangles) per profile edge i → i+1.
+    for i in 0..n {
+        let i_next = (i + 1) % n;
+        let b0 = i as u32;
+        let b1 = i_next as u32;
+        let t0 = top + i as u32;
+        let t1 = top + i_next as u32;
+        triangles.push([b0, b1, t1]);
+        triangles.push([b0, t1, t0]);
+    }
+
+    let mut mesh = TriMesh {
+        positions,
+        triangles,
+    };
+
+    // Position: OPTIONAL IfcAxis2Placement3D (index 1). When present it
+    // re-places the whole swept solid; absent → local identity.
+    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
+        let xform = axis2_placement_3d(step, pos_id)?;
+        mesh.transform(&xform);
+    }
+    Ok(mesh)
+}
+
+/// Resolve an `IfcProfileDef` to its outer-boundary ring as a list of
+/// 2-D `[x, y]` points (no duplicated closing vertex).
+///
+/// Supported profile kinds:
+/// * `IfcArbitraryClosedProfileDef(ProfileType, ProfileName, OuterCurve)`
+///   — the `OuterCurve` (attribute index 2) is an `IfcPolyline` whose
+///   `Points` are 2-D `IfcCartesianPoint`s.
+/// * `IfcRectangleProfileDef(ProfileType, ProfileName, Position, XDim,
+///   YDim)` — a rectangle centred on its 2-D `Position` origin with full
+///   widths `XDim` (index 3) / `YDim` (index 4); the optional `Position`
+///   `IfcAxis2Placement2D` offsets/rotates it in the profile plane.
+///
+/// Any other profile keyword is [`GeometryError::Unsupported`].
+fn profile_ring(step: &StepFile, profile_id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
+    let inst = step
+        .get(profile_id)
+        .ok_or(GeometryError::MissingInstance(profile_id))?;
+    match inst.keyword.as_str() {
+        "IFCARBITRARYCLOSEDPROFILEDEF" | "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
+            // OuterCurve : IfcCurve — attribute index 2. Inner voids (the
+            // …WithVoids subtype) are not subtracted in this slice.
+            let curve_id = inst
+                .args
+                .get(2)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadProfile)?;
+            let ring = polyline_points_2d(step, curve_id)?;
+            Ok(close_ring(ring))
+        }
+        "IFCRECTANGLEPROFILEDEF" => {
+            // (ProfileType, ProfileName, Position, XDim, YDim).
+            let xdim = inst
+                .args
+                .get(3)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let ydim = inst
+                .args
+                .get(4)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let (hx, hy) = (xdim / 2.0, ydim / 2.0);
+            // Centred rectangle, counter-clockwise from the −x/−y corner.
+            let mut ring = vec![[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+            // Optional 2-D Position (index 2): place each corner.
+            if let Some(pos_id) = inst.args.get(2).and_then(Value::as_reference) {
+                let pl = axis2_placement_2d(step, pos_id)?;
+                for p in &mut ring {
+                    *p = pl.apply(*p);
+                }
+            }
+            Ok(ring)
+        }
+        other => Err(GeometryError::Unsupported(other.to_string())),
+    }
+}
+
+/// Resolve an `IfcPolyline` (`Points : LIST OF IfcCartesianPoint`,
+/// attribute index 0) to a list of 2-D `[x, y]` points (a third
+/// component, if present, is dropped — a closed profile curve is planar).
+fn polyline_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCPOLYLINE" {
+        // IfcIndexedPolyCurve / circles / composite curves are out of
+        // this slice; surface the keyword so callers can tell why.
+        return Err(GeometryError::Unsupported(inst.keyword.clone()));
+    }
+    let points = inst
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    let mut out = Vec::with_capacity(points.len());
+    for p in points {
+        let pt = cartesian_point(step, Some(p))?;
+        out.push([pt[0], pt[1]]);
+    }
+    Ok(out)
+}
+
+/// Drop a duplicated closing vertex from a profile ring (an `IfcPolyline`
+/// outer curve commonly repeats its first point as the last), so the
+/// extrusion side-wall loop does not generate a degenerate quad.
+fn close_ring(mut ring: Vec<[f64; 2]>) -> Vec<[f64; 2]> {
+    if ring.len() >= 2 {
+        let first = ring[0];
+        let last = ring[ring.len() - 1];
+        let eq = (first[0] - last[0]).abs() < 1e-12 && (first[1] - last[1]).abs() < 1e-12;
+        if eq {
+            ring.pop();
+        }
+    }
+    ring
+}
+
+/// A 2-D affine placement (the profile-plane analogue of [`Transform`]):
+/// an origin plus the orthonormal `x_axis` / `y_axis` of an
+/// `IfcAxis2Placement2D`.
+struct Placement2D {
+    origin: [f64; 2],
+    x_axis: [f64; 2],
+    y_axis: [f64; 2],
+}
+
+impl Placement2D {
+    /// Map a local 2-D point into the placement's parent plane.
+    fn apply(&self, p: [f64; 2]) -> [f64; 2] {
+        [
+            self.origin[0] + self.x_axis[0] * p[0] + self.y_axis[0] * p[1],
+            self.origin[1] + self.x_axis[1] * p[0] + self.y_axis[1] * p[1],
+        ]
+    }
+}
+
+/// Build the 2-D affine of an `IfcAxis2Placement2D(Location,
+/// RefDirection)`. The X axis is `RefDirection` normalised (default world
+/// +X); Y is the 90° counter-clockwise rotation of X (EXPRESS
+/// `IfcBuild2Axes`).
+fn axis2_placement_2d(step: &StepFile, id: u64) -> Result<Placement2D, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCAXIS2PLACEMENT2D" {
+        return Err(GeometryError::BadProfile);
+    }
+    let loc = cartesian_point(step, inst.args.first())?;
+    let origin = [loc[0], loc[1]];
+    // RefDirection (index 1) → X axis; default world +X.
+    let x_axis = match direction(step, inst.args.get(1))? {
+        Some(d) => {
+            let mag = (d[0] * d[0] + d[1] * d[1]).sqrt();
+            if mag > 0.0 {
+                [d[0] / mag, d[1] / mag]
+            } else {
+                [1.0, 0.0]
+            }
+        }
+        None => [1.0, 0.0],
+    };
+    // Y = 90° CCW rotation of X (EXPRESS IfcBuild2Axes: [-X.y, X.x]).
+    let y_axis = [-x_axis[1], x_axis[0]];
+    Ok(Placement2D {
+        origin,
+        x_axis,
+        y_axis,
+    })
+}
+
 /// Walk an `IfcConnectedFaceSet` (or its `IfcClosedShell` / `IfcOpenShell`
 /// subtypes), triangulating each member `IfcFace` into `triangles`
 /// against the shared `pool`. `CfsFaces` is attribute index 0.
@@ -1051,12 +1309,12 @@ mod tests {
 
     #[test]
     fn shape_representation_skips_unsupported_items() {
-        // A representation mixing a (currently unsupported) extruded
-        // solid with a triangulated body still yields the body mesh.
+        // A representation mixing a (still unsupported) revolved solid
+        // with a triangulated body still yields the body mesh.
         let f = parse(
             "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
              #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
-             #3=IFCEXTRUDEDAREASOLID(#9,#9,#9,1.0);\n\
+             #3=IFCREVOLVEDAREASOLID(#9,#9,#9,1.0);\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#3,#2));",
         );
         let m = mesh_from_shape_representation(&f, 4).unwrap();
@@ -1066,13 +1324,13 @@ mod tests {
     #[test]
     fn all_unsupported_surfaces_keyword() {
         let f = parse(
-            "#3=IFCEXTRUDEDAREASOLID(#9,#9,#9,1.0);\n\
+            "#3=IFCREVOLVEDAREASOLID(#9,#9,#9,1.0);\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','SweptSolid',(#3));",
         );
         let err = mesh_from_shape_representation(&f, 4).unwrap_err();
         assert_eq!(
             err,
-            GeometryError::Unsupported("IFCEXTRUDEDAREASOLID".to_string())
+            GeometryError::Unsupported("IFCREVOLVEDAREASOLID".to_string())
         );
     }
 
@@ -1424,6 +1682,140 @@ mod tests {
         );
         let m = mesh_from_shape_representation(&f, 50).unwrap();
         assert_eq!(m.triangle_count(), 1);
+    }
+
+    #[test]
+    fn extruded_rectangle_is_a_box() {
+        // A 2×4 rectangle profile extruded +Z by 3 → a closed box.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,3.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        // 4 ring points → 8 vertices (bottom + top).
+        assert_eq!(m.vertex_count(), 8);
+        // 2 cap fans (2 tris each) + 4 side quads (2 tris each) = 12.
+        assert_eq!(m.triangle_count(), 12);
+        // Rectangle is centred: x in [-1,1], y in [-2,2].
+        for p in &m.positions[..4] {
+            assert!((p[0].abs() - 1.0).abs() < 1e-9);
+            assert!((p[1].abs() - 2.0).abs() < 1e-9);
+            approx(*p, [p[0], p[1], 0.0]);
+        }
+        // Top ring lifted to z = 3.
+        for p in &m.positions[4..] {
+            assert!((p[2] - 3.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn extruded_arbitrary_polyline_profile() {
+        // A triangle profile (closing point repeated) extruded +Z by 2.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCCARTESIANPOINT((10.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,10.));\n\
+             #4=IFCPOLYLINE((#1,#2,#3,#1));\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,2.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        // Duplicated closing point dropped → 3 ring points → 6 vertices.
+        assert_eq!(m.vertex_count(), 6);
+        // 2 cap fans (1 tri each) + 3 side quads (2 each) = 8 triangles.
+        assert_eq!(m.triangle_count(), 8);
+        approx(m.positions[0], [0.0, 0.0, 0.0]);
+        approx(m.positions[3], [0.0, 0.0, 2.0]);
+        approx(m.positions[4], [10.0, 0.0, 2.0]);
+    }
+
+    #[test]
+    fn extruded_solid_position_replaces_result() {
+        // A unit square extruded +Z by 1, then repositioned by a
+        // Position whose Location is (100, 0, 0).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.));\n\
+             #3=IFCCARTESIANPOINT((1.,1.));\n\
+             #4=IFCCARTESIANPOINT((0.,1.));\n\
+             #5=IFCPOLYLINE((#1,#2,#3,#4,#1));\n\
+             #6=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#5);\n\
+             #7=IFCDIRECTION((0.,0.,1.));\n\
+             #8=IFCCARTESIANPOINT((100.,0.,0.));\n\
+             #9=IFCAXIS2PLACEMENT3D(#8,$,$);\n\
+             #10=IFCEXTRUDEDAREASOLID(#6,#9,#7,1.);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        // Every vertex shifted +100 in X by the Position.
+        approx(m.positions[0], [100.0, 0.0, 0.0]);
+        approx(m.positions[2], [101.0, 1.0, 0.0]);
+        // Top ring: z = 1, still +100 in X.
+        approx(m.positions[4], [100.0, 0.0, 1.0]);
+    }
+
+    #[test]
+    fn extruded_oblique_direction_shears_top() {
+        // A non-axis-aligned ExtrudedDirection shears the top cap.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);\n\
+             #2=IFCDIRECTION((1.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        // Sweep = 2 * normalise([1,0,1]) = [√2, 0, √2].
+        let s = 2f64.sqrt();
+        // Bottom ring at z=0, top ring offset by [√2,0,√2].
+        approx(m.positions[0], [-1.0, -1.0, 0.0]);
+        approx(m.positions[4], [-1.0 + s, -1.0, s]);
+    }
+
+    #[test]
+    fn extruded_rectangle_with_2d_position_offsets_ring() {
+        // The rectangle's 2-D Position translates the centred ring.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((5.,7.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCRECTANGLEPROFILEDEF(.AREA.,$,#2,2.,2.);\n\
+             #4=IFCDIRECTION((0.,0.,1.));\n\
+             #5=IFCEXTRUDEDAREASOLID(#3,$,#4,1.);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        // Centred unit-half rectangle around (5,7): corner at (4,6).
+        approx(m.positions[0], [4.0, 6.0, 0.0]);
+        approx(m.positions[2], [6.0, 8.0, 0.0]);
+    }
+
+    #[test]
+    fn extruded_unsupported_profile_surfaces_keyword() {
+        // A circle profile is out of this slice → Unsupported(keyword).
+        let f = parse(
+            "#1=IFCCIRCLEPROFILEDEF(.AREA.,$,$,3.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 3).unwrap_err(),
+            GeometryError::Unsupported("IFCCIRCLEPROFILEDEF".to_string())
+        );
+    }
+
+    #[test]
+    fn extruded_via_product_shape_walk() {
+        // The full product → shape → extruded-solid path the registry
+        // decoder takes for a swept-solid body.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,5.);\n\
+             #4=IFCSHAPEREPRESENTATION(#8,'Body','SweptSolid',(#3));\n\
+             #5=IFCPRODUCTDEFINITIONSHAPE($,$,(#4));",
+        );
+        let m = mesh_from_product_shape(&f, 5).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        assert_eq!(m.triangle_count(), 12);
     }
 
     #[test]

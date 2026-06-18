@@ -1,16 +1,17 @@
 //! `registry`-feature surface: the `Mesh3DDecoder` probes the
 //! ISO 10303-21 magic, validates the exchange structure, and extracts
-//! tessellated geometry into a `Scene3D` (Phase 3). A model whose only
-//! representations are unsupported geometry styles (swept solids, …)
-//! decodes to `Unsupported`.
+//! tessellated, faceted-Brep and extruded swept-solid geometry into a
+//! `Scene3D` (Phase 3). A model whose only representations are
+//! still-unsupported geometry styles decodes to `Unsupported`.
 
 #![cfg(feature = "registry")]
 
 use oxideav_ifc::{make_decoder, register_mesh3d};
 use oxideav_mesh3d::{Error, Mesh3DDecoder, Mesh3DRegistry};
 
-// Swept-solid wall — no tessellation, so geometry extraction reports
-// the body styles as not-yet-supported.
+// Swept-solid wall: the wall body, opening and window are each an
+// IfcExtrudedAreaSolid over an arbitrary (polyline) profile, now meshed
+// as closed prisms by the Phase-3 extruded-area-solid slice.
 const WALL: &[u8] = include_bytes!("fixtures/ifc4-wall-with-opening-and-window.ifc");
 // A single proxy element with one IfcTriangulatedFaceSet body (a cube).
 const TESS: &[u8] = include_bytes!("fixtures/ifc4-tessellated-item.ifc");
@@ -83,15 +84,33 @@ fn decode_column_positions_body_in_world_space() {
 }
 
 #[test]
-fn decode_swept_solid_model_reports_unsupported() {
+fn decode_extruded_swept_solid_model_yields_scene() {
+    // The wall fixture's bodies are IfcExtrudedAreaSolids over polyline
+    // profiles: a 3000×300×2000 wall plus an opening and a window box.
+    // Each extrudes a 4-point profile into an 8-vertex / 12-triangle
+    // prism, so the scene holds three boxes (24 verts, 36 triangles).
     let mut decoder = make_decoder();
-    match decoder.decode(WALL) {
-        Err(Error::Unsupported(msg)) => {
-            assert!(msg.contains("unsupported"), "{msg}");
-            assert!(msg.contains("Phase-3"), "{msg}");
-        }
-        other => panic!("expected Unsupported, got {other:?}"),
-    }
+    let scene = decoder
+        .decode(WALL)
+        .expect("wall swept-solid model decodes");
+    assert_eq!(scene.meshes.len(), 3, "wall body + opening + window");
+    assert_eq!(scene.vertex_count(), 24);
+    assert_eq!(scene.triangle_count(), 36);
+
+    // The wall body sweeps a 3000×300 profile +Z by 2000; some vertex
+    // must reach the far corner (3000, 300, 2000).
+    let positions: Vec<[f32; 3]> = scene
+        .meshes
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .flat_map(|p| p.positions.iter().copied())
+        .collect();
+    assert!(
+        positions.iter().any(|p| (p[0] - 3000.0).abs() < 1e-1
+            && (p[1] - 300.0).abs() < 1e-1
+            && (p[2] - 2000.0).abs() < 1e-1),
+        "expected the wall body's far-top corner at (3000, 300, 2000)"
+    );
 }
 
 #[test]
