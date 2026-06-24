@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (revolved-swept-solid slice): `tessellate_item` now revolves
+  `IfcRevolvedAreaSolid` (`SweptArea`, `Position`, `Axis`, `Angle`) into
+  a tessellated surface of revolution, so revolved bodies flow through
+  the same `mesh_from_product_shape` / registry-decoder path into a
+  `Scene3D`.
+  - The 2-D profile ring (in the `Position` XY-plane, z = 0) is stepped
+    through a fan of angular positions about the `Axis`
+    `IfcAxis1Placement(Location, Axis)` line by `Angle` radians, via
+    Rodrigues' rotation (`rotate_about_axis`). A full 2π revolution wraps
+    closed (side walls only); a partial sweep adds fan end caps on the
+    open first/last rings. Angular resolution is
+    `REVOLVE_SEGMENTS_PER_TURN`(48) scaled by `Angle / 2π`. The optional
+    `Position` `IfcAxis2Placement3D` re-places the solid. Attribute and
+    derived-axis (`IfcAxis1Placement.Z` default world +Z) orders
+    transcribed from `IFC4_ADD2.exp`.
+  - Reuses the existing `profile_ring` (so arbitrary-polyline and
+    rectangle profiles revolve); `IfcRevolvedAreaSolidTapered` /
+    non-rectangle parameterised + curved-curve profiles remain
+    `Unsupported`.
+  - 6 new geometry unit tests (axis rotation, axis-1 placement defaults,
+    full-turn closed wrap, quarter-turn end caps, zero-angle rejection,
+    product-shape walk). Also typed in the Phase-2 schema layer
+    (`IfcRevolvedAreaSolid`, `IfcAxis1Placement`).
 - Phase 3 (mapped-item slice): `tessellate_item` now evaluates
   `IfcMappedItem` (`MappingSource`, `MappingTarget`), so reused /
   instanced representations flow through the same

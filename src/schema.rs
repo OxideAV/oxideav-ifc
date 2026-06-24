@@ -442,6 +442,20 @@ pub const SCHEMA: &[EntitySchema] = &[
             "Scale3"
         ]),
     },
+    // ---- Swept-area solids ----
+    EntitySchema {
+        keyword: "IFCAXIS1PLACEMENT",
+        kind: EntityKind::Geometry,
+        // IfcPlacement(Location) + IfcAxis1Placement(Axis).
+        attrs: chain!(&["Location", "Axis"]),
+    },
+    EntitySchema {
+        keyword: "IFCREVOLVEDAREASOLID",
+        kind: EntityKind::Geometry,
+        // IfcSweptAreaSolid(SweptArea, Position) +
+        // IfcRevolvedAreaSolid(Axis, Angle).
+        attrs: chain!(&["SweptArea", "Position", "Axis", "Angle"]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -863,6 +877,8 @@ mod tests {
             ("IFCREPRESENTATIONMAP", 2), // MappingOrigin + MappedRepresentation
             ("IFCCARTESIANTRANSFORMATIONOPERATOR3D", 5), // A1,A2,LocalOrigin,Scale,A3
             ("IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM", 7), // +Scale2,Scale3
+            ("IFCAXIS1PLACEMENT", 2),    // Location + Axis
+            ("IFCREVOLVEDAREASOLID", 4), // SweptArea,Position,Axis,Angle
         ];
         for (kw, want) in lens {
             assert_eq!(

@@ -194,6 +194,8 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => surface_model(step, &inst.args),
         // Swept area solid: sweep a 2-D profile along a direction.
         "IFCEXTRUDEDAREASOLID" => extruded_area_solid(step, &inst.args),
+        // Revolved area solid: revolve a 2-D profile about an axis line.
+        "IFCREVOLVEDAREASOLID" => revolved_area_solid(step, &inst.args),
         // Mapped item: instance a source representation under a Cartesian
         // transformation operator.
         "IFCMAPPEDITEM" => mapped_item(step, &inst.args, depth),
@@ -928,6 +930,167 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     Ok(mesh)
 }
 
+// ---------------------------------------------------------------------
+// IfcRevolvedAreaSolid (IfcSweptAreaSolid + Axis : IfcAxis1Placement,
+//   Angle : IfcPlaneAngleMeasure)
+//   inherited args: SweptArea (0), Position (1); own: Axis (2), Angle (3)
+//
+// The 2-D profile (in the Position XY-plane, z = 0) is revolved about the
+// `Axis` line by `Angle` radians (right-hand rule about the axis
+// direction). Per the EXPRESS WHERE rules `AxisStartInXY` /
+// `AxisDirectionInXY`, both the axis Location and its direction lie in the
+// XY-plane. We approximate the revolution by stepping the profile ring
+// through a fan of intermediate angular positions, emitting a ring of
+// vertices at each step; the side walls stitch adjacent rings, and (for a
+// partial, non-2π revolution) the first/last profile rings cap the open
+// ends. A full 2π revolution wraps closed with no end caps.
+//
+// The angular resolution is a fixed segment count — a faithful tessellated
+// approximation of the analytic surface of revolution (the spec defines
+// the exact swept surface; the mesh density is an extraction choice).
+// ---------------------------------------------------------------------
+
+/// Number of angular segments per full 2π of revolution. The actual
+/// segment count for a partial sweep is scaled by `Angle / 2π`, with at
+/// least one segment.
+const REVOLVE_SEGMENTS_PER_TURN: usize = 48;
+
+fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    // SweptArea (index 0).
+    let profile_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let ring = profile_ring(step, profile_id)?;
+    if ring.len() < 3 {
+        return Err(GeometryError::BadProfile);
+    }
+
+    // Axis : IfcAxis1Placement (index 2) — its Location and direction.
+    let axis_id = args
+        .get(2)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let (axis_origin, axis_dir) = axis1_placement(step, axis_id)?;
+
+    // Angle : IfcPlaneAngleMeasure (index 3), radians.
+    let angle = args
+        .get(3)
+        .and_then(Value::as_number)
+        .ok_or(GeometryError::BadCoordinate)?;
+    if angle == 0.0 {
+        return Err(GeometryError::BadProfile);
+    }
+
+    // Segment count proportional to the swept angle (≥1).
+    let frac = (angle.abs() / (2.0 * core::f64::consts::PI)).min(1.0);
+    let segments = ((REVOLVE_SEGMENTS_PER_TURN as f64 * frac).ceil() as usize).max(1);
+    let two_pi = 2.0 * core::f64::consts::PI;
+    // A full turn (within tolerance) wraps closed: no end caps, and the
+    // last ring coincides with the first.
+    let full_turn = (angle.abs() - two_pi).abs() < 1e-9 || angle.abs() > two_pi;
+    let ring_count = if full_turn { segments } else { segments + 1 };
+
+    let n = ring.len();
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n * ring_count);
+    for s in 0..ring_count {
+        // Angular position of this ring (the last ring of a full turn is
+        // not emitted separately — it reuses ring 0).
+        let theta = angle * (s as f64) / (segments as f64);
+        for &[x, y] in &ring {
+            let p = [x, y, 0.0];
+            positions.push(rotate_about_axis(p, axis_origin, axis_dir, theta));
+        }
+    }
+
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    // Side walls: stitch each adjacent pair of rings into quads.
+    for s in 0..segments {
+        let a = ((s % ring_count) * n) as u32;
+        let b = (((s + 1) % ring_count) * n) as u32;
+        for i in 0..n {
+            let i_next = ((i + 1) % n) as u32;
+            let i = i as u32;
+            // Quad (a+i, a+i_next, b+i_next, b+i).
+            triangles.push([a + i, a + i_next, b + i_next]);
+            triangles.push([a + i, b + i_next, b + i]);
+        }
+    }
+    // End caps for a partial revolution: fan-triangulate the first and
+    // last profile rings (the open ends of the swept volume).
+    if !full_turn {
+        let first = 0u32;
+        for i in 1..(n - 1) {
+            triangles.push([first, first + (i + 1) as u32, first + i as u32]);
+        }
+        let last = (segments * n) as u32;
+        for i in 1..(n - 1) {
+            triangles.push([last, last + i as u32, last + (i + 1) as u32]);
+        }
+    }
+
+    let mut mesh = TriMesh {
+        positions,
+        triangles,
+    };
+
+    // Position: OPTIONAL IfcAxis2Placement3D (index 1) re-places the solid.
+    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
+        let xform = axis2_placement_3d(step, pos_id)?;
+        mesh.transform(&xform);
+    }
+    Ok(mesh)
+}
+
+/// Resolve an `IfcAxis1Placement(Location, Axis)` to its `(origin,
+/// direction)` pair. `Axis` is `OPTIONAL`; the EXPRESS derived `Z`
+/// defaults it to world +Z (`[0,0,1]`).
+fn axis1_placement(step: &StepFile, id: u64) -> Result<([f64; 3], [f64; 3]), GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCAXIS1PLACEMENT" {
+        return Err(GeometryError::BadCoordinates);
+    }
+    let origin = cartesian_point(step, inst.args.first())?;
+    let dir = direction(step, inst.args.get(1))?
+        .and_then(normalise)
+        .unwrap_or([0.0, 0.0, 1.0]);
+    Ok((origin, dir))
+}
+
+/// Rotate point `p` about the line through `origin` with unit direction
+/// `axis` by `theta` radians (right-hand rule), via Rodrigues' rotation
+/// formula applied to the offset `v = p − origin`.
+fn rotate_about_axis(p: [f64; 3], origin: [f64; 3], axis: [f64; 3], theta: f64) -> [f64; 3] {
+    let k = normalise(axis).unwrap_or([0.0, 0.0, 1.0]);
+    let v = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+    let c = theta.cos();
+    let s = theta.sin();
+    let kv = dot_raw(k, v);
+    let kxv = cross_raw(k, v);
+    // v_rot = v·cosθ + (k×v)·sinθ + k·(k·v)·(1−cosθ).
+    let r = [
+        v[0] * c + kxv[0] * s + k[0] * kv * (1.0 - c),
+        v[1] * c + kxv[1] * s + k[1] * kv * (1.0 - c),
+        v[2] * c + kxv[2] * s + k[2] * kv * (1.0 - c),
+    ];
+    [r[0] + origin[0], r[1] + origin[1], r[2] + origin[2]]
+}
+
+/// Raw dot product (no re-normalisation — unlike [`dot`], which the
+/// EXPRESS `IfcDotProduct` definition normalises its inputs first).
+fn dot_raw(a: [f64; 3], b: [f64; 3]) -> f64 {
+    a[0] * b[0] + a[1] * b[1] + a[2] * b[2]
+}
+
+/// Raw cross product (no input re-normalisation — unlike [`cross`]).
+fn cross_raw(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
+    [
+        a[1] * b[2] - a[2] * b[1],
+        a[2] * b[0] - a[0] * b[2],
+        a[0] * b[1] - a[1] * b[0],
+    ]
+}
+
 // =====================================================================
 // IfcMappedItem  (MappingSource, MappingTarget)
 //
@@ -1569,12 +1732,12 @@ mod tests {
 
     #[test]
     fn shape_representation_skips_unsupported_items() {
-        // A representation mixing a (still unsupported) revolved solid
-        // with a triangulated body still yields the body mesh.
+        // A representation mixing a (still unsupported) surface-curve
+        // swept solid with a triangulated body still yields the body mesh.
         let f = parse(
             "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
              #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
-             #3=IFCREVOLVEDAREASOLID(#9,#9,#9,1.0);\n\
+             #3=IFCSURFACECURVESWEPTAREASOLID(#9,#9,#9,#9,#9,#9);\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#3,#2));",
         );
         let m = mesh_from_shape_representation(&f, 4).unwrap();
@@ -1584,13 +1747,13 @@ mod tests {
     #[test]
     fn all_unsupported_surfaces_keyword() {
         let f = parse(
-            "#3=IFCREVOLVEDAREASOLID(#9,#9,#9,1.0);\n\
+            "#3=IFCSURFACECURVESWEPTAREASOLID(#9,#9,#9,#9,#9,#9);\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','SweptSolid',(#3));",
         );
         let err = mesh_from_shape_representation(&f, 4).unwrap_err();
         assert_eq!(
             err,
-            GeometryError::Unsupported("IFCREVOLVEDAREASOLID".to_string())
+            GeometryError::Unsupported("IFCSURFACECURVESWEPTAREASOLID".to_string())
         );
     }
 
@@ -2304,5 +2467,141 @@ mod tests {
         approx(t.translation, [4.0, 5.0, 0.0]);
         approx(t.apply([1.0, 0.0, 0.0]), [6.0, 5.0, 0.0]);
         approx(t.apply([0.0, 1.0, 0.0]), [4.0, 7.0, 0.0]);
+    }
+
+    // --- IfcRevolvedAreaSolid -----------------------------------------
+
+    /// `rotate_about_axis`: a 90° turn about the world Z axis through the
+    /// origin maps +X → +Y, and is unaffected by Z.
+    #[test]
+    fn rotate_about_z_axis_quarter_turn() {
+        let q = core::f64::consts::FRAC_PI_2;
+        approx(
+            rotate_about_axis([1.0, 0.0, 5.0], [0.0, 0.0, 0.0], [0.0, 0.0, 1.0], q),
+            [0.0, 1.0, 5.0],
+        );
+        // Rotation about an offset axis line (through (2,0,0)).
+        approx(
+            rotate_about_axis([3.0, 0.0, 0.0], [2.0, 0.0, 0.0], [0.0, 0.0, 1.0], q),
+            [2.0, 1.0, 0.0],
+        );
+    }
+
+    /// `IfcAxis1Placement` with an absent `Axis` defaults its direction to
+    /// world +Z; an explicit direction is normalised.
+    #[test]
+    fn axis1_placement_defaults_and_explicit() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((1.,2.,0.));\n\
+             #2=IFCAXIS1PLACEMENT(#1,$);\n\
+             #3=IFCDIRECTION((0.,2.,0.));\n\
+             #4=IFCAXIS1PLACEMENT(#1,#3);",
+        );
+        let (o, d) = axis1_placement(&f, 2).unwrap();
+        approx(o, [1.0, 2.0, 0.0]);
+        approx(d, [0.0, 0.0, 1.0]);
+        let (_, d2) = axis1_placement(&f, 4).unwrap();
+        approx(d2, [0.0, 1.0, 0.0]);
+    }
+
+    /// A full 2π revolution of a unit square (offset from the axis) about
+    /// world Z wraps closed: `segments` rings, no end caps, side walls
+    /// only. With 48 segments × 4 profile verts that is 192 verts and
+    /// 48·4·2 = 384 triangles.
+    #[test]
+    fn revolved_full_turn_wraps_closed() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((2.,0.));\n\
+             #2=IFCCARTESIANPOINT((3.,0.));\n\
+             #3=IFCCARTESIANPOINT((3.,1.));\n\
+             #4=IFCCARTESIANPOINT((2.,1.));\n\
+             #5=IFCPOLYLINE((#1,#2,#3,#4,#1));\n\
+             #6=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#5);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCDIRECTION((0.,0.,1.));\n\
+             #12=IFCAXIS1PLACEMENT(#10,#11);\n\
+             #20=IFCREVOLVEDAREASOLID(#6,$,#12,6.283185307179586);",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_eq!(m.vertex_count(), 48 * 4);
+        assert_eq!(m.triangle_count(), 48 * 4 * 2);
+        // The profile lies in the XY-plane (z = 0) and is revolved about
+        // the world Z axis, so every vertex stays at z = 0 and its
+        // distance from the Z axis equals its in-plane radius — between
+        // the profile's nearest corner (2,0)→r=2 and farthest (3,1)→
+        // r=√10≈3.162.
+        for p in &m.positions {
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!(r > 1.99 && r < 3.17, "radius {r}");
+            assert!(p[2].abs() < 1e-9, "z {}", p[2]);
+        }
+    }
+
+    /// A quarter turn (π/2) is a *partial* revolution: `segments + 1`
+    /// rings plus two fan end caps. The first ring stays in the profile
+    /// plane (y = 0); the last ring is rotated 90° (x → y).
+    #[test]
+    fn revolved_quarter_turn_has_end_caps() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((2.,0.));\n\
+             #2=IFCCARTESIANPOINT((3.,0.));\n\
+             #3=IFCCARTESIANPOINT((3.,1.));\n\
+             #4=IFCCARTESIANPOINT((2.,1.));\n\
+             #5=IFCPOLYLINE((#1,#2,#3,#4,#1));\n\
+             #6=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#5);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCDIRECTION((0.,0.,1.));\n\
+             #12=IFCAXIS1PLACEMENT(#10,#11);\n\
+             #20=IFCREVOLVEDAREASOLID(#6,$,#12,1.5707963267948966);",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        // 48 * (π/2)/(2π) = 12 segments → 13 rings × 4 verts = 52.
+        assert_eq!(m.vertex_count(), 52);
+        // 12 segments side walls (12·4·2 = 96) + 2 end caps (2·2 = 4) = 100.
+        assert_eq!(m.triangle_count(), 12 * 4 * 2 + 2 * 2);
+        // First ring in the profile plane (y = 0).
+        approx(m.positions[0], [2.0, 0.0, 0.0]);
+        // Last ring rotated 90° about Z: (2,0,0) → (0,2,0).
+        approx(m.positions[48], [0.0, 2.0, 0.0]);
+    }
+
+    /// A zero `Angle` is a degenerate revolution → `BadProfile`.
+    #[test]
+    fn revolved_zero_angle_rejected() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((2.,0.));\n\
+             #2=IFCCARTESIANPOINT((3.,0.));\n\
+             #3=IFCCARTESIANPOINT((3.,1.));\n\
+             #5=IFCPOLYLINE((#1,#2,#3,#1));\n\
+             #6=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#5);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #12=IFCAXIS1PLACEMENT(#10,$);\n\
+             #20=IFCREVOLVEDAREASOLID(#6,$,#12,0.);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 20).unwrap_err(),
+            GeometryError::BadProfile
+        );
+    }
+
+    /// The revolved solid flows through the product-shape walk the
+    /// registry decoder takes.
+    #[test]
+    fn revolved_via_product_shape_walk() {
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,#30,2.,2.);\n\
+             #30=IFCAXIS2PLACEMENT2D(#31,$);\n\
+             #31=IFCCARTESIANPOINT((5.,0.));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCDIRECTION((0.,0.,1.));\n\
+             #12=IFCAXIS1PLACEMENT(#10,#11);\n\
+             #20=IFCREVOLVEDAREASOLID(#1,$,#12,3.141592653589793);\n\
+             #40=IFCSHAPEREPRESENTATION(#8,'Body','SweptSolid',(#20));\n\
+             #41=IFCPRODUCTDEFINITIONSHAPE($,$,(#40));",
+        );
+        let m = mesh_from_product_shape(&f, 41).unwrap();
+        // Half turn: 24 segments → 25 rings × 4 verts = 100.
+        assert_eq!(m.vertex_count(), 100);
+        assert!(m.triangle_count() > 0);
     }
 }
