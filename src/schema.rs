@@ -405,6 +405,43 @@ pub const SCHEMA: &[EntitySchema] = &[
         // IfcCurve / IfcBoundedCurve add nothing; IfcPolyline(Points).
         attrs: chain!(&["Points"]),
     },
+    // ---- Mapped-item instancing (representation reuse) ----
+    EntitySchema {
+        keyword: "IFCMAPPEDITEM",
+        kind: EntityKind::Geometry,
+        // IfcRepresentationItem adds nothing;
+        // IfcMappedItem(MappingSource, MappingTarget).
+        attrs: chain!(&["MappingSource", "MappingTarget"]),
+    },
+    EntitySchema {
+        keyword: "IFCREPRESENTATIONMAP",
+        kind: EntityKind::Geometry,
+        // IfcRepresentationMap(MappingOrigin, MappedRepresentation).
+        attrs: chain!(&["MappingOrigin", "MappedRepresentation"]),
+    },
+    EntitySchema {
+        keyword: "IFCCARTESIANTRANSFORMATIONOPERATOR3D",
+        kind: EntityKind::Geometry,
+        // IfcGeometricRepresentationItem adds nothing;
+        // IfcCartesianTransformationOperator(Axis1, Axis2, LocalOrigin,
+        // Scale) + IfcCartesianTransformationOperator3D(Axis3).
+        attrs: chain!(&["Axis1", "Axis2", "LocalOrigin", "Scale", "Axis3"]),
+    },
+    EntitySchema {
+        keyword: "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM",
+        kind: EntityKind::Geometry,
+        // …Operator(Axis1, Axis2, LocalOrigin, Scale) + 3D(Axis3) +
+        // 3DnonUniform(Scale2, Scale3).
+        attrs: chain!(&[
+            "Axis1",
+            "Axis2",
+            "LocalOrigin",
+            "Scale",
+            "Axis3",
+            "Scale2",
+            "Scale3"
+        ]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -586,6 +623,30 @@ impl<'a> TypedEntity<'a> {
     /// (an `IfcRepresentationContext`), when present and set.
     pub fn context_of_items(&self) -> Option<u64> {
         self.attr("ContextOfItems")?.as_reference()
+    }
+
+    /// The `#id` of an `IfcMappedItem`'s `MappingSource`
+    /// (an `IfcRepresentationMap`), when present and set.
+    pub fn mapping_source(&self) -> Option<u64> {
+        self.attr("MappingSource")?.as_reference()
+    }
+
+    /// The `#id` of an `IfcMappedItem`'s `MappingTarget`
+    /// (an `IfcCartesianTransformationOperator`), when present and set.
+    pub fn mapping_target(&self) -> Option<u64> {
+        self.attr("MappingTarget")?.as_reference()
+    }
+
+    /// The `#id` of an `IfcRepresentationMap`'s `MappingOrigin`
+    /// (an `IfcAxis2Placement`), when present and set.
+    pub fn mapping_origin(&self) -> Option<u64> {
+        self.attr("MappingOrigin")?.as_reference()
+    }
+
+    /// The `#id` of an `IfcRepresentationMap`'s `MappedRepresentation`
+    /// (an `IfcShapeRepresentation`), when present and set.
+    pub fn mapped_representation(&self) -> Option<u64> {
+        self.attr("MappedRepresentation")?.as_reference()
     }
 
     /// Resolve an aggregate-of-references attribute to the ordered list
@@ -795,9 +856,13 @@ mod tests {
             ("IFCSHAPEREPRESENTATION", 4), // IfcRepresentation(4)
             ("IFCCARTESIANPOINT", 1),
             ("IFCDIRECTION", 1),
-            ("IFCAXIS2PLACEMENT2D", 2), // Location + RefDirection
-            ("IFCAXIS2PLACEMENT3D", 3), // Location + Axis + RefDirection
-            ("IFCPOLYLINE", 1),         // Points
+            ("IFCAXIS2PLACEMENT2D", 2),  // Location + RefDirection
+            ("IFCAXIS2PLACEMENT3D", 3),  // Location + Axis + RefDirection
+            ("IFCPOLYLINE", 1),          // Points
+            ("IFCMAPPEDITEM", 2),        // MappingSource + MappingTarget
+            ("IFCREPRESENTATIONMAP", 2), // MappingOrigin + MappedRepresentation
+            ("IFCCARTESIANTRANSFORMATIONOPERATOR3D", 5), // A1,A2,LocalOrigin,Scale,A3
+            ("IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM", 7), // +Scale2,Scale3
         ];
         for (kw, want) in lens {
             assert_eq!(
@@ -1059,6 +1124,42 @@ mod tests {
                 "Items",
             ]
         );
+    }
+
+    #[test]
+    fn mapped_item_chain_resolves_by_name() {
+        // IfcMappedItem → IfcRepresentationMap → MappedRepresentation /
+        // MappingOrigin, plus the transformation-operator attributes,
+        // walked entirely by attribute name through the typed layer.
+        let f = parse(
+            "#22=IFCMAPPEDITEM(#12,#21);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #20=IFCCARTESIANPOINT((1.,2.,3.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,2.,$);\n\
+             #3=IFCSHAPEREPRESENTATION(#41,'Body','Tessellation',(#288));\n\
+             #41=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,$,$,$);",
+        );
+        let mi = TypedEntity::new(f.get(22).unwrap()).unwrap();
+        assert_eq!(mi.kind(), EntityKind::Geometry);
+        assert_eq!(mi.mapping_source(), Some(12));
+        assert_eq!(mi.mapping_target(), Some(21));
+
+        let map = TypedEntity::new(f.get(12).unwrap()).unwrap();
+        assert_eq!(map.mapping_origin(), Some(11));
+        assert_eq!(map.mapped_representation(), Some(3));
+
+        let op = TypedEntity::new(f.get(21).unwrap()).unwrap();
+        // Axis1 / Axis2 are `$`; LocalOrigin resolves; Scale = 2.
+        assert_eq!(op.attr("Axis1").and_then(Value::as_reference), None);
+        assert_eq!(
+            op.attr("LocalOrigin").and_then(Value::as_reference),
+            Some(20)
+        );
+        assert_eq!(op.attr("Scale").and_then(Value::as_number), Some(2.0));
+        let names: Vec<&str> = op.attrs().map(|(n, _)| n).collect();
+        assert_eq!(names, ["Axis1", "Axis2", "LocalOrigin", "Scale", "Axis3"]);
     }
 
     #[test]

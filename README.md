@@ -19,7 +19,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, faceted Breps (`IfcFacetedBrep`(`WithVoids`)) + face/shell surface models, extruded swept solids (`IfcExtrudedAreaSolid`), and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + Brep + extrusion + placement slices); revolved/curved solids later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, faceted Breps (`IfcFacetedBrep`(`WithVoids`)) + face/shell surface models, extruded swept solids (`IfcExtrudedAreaSolid`), mapped-item instancing (`IfcMappedItem`), and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + Brep + extrusion + mapped-item + placement slices); revolved/curved solids later |
 
 ## Phase 1 surface
 
@@ -112,6 +112,12 @@ for site in model.aggregated_children(project.id()) {
   product → shape → placement → point/direction chain be walked entirely
   by attribute name; they are typed but stay out of the spatial-model
   `products()` / `spatial_elements()` enumerations.
+* Mapped-item instancing entities are likewise typed
+  (`EntityKind::Geometry`): `IfcMappedItem` (`mapping_source()`,
+  `mapping_target()`), `IfcRepresentationMap` (`mapping_origin()`,
+  `mapped_representation()`), and `IfcCartesianTransformationOperator3D`
+  (`/3DnonUniform`), so the mapped-item → representation-map →
+  source-representation chain resolves by attribute name.
 
 ## Phase 3 surface — tessellated geometry
 
@@ -167,6 +173,20 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   surface-curve / tapered swept solids, non-rectangle parameterised
   profiles, curved profile curves, and `Voids` (profile-hole)
   subtraction remain `Unsupported`.
+* `tessellate_item` also evaluates the **mapped item**
+  `IfcMappedItem` (`MappingSource`, `MappingTarget`) — the inserted
+  instance of a reusable source representation. `MappingSource` is an
+  `IfcRepresentationMap(MappingOrigin, MappedRepresentation)`: the source
+  `IfcShapeRepresentation` is meshed in its own frame, lifted into the
+  `MappingOrigin` `IfcAxis2Placement`, then placed by the `MappingTarget`
+  `IfcCartesianTransformationOperator` (2D / 2DnonUniform / 3D /
+  3DnonUniform). The operator's column basis is the EXPRESS `IfcBaseAxis`
+  derivation (`U1` = normalise(`Axis1`), `U2` = `Axis2` ⟂ `U1`, `U3` =
+  `U1`×`U2`, world-axis defaults), each column scaled by its uniform or
+  per-axis `Scale`(`/Scale2`/`Scale3`) and translated by `LocalOrigin`.
+  Mapped items may **nest** (a source representation can contain further
+  mapped items); recursion is bounded by a depth cap and a
+  self-referential map surfaces `Unsupported`.
 * `mesh_from_shape_representation` / `mesh_from_product_shape` — the walk
   from a product's `Representation` down through
   `IfcProductDefinitionShape.Representations` →
@@ -203,7 +223,7 @@ Still later in Phase 3: the remaining swept solids
 (`IfcRevolvedAreaSolid` / `IfcSurfaceCurveSweptAreaSolid` / the tapered
 extrusion), non-rectangle parameterised + curved-curve profiles, advanced
 (curved) breps (`IfcAdvancedBrep` / `IfcFaceSurface`), boolean results,
-mapped items, `Voids` subtraction, and EXPRESS WHERE-rule validation.
+`Voids` subtraction, and EXPRESS WHERE-rule validation.
 
 ## Cargo features
 
@@ -212,9 +232,9 @@ mapped items, `Voids` subtraction, and EXPRESS WHERE-rule validation.
   direct constructor, and `register_mesh3d(&mut Mesh3DRegistry)`
   (format id `"ifc"`, extension `.ifc`). The decoder probes the magic,
   fully parses + validates the exchange structure, and extracts every
-  tessellated / faceted-Brep / extruded-swept-solid product shape into the
-  `Scene3D`; a model with no extractable geometry (only revolved/advanced
-  breps) decodes to `Unsupported`.
+  tessellated / faceted-Brep / extruded-swept-solid / mapped-item product
+  shape into the `Scene3D`; a model with no extractable geometry (only
+  revolved/advanced breps) decodes to `Unsupported`.
 * `--no-default-features` — standalone STEP parser only, std types,
   zero dependencies.
 

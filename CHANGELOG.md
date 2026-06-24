@@ -6,6 +6,38 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (mapped-item slice): `tessellate_item` now evaluates
+  `IfcMappedItem` (`MappingSource`, `MappingTarget`), so reused /
+  instanced representations flow through the same
+  `mesh_from_shape_representation` / `mesh_from_product_shape` /
+  registry-decoder path into a `Scene3D`.
+  - `MappingSource` → `IfcRepresentationMap(MappingOrigin,
+    MappedRepresentation)`: the source `IfcShapeRepresentation` is meshed
+    in its own frame, lifted into the `MappingOrigin` `IfcAxis2Placement`,
+    then placed by `MappingTarget`.
+  - `MappingTarget` → `transformation_operator`: resolves
+    `IfcCartesianTransformationOperator2D` / `…2DnonUniform` / `…3D` /
+    `…3DnonUniform` (`Axis1`, `Axis2`, `LocalOrigin`, `Scale`[, `Axis3`]
+    [, `Scale2`, `Scale3`]) to a `Transform`. The orthonormal axis basis
+    is the EXPRESS `IfcBaseAxis` derivation (`base_axes`: `U1` =
+    normalise(`Axis1`) default world X, `U2` = `Axis2` ⟂ `U1` default
+    world Y, `U3` = `U1`×`U2`); each column is scaled by its (uniform or
+    per-axis) `Scale` and translated by `LocalOrigin`. Attribute orders
+    transcribed from `IFC4_ADD2.exp`.
+  - Mapped items may nest (a source representation can itself contain
+    `IfcMappedItem`s); recursion is bounded by `MAX_MAP_DEPTH` and a
+    self-referential map surfaces `Unsupported` rather than looping.
+  - 10 new geometry unit tests (identity / translation / uniform +
+    non-uniform scale / rotated axes / mapping-origin fold / nested
+    composition / shape-rep walk / self-reference bounding / 2-D
+    operator).
+- Phase 2 (mapped-item typing): `IfcMappedItem`, `IfcRepresentationMap`,
+  and the 3-D Cartesian transformation operators are now in the typed
+  schema layer (`EntityKind::Geometry`), with `TypedEntity` accessors
+  `mapping_source` / `mapping_target` / `mapping_origin` /
+  `mapped_representation`. Attribute orders transcribed from
+  `IFC4_ADD2.exp`; 1 new schema unit test walking the mapped-item chain
+  by attribute name.
 - Phase 3 (extruded-swept-solid slice): `tessellate_item` now sweeps
   `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
   `Depth`) into a closed prism, so extruded bodies flow through the same

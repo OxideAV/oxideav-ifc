@@ -64,13 +64,24 @@
 //!   side-wall quad per profile edge are emitted and re-placed by the
 //!   solid's optional `Position` `IfcAxis2Placement3D`.
 //!
+//! It also resolves the **mapped item** instancing entity:
+//!
+//! * **`IfcMappedItem`** (`MappingSource`, `MappingTarget`) — the
+//!   inserted instance of a source `IfcRepresentationMap`'s
+//!   `MappedRepresentation`, meshed in its own frame, lifted into the
+//!   map's `MappingOrigin` `IfcAxis2Placement`, then placed by the
+//!   `MappingTarget` `IfcCartesianTransformationOperator`
+//!   (2D / 3D / 3DnonUniform — orthonormal `IfcBaseAxis` columns scaled
+//!   by `Scale`(`/Scale2`/`Scale3`), translated by `LocalOrigin`).
+//!   Mapped items may nest (a source representation can contain further
+//!   mapped items); recursion is bounded by a depth cap.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
 //! (`IfcRevolvedAreaSolid`, `IfcSurfaceCurveSweptAreaSolid`, the tapered
 //! extrusion), parameterised profiles beyond the rectangle, curved
 //! (`IfcIndexedPolyCurve`/circle) profile curves, advanced/curved breps
-//! (`IfcAdvancedBrep`, `IfcFaceSurface`), boolean results, and mapped
-//! items.
+//! (`IfcAdvancedBrep`, `IfcFaceSurface`), and boolean results.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -114,8 +125,8 @@ pub enum GeometryError {
     /// The instance id does not exist in the file.
     MissingInstance(u64),
     /// A representation item is a geometry style this slice does not yet
-    /// evaluate (swept solid, Brep, boolean, mapped item, …). Carries
-    /// the offending entity keyword.
+    /// evaluate (revolved swept solid, advanced Brep, boolean result,
+    /// …). Carries the offending entity keyword.
     Unsupported(String),
     /// A face-set's `Coordinates` reference is missing, not an
     /// `IfcCartesianPointList3D`, or otherwise malformed.
@@ -158,6 +169,20 @@ impl std::error::Error for GeometryError {}
 /// most callers want [`mesh_from_shape_representation`] or the
 /// `Model`-level walk.
 pub fn tessellate_item(step: &StepFile, id: u64) -> Result<TriMesh, GeometryError> {
+    tessellate_item_depth(step, id, 0)
+}
+
+/// The largest `IfcMappedItem` / `IfcShapeRepresentation` nesting depth
+/// that [`tessellate_item`] will follow. Mapped items may reuse other
+/// mapped items (nested blocks); this bound keeps a malformed self-
+/// referential map (which the EXPRESS `ApplicableMappedRepr` informal
+/// proposition forbids, but a file may still contain) from recursing
+/// without end.
+const MAX_MAP_DEPTH: usize = 64;
+
+/// Depth-tracked core of [`tessellate_item`]. `depth` counts how many
+/// `IfcMappedItem` indirections have been followed so far.
+fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMesh, GeometryError> {
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
     match inst.keyword.as_str() {
         "IFCTRIANGULATEDFACESET" => triangulated_face_set(step, &inst.args),
@@ -169,6 +194,9 @@ pub fn tessellate_item(step: &StepFile, id: u64) -> Result<TriMesh, GeometryErro
         "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => surface_model(step, &inst.args),
         // Swept area solid: sweep a 2-D profile along a direction.
         "IFCEXTRUDEDAREASOLID" => extruded_area_solid(step, &inst.args),
+        // Mapped item: instance a source representation under a Cartesian
+        // transformation operator.
+        "IFCMAPPEDITEM" => mapped_item(step, &inst.args, depth),
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
 }
@@ -188,6 +216,17 @@ pub fn mesh_from_shape_representation(
     step: &StepFile,
     shape_rep_id: u64,
 ) -> Result<TriMesh, GeometryError> {
+    mesh_from_shape_representation_depth(step, shape_rep_id, 0)
+}
+
+/// Depth-tracked core of [`mesh_from_shape_representation`]. `depth` is
+/// the `IfcMappedItem` nesting depth carried through to
+/// [`tessellate_item_depth`].
+fn mesh_from_shape_representation_depth(
+    step: &StepFile,
+    shape_rep_id: u64,
+    depth: usize,
+) -> Result<TriMesh, GeometryError> {
     let inst = step
         .get(shape_rep_id)
         .ok_or(GeometryError::MissingInstance(shape_rep_id))?;
@@ -206,7 +245,7 @@ pub fn mesh_from_shape_representation(
         let Some(item_id) = item.as_reference() else {
             continue;
         };
-        match tessellate_item(step, item_id) {
+        match tessellate_item_depth(step, item_id, depth) {
             Ok(mesh) => {
                 append_mesh(&mut merged, mesh);
                 produced = true;
@@ -887,6 +926,227 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         mesh.transform(&xform);
     }
     Ok(mesh)
+}
+
+// =====================================================================
+// IfcMappedItem  (MappingSource, MappingTarget)
+//
+// A mapped item is the inserted instance of a *source* representation
+// (an IfcRepresentationMap, "block / cell / macro definition") placed by
+// a Cartesian transformation operator (MappingTarget). It lets one
+// representation reuse another — and mapped items may themselves nest
+// (a source representation can contain further IfcMappedItems).
+//
+//   IfcMappedItem
+//     MappingSource : IfcRepresentationMap
+//       MappingOrigin       : IfcAxis2Placement   (the source frame)
+//       MappedRepresentation: IfcShapeRepresentation
+//     MappingTarget : IfcCartesianTransformationOperator(2D|3D[nonUniform])
+//       Axis1, Axis2, LocalOrigin, Scale [, Axis3] [, Scale2, Scale3]
+//
+// The source representation's geometry is authored about the
+// MappingOrigin placement; the target operator maps that frame to its
+// destination. The effective placement of the mapped geometry is
+//   target_operator ∘ mapping_origin
+// (both are affine frames; we mesh the source items in their own local
+// space, lift them into the source MappingOrigin frame, then apply the
+// target operator). The Axis2-default case — MappingOrigin at the world
+// origin and an identity operator — leaves the source geometry exactly
+// where it was authored, which is the common IFC case.
+// =====================================================================
+
+fn mapped_item(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMesh, GeometryError> {
+    if depth >= MAX_MAP_DEPTH {
+        // A self-referential / over-deep map chain: stop following it
+        // (the file violates the ApplicableMappedRepr informal
+        // proposition) rather than recurse without bound.
+        return Err(GeometryError::Unsupported("IFCMAPPEDITEM".to_string()));
+    }
+    // MappingSource (index 0) : IfcRepresentationMap.
+    let map_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let map = step
+        .get(map_id)
+        .ok_or(GeometryError::MissingInstance(map_id))?;
+    if map.keyword != "IFCREPRESENTATIONMAP" {
+        return Err(GeometryError::Unsupported(map.keyword.clone()));
+    }
+    // IfcRepresentationMap(MappingOrigin, MappedRepresentation).
+    let origin_id = map
+        .args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let mapped_rep_id = map
+        .args
+        .get(1)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+
+    // Mesh the source representation's items (recursing one level deeper
+    // so nested mapped items are bounded). Vertices come out in the
+    // source representation's own local frame.
+    let mut mesh = mesh_from_shape_representation_depth(step, mapped_rep_id, depth + 1)?;
+
+    // MappingOrigin : IfcAxis2Placement (2D or 3D); fold it in first so
+    // the source geometry sits in the map's reference frame.
+    let origin = axis2_placement_3d(step, origin_id)?;
+    if origin != Transform::IDENTITY {
+        mesh.transform(&origin);
+    }
+
+    // MappingTarget (index 1) : IfcCartesianTransformationOperator.
+    let target_id = args
+        .get(1)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let target = transformation_operator(step, target_id)?;
+    mesh.transform(&target);
+
+    Ok(mesh)
+}
+
+/// Resolve an `IfcCartesianTransformationOperator` (2D / 3D /
+/// 3DnonUniform) to a [`Transform`].
+///
+/// Common attributes (`IfcCartesianTransformationOperator`):
+/// `(Axis1, Axis2, LocalOrigin, Scale)`; the 3-D subtype adds `Axis3`
+/// (index 4) and the non-uniform 3-D subtype `Scale2`, `Scale3`
+/// (indices 5, 6).
+///
+/// The operator's axes are derived by the EXPRESS `IfcBaseAxis`
+/// function: it orthonormalises the supplied `Axis1`/`Axis2`(/`Axis3`),
+/// defaulting any absent axis to the corresponding world axis. We reuse
+/// the placement [`build_axes`] derivation (`Axis2`→ref-X, `Axis3`→Z is
+/// not the operator convention, so the operator orders its columns
+/// directly): column *i* is `U[i] · Scl[i]`, translation is
+/// `LocalOrigin`. A `$`/absent `Scale` is 1.0 (the non-uniform `Scale2`
+/// / `Scale3` default to that uniform `Scale`).
+fn transformation_operator(step: &StepFile, id: u64) -> Result<Transform, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    let is_3d = matches!(
+        inst.keyword.as_str(),
+        "IFCCARTESIANTRANSFORMATIONOPERATOR3D" | "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM"
+    );
+    let is_2d = matches!(
+        inst.keyword.as_str(),
+        "IFCCARTESIANTRANSFORMATIONOPERATOR2D" | "IFCCARTESIANTRANSFORMATIONOPERATOR2DNONUNIFORM"
+    );
+    if !is_3d && !is_2d {
+        return Err(GeometryError::Unsupported(inst.keyword.clone()));
+    }
+    let args = &inst.args;
+    // Axis1, Axis2 (both OPTIONAL IfcDirection); Axis3 only on the 3-D
+    // subtype (index 4).
+    let axis1 = direction(step, args.first())?;
+    let axis2 = direction(step, args.get(1))?;
+    let axis3 = if is_3d {
+        direction(step, args.get(4))?
+    } else {
+        None
+    };
+    // LocalOrigin : IfcCartesianPoint (index 2).
+    let local_origin = cartesian_point(step, args.get(2))?;
+    // Scale : OPTIONAL IfcReal (index 3), default 1.0.
+    let scale = args.get(3).and_then(Value::as_number).unwrap_or(1.0);
+
+    // U = IfcBaseAxis: orthonormal [U1, U2, U3]. Axis1 seeds X, Axis2
+    // seeds Y; the third is their cross product. We derive it from the
+    // shared build_axes machinery by treating Axis1 as the reference X
+    // direction in the plane ⟂ to the Z built from Axis1×Axis2 — but the
+    // operator's convention is simpler: U1 = normalise(Axis1) (default
+    // world X), U2 = the component of Axis2 ⟂ U1 (default world Y), U3 =
+    // U1 × U2 (3-D only).
+    let u = base_axes(axis1, axis2, axis3, is_3d);
+
+    // Per-column scale: uniform Scale for the 2-D / uniform-3-D operators;
+    // Scale2 / Scale3 (indices 5, 6) override columns 2 / 3 on the
+    // non-uniform 3-D subtype (default to the uniform Scale).
+    let (s1, s2, s3) = if inst.keyword == "IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM" {
+        let s2 = args.get(5).and_then(Value::as_number).unwrap_or(scale);
+        let s3 = args.get(6).and_then(Value::as_number).unwrap_or(scale);
+        (scale, s2, s3)
+    } else if inst.keyword == "IFCCARTESIANTRANSFORMATIONOPERATOR2DNONUNIFORM" {
+        // 2-D non-uniform: Scale2 at index 4.
+        let s2 = args.get(4).and_then(Value::as_number).unwrap_or(scale);
+        (scale, s2, scale)
+    } else {
+        (scale, scale, scale)
+    };
+
+    Ok(Transform {
+        cols: [
+            [u[0][0] * s1, u[0][1] * s1, u[0][2] * s1],
+            [u[1][0] * s2, u[1][1] * s2, u[1][2] * s2],
+            [u[2][0] * s3, u[2][1] * s3, u[2][2] * s3],
+        ],
+        translation: local_origin,
+    })
+}
+
+/// `IfcBaseAxis(Dim, Axis1, Axis2[, Axis3])` → orthonormal axes
+/// `[U1, U2, U3]`.
+///
+/// The operator convention (distinct from `IfcBuildAxes`, which is
+/// driven by a Z `Axis`): `U1` is `normalise(Axis1)` defaulting to world
+/// X; `U2` is the part of `Axis2` orthogonal to `U1`, defaulting to
+/// world Y; `U3 = U1 × U2` for the 3-D case (world Z when both inputs
+/// default). For the 2-D case `U3` is left as world Z (unused by the
+/// 2-D column write since the source geometry is planar, but kept so the
+/// returned basis is well-formed).
+fn base_axes(
+    axis1: Option<[f64; 3]>,
+    axis2: Option<[f64; 3]>,
+    axis3: Option<[f64; 3]>,
+    is_3d: bool,
+) -> [[f64; 3]; 3] {
+    let u1 = axis1.and_then(normalise).unwrap_or([1.0, 0.0, 0.0]);
+    // U2: Axis2 made ⟂ to U1, or world Y projected ⟂ to U1.
+    let raw2 = axis2.and_then(normalise).unwrap_or([0.0, 1.0, 0.0]);
+    let d = dot(raw2, u1);
+    let proj = [
+        raw2[0] - d * u1[0],
+        raw2[1] - d * u1[1],
+        raw2[2] - d * u1[2],
+    ];
+    let u2 = normalise(proj).unwrap_or_else(|| {
+        // Axis2 parallel to U1: pick a world axis ⟂ to U1.
+        let fallback = if u1 != [0.0, 1.0, 0.0] {
+            [0.0, 1.0, 0.0]
+        } else {
+            [0.0, 0.0, 1.0]
+        };
+        let d = dot(fallback, u1);
+        normalise([
+            fallback[0] - d * u1[0],
+            fallback[1] - d * u1[1],
+            fallback[2] - d * u1[2],
+        ])
+        .unwrap_or([0.0, 1.0, 0.0])
+    });
+    let u3 = if is_3d {
+        // Axis3 (if supplied) is orthonormalised against the U1/U2 plane;
+        // otherwise U1 × U2.
+        match axis3.and_then(normalise) {
+            Some(a3) => {
+                let d1 = dot(a3, u1);
+                let d2 = dot(a3, u2);
+                let proj = [
+                    a3[0] - d1 * u1[0] - d2 * u2[0],
+                    a3[1] - d1 * u1[1] - d2 * u2[1],
+                    a3[2] - d1 * u1[2] - d2 * u2[2],
+                ];
+                normalise(proj)
+                    .unwrap_or_else(|| normalise(cross(u1, u2)).unwrap_or([0.0, 0.0, 1.0]))
+            }
+            None => normalise(cross(u1, u2)).unwrap_or([0.0, 0.0, 1.0]),
+        }
+    } else {
+        [0.0, 0.0, 1.0]
+    };
+    [u1, u2, u3]
 }
 
 /// Resolve an `IfcProfileDef` to its outer-boundary ring as a list of
@@ -1831,5 +2091,218 @@ mod tests {
         append_mesh(&mut dst, src);
         assert_eq!(dst.vertex_count(), 4);
         assert_eq!(dst.triangles, vec![[0, 1, 0], [2, 3, 2]]);
+    }
+
+    // --- IfcMappedItem ------------------------------------------------
+
+    /// A source representation map (origin at the world origin) containing
+    /// one triangulated body, instanced by an identity 3-D operator,
+    /// reproduces the body unchanged.
+    #[test]
+    fn mapped_item_identity_operator_reproduces_source() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,$,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);",
+        );
+        let m = tessellate_item(&f, 22).unwrap();
+        assert_eq!(m.vertex_count(), 3);
+        assert_eq!(m.triangle_count(), 1);
+        approx(m.positions[0], [0.0, 0.0, 0.0]);
+        approx(m.positions[1], [1.0, 0.0, 0.0]);
+        approx(m.positions[2], [0.0, 1.0, 0.0]);
+    }
+
+    /// The target operator's `LocalOrigin` translates the whole instance.
+    #[test]
+    fn mapped_item_operator_translation() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((10.,20.,30.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,$,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);",
+        );
+        let m = tessellate_item(&f, 22).unwrap();
+        approx(m.positions[0], [10.0, 20.0, 30.0]);
+        approx(m.positions[1], [11.0, 20.0, 30.0]);
+        approx(m.positions[2], [10.0, 21.0, 30.0]);
+    }
+
+    /// A uniform `Scale` on the operator scales the instanced geometry.
+    #[test]
+    fn mapped_item_uniform_scale() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(2.,0.,0.),(0.,2.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,3.,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);",
+        );
+        let m = tessellate_item(&f, 22).unwrap();
+        // Each axis scaled by 3: (2,0,0) → (6,0,0); (0,2,0) → (0,6,0).
+        approx(m.positions[1], [6.0, 0.0, 0.0]);
+        approx(m.positions[2], [0.0, 6.0, 0.0]);
+    }
+
+    /// The non-uniform 3-D operator applies a distinct scale per axis.
+    #[test]
+    fn mapped_item_nonuniform_scale() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.),(0.,0.,1.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3),(1,2,4)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM($,$,#20,2.,$,5.,7.);\n\
+             #22=IFCMAPPEDITEM(#12,#21);",
+        );
+        let m = tessellate_item(&f, 22).unwrap();
+        // Scale=2 on X, Scale2=5 on Y, Scale3=7 on Z.
+        approx(m.positions[1], [2.0, 0.0, 0.0]);
+        approx(m.positions[2], [0.0, 5.0, 0.0]);
+        approx(m.positions[3], [0.0, 0.0, 7.0]);
+    }
+
+    /// An explicit `Axis1`/`Axis2` operator rotates the basis: Axis1=+Y,
+    /// Axis2=−X gives a 90° rotation about Z (local +X → world +Y).
+    #[test]
+    fn mapped_item_rotated_axes() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #30=IFCDIRECTION((0.,1.,0.));\n\
+             #31=IFCDIRECTION((-1.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D(#30,#31,#20,$,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);",
+        );
+        let m = tessellate_item(&f, 22).unwrap();
+        // U1 = +Y, U2 = −X: local +X (point #2 = (1,0,0)) → world +Y.
+        approx(m.positions[1], [0.0, 1.0, 0.0]);
+        // local +Y (point #3 = (0,1,0)) → world −X.
+        approx(m.positions[2], [-1.0, 0.0, 0.0]);
+    }
+
+    /// The `MappingOrigin` placement frame is folded in before the target
+    /// operator: a non-identity origin translation shifts the source.
+    #[test]
+    fn mapped_item_mapping_origin_applied() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((100.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,$,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);",
+        );
+        let m = tessellate_item(&f, 22).unwrap();
+        // MappingOrigin at (100,0,0) translates the whole source.
+        approx(m.positions[0], [100.0, 0.0, 0.0]);
+        approx(m.positions[1], [101.0, 0.0, 0.0]);
+    }
+
+    /// Mapped items may nest: an outer map whose source representation
+    /// contains another mapped item, each with its own operator
+    /// translation, accumulates both offsets.
+    #[test]
+    fn mapped_item_nested_composes() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,$,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);\n\
+             #30=IFCSHAPEREPRESENTATION(#8,'Body','MappedRepresentation',(#22));\n\
+             #31=IFCREPRESENTATIONMAP(#11,#30);\n\
+             #40=IFCCARTESIANPOINT((0.,10.,0.));\n\
+             #41=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#40,$,$);\n\
+             #42=IFCMAPPEDITEM(#31,#41);",
+        );
+        let m = tessellate_item(&f, 42).unwrap();
+        // Inner op +X then outer op +10Y: origin point (0,0,0) → (1,10,0).
+        approx(m.positions[0], [1.0, 10.0, 0.0]);
+    }
+
+    /// A mapped item flows through the `IfcShapeRepresentation` walk
+    /// alongside (skipped) unsupported items.
+    #[test]
+    fn mapped_item_via_shape_representation() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#2));\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCREPRESENTATIONMAP(#11,#3);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,$,$);\n\
+             #22=IFCMAPPEDITEM(#12,#21);\n\
+             #50=IFCSHAPEREPRESENTATION(#8,'Body','MappedRepresentation',(#22));",
+        );
+        let m = mesh_from_shape_representation(&f, 50).unwrap();
+        assert_eq!(m.triangle_count(), 1);
+    }
+
+    /// A self-referential mapped-item chain is bounded by the depth cap
+    /// and surfaces `Unsupported` rather than recursing without end.
+    #[test]
+    fn mapped_item_self_reference_is_bounded() {
+        let f = parse(
+            "#10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #21=IFCCARTESIANTRANSFORMATIONOPERATOR3D($,$,#20,$,$);\n\
+             #30=IFCSHAPEREPRESENTATION(#8,'Body','MappedRepresentation',(#42));\n\
+             #31=IFCREPRESENTATIONMAP(#11,#30);\n\
+             #42=IFCMAPPEDITEM(#31,#21);",
+        );
+        // #42 maps a representation (#30) whose only item is #42 itself.
+        assert_eq!(
+            tessellate_item(&f, 42).unwrap_err(),
+            GeometryError::Unsupported("IFCMAPPEDITEM".to_string())
+        );
+    }
+
+    /// The bare `transformation_operator` resolver: a 2-D operator with a
+    /// scale yields a planar scaled basis with the `LocalOrigin`
+    /// translation.
+    #[test]
+    fn transformation_operator_2d_scaled() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((4.,5.));\n\
+             #2=IFCCARTESIANTRANSFORMATIONOPERATOR2D($,$,#1,2.);",
+        );
+        let t = transformation_operator(&f, 2).unwrap();
+        approx(t.translation, [4.0, 5.0, 0.0]);
+        approx(t.apply([1.0, 0.0, 0.0]), [6.0, 5.0, 0.0]);
+        approx(t.apply([0.0, 1.0, 0.0]), [4.0, 7.0, 0.0]);
     }
 }
