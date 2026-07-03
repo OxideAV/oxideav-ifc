@@ -1,5 +1,7 @@
 # oxideav-ifc
 
+[![CI](https://github.com/OxideAV/oxideav-ifc/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-ifc/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-ifc.svg)](https://crates.io/crates/oxideav-ifc) [![docs.rs](https://docs.rs/oxideav-ifc/badge.svg)](https://docs.rs/oxideav-ifc) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust **IFC** (Industry Foundation Classes, **ISO 16739**) reader
 for the OxideAV framework — clean-room, implemented from the ISO
 10303-21 exchange-structure grammar and the buildingSMART IFC schema
