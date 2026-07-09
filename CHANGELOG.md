@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (boolean composition): `tessellate_item` now evaluates
+  `IfcBooleanResult` / `IfcBooleanClippingResult` (`Operator`,
+  `FirstOperand`, `SecondOperand`, ISO 16739 §8.8.3.5) at the
+  surface-mesh level, so CSG / Clipping body representations flow
+  through the product-shape walk instead of failing as unsupported.
+  - `UNION` merges the two operand boundary meshes (a boundary superset
+    of the regularised union); one unsupported operand is tolerated if
+    the other produced geometry.
+  - `DIFFERENCE` emits the first operand's boundary as authored —
+    the subtracted volume is **not yet carved**: exact half-space
+    clipping needs the `IfcHalfSpaceSolid.AgreementFlag` side
+    convention, which is not in the staged documentation set (docs gap
+    filed). Clipping chains (a clipping result as first operand of
+    another) nest, bounded by the shared recursion depth cap.
+  - `INTERSECTION` is surfaced as `Unsupported` — no boundary-level
+    approximation is defensible.
+  - 6 new geometry tests (union merge + re-indexing, clipping emits
+    first operand bit-identical, two-level clipping chain, intersection
+    surfacing, cyclic-operand termination, CSG shape-representation
+    walk); Phase-2 typed entries for `IfcBooleanResult`,
+    `IfcBooleanClippingResult`, `IfcHalfSpaceSolid`,
+    `IfcPolygonalBoundedHalfSpace`, `IfcPlane`.
+
 - Phase 3 (indexed poly curves + composite profiles): profile boundary
   curves may now be `IfcIndexedPolyCurve` over an
   `IfcCartesianPointList2D` — either the whole point list in order (`$`

@@ -83,12 +83,20 @@
 //! (hole bridging + ear clipping), so concave and holed profiles mesh
 //! correctly; hole side walls are emitted for hollow / voided profiles.
 //!
+//! Boolean results (`IfcBooleanResult` / `IfcBooleanClippingResult`)
+//! compose at the surface-mesh level: UNION merges the operand
+//! boundaries; DIFFERENCE emits the first operand's boundary as
+//! authored (half-space carving is pending the
+//! `IfcHalfSpaceSolid.AgreementFlag` side-convention documentation);
+//! INTERSECTION is surfaced as `Unsupported`.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
 //! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), trimmed /
-//! composite / indexed profile curves, the named parameterised profiles
-//! (I/L/T/U/Z/C shapes), advanced/curved breps (`IfcAdvancedBrep`,
-//! `IfcFaceSurface`), and boolean results.
+//! composite curves and `IfcArcIndex` poly-curve segments, the named
+//! parameterised profiles (I/L/T/U/Z/C shapes), advanced/curved breps
+//! (`IfcAdvancedBrep`, `IfcFaceSurface`), boolean intersection, and
+//! actual boolean subtraction.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -206,7 +214,79 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         // Mapped item: instance a source representation under a Cartesian
         // transformation operator.
         "IFCMAPPEDITEM" => mapped_item(step, &inst.args, depth),
+        // Boolean composition of two solid operands.
+        "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => boolean_result(step, &inst.args, depth),
         other => Err(GeometryError::Unsupported(other.to_string())),
+    }
+}
+
+// =====================================================================
+// IfcBooleanResult (Operator, FirstOperand, SecondOperand)
+//
+// The result of a regularised Boolean operation on two solid operands
+// (ISO 16739 §8.8.3.5): UNION is the set of points in either operand,
+// INTERSECTION the points in both, DIFFERENCE the points in the first
+// but not the second. IfcBooleanClippingResult restricts the operator
+// to DIFFERENCE with a half-space second operand (the common
+// "wall clipped by a plane" case).
+//
+// This slice composes the operand *surface meshes*:
+// * UNION — the merged operand boundaries (a boundary superset of the
+//   regularised union; overlapping interior surface is kept, not
+//   dissolved).
+// * DIFFERENCE — the first operand's boundary as authored. The
+//   subtracted volume is NOT yet carved out: half-space clipping needs
+//   the IfcHalfSpaceSolid.AgreementFlag side convention, whose
+//   normative description is not in the staged documentation set. The
+//   un-clipped body is emitted (visible rather than dropped, matching
+//   the Brep `Voids` policy) until that lands.
+// * INTERSECTION — no boundary-level approximation is defensible;
+//   surfaced as Unsupported.
+//
+// Operands may be any meshable solid, including nested boolean results
+// (clipping chains); recursion shares the mapped-item depth cap.
+// =====================================================================
+fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMesh, GeometryError> {
+    if depth >= MAX_MAP_DEPTH {
+        // A cyclic operand chain (malformed file): stop rather than
+        // recurse without end.
+        return Err(GeometryError::Unsupported("IFCBOOLEANRESULT".to_string()));
+    }
+    // Operator : IfcBooleanOperator (index 0) — .UNION. / .INTERSECTION.
+    // / .DIFFERENCE.
+    let op = args
+        .first()
+        .and_then(Value::as_enum)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let first = args
+        .get(1)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let second = args
+        .get(2)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    match op {
+        "UNION" => {
+            // Merge both operand boundaries; tolerate one unsupported
+            // operand as long as the other produced geometry.
+            let a = tessellate_item_depth(step, first, depth + 1);
+            let b = tessellate_item_depth(step, second, depth + 1);
+            match (a, b) {
+                (Ok(mut m), Ok(other)) => {
+                    append_mesh(&mut m, other);
+                    Ok(m)
+                }
+                (Ok(m), Err(GeometryError::Unsupported(_)))
+                | (Err(GeometryError::Unsupported(_)), Ok(m)) => Ok(m),
+                (Err(e), _) | (_, Err(e)) => Err(e),
+            }
+        }
+        "DIFFERENCE" => tessellate_item_depth(step, first, depth + 1),
+        "INTERSECTION" => Err(GeometryError::Unsupported(
+            "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
+        )),
+        _ => Err(GeometryError::BadCoordinates),
     }
 }
 
@@ -3196,6 +3276,111 @@ mod tests {
         // Component prisms stay centred on their own Positions.
         assert!(m.positions[..8].iter().all(|p| p[0] < 0.0));
         assert!(m.positions[8..].iter().all(|p| p[0] > 0.0));
+    }
+
+    #[test]
+    fn boolean_union_merges_operand_boundaries() {
+        // UNION of two triangulated face sets: both boundaries appear in
+        // the result (a boundary superset of the regularised union).
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCCARTESIANPOINTLIST3D(((5.,0.,0.),(6.,0.,0.),(5.,1.,0.)));\n\
+             #4=IFCTRIANGULATEDFACESET(#3,$,.T.,((1,2,3)),$);\n\
+             #5=IFCBOOLEANRESULT(.UNION.,#2,#4);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        assert_eq!(m.vertex_count(), 6);
+        assert_eq!(m.triangle_count(), 2);
+        approx(m.positions[0], [0.0, 0.0, 0.0]);
+        approx(m.positions[3], [5.0, 0.0, 0.0]);
+        // The second operand's triangle is re-indexed past the first's
+        // vertices.
+        assert_eq!(m.triangles[1], [3, 4, 5]);
+    }
+
+    #[test]
+    fn boolean_clipping_result_emits_first_operand() {
+        // A wall body (extruded box) clipped by a plane half-space: the
+        // subtraction is not yet carved, so the result is the box as
+        // authored (visible rather than dropped).
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,3.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,2.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCHALFSPACESOLID(#6,.F.);\n\
+             #8=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        let plain = tessellate_item(&f, 3).unwrap();
+        assert_eq!(m, plain);
+        assert_eq!(m.vertex_count(), 8);
+        assert_eq!(m.triangle_count(), 12);
+    }
+
+    #[test]
+    fn boolean_clipping_chains_nest() {
+        // Clipping results chain (the first operand of a clipping may
+        // itself be a clipping): two levels resolve to the base solid.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.5));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCHALFSPACESOLID(#6,.T.);\n\
+             #8=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#7);\n\
+             #9=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#8,#7);",
+        );
+        let m = tessellate_item(&f, 9).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        assert_eq!(m.triangle_count(), 12);
+    }
+
+    #[test]
+    fn boolean_intersection_is_unsupported() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCBOOLEANRESULT(.INTERSECTION.,#2,#2);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 3).unwrap_err(),
+            GeometryError::Unsupported("IFCBOOLEANRESULT(.INTERSECTION.)".to_string())
+        );
+    }
+
+    #[test]
+    fn boolean_cyclic_operand_chain_is_bounded() {
+        // A self-referential first operand must terminate at the depth
+        // cap instead of recursing without end.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#2);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 3).unwrap_err(),
+            GeometryError::Unsupported("IFCBOOLEANRESULT".to_string())
+        );
+    }
+
+    #[test]
+    fn boolean_union_via_shape_representation() {
+        // A CSG body representation carrying a boolean result flows
+        // through the representation walk.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCBOOLEANRESULT(.UNION.,#2,#2);\n\
+             #4=IFCSHAPEREPRESENTATION(#8,'Body','CSG',(#3));",
+        );
+        let m = mesh_from_shape_representation(&f, 4).unwrap();
+        assert_eq!(m.triangle_count(), 2);
     }
 
     #[test]

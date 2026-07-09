@@ -558,6 +558,44 @@ pub const SCHEMA: &[EntitySchema] = &[
             "OuterFilletRadius"
         ]),
     },
+    // ---- Boolean results / half spaces ----
+    EntitySchema {
+        keyword: "IFCBOOLEANRESULT",
+        kind: EntityKind::Geometry,
+        // IfcGeometricRepresentationItem adds nothing;
+        // IfcBooleanResult(Operator, FirstOperand, SecondOperand).
+        attrs: chain!(&["Operator", "FirstOperand", "SecondOperand"]),
+    },
+    EntitySchema {
+        keyword: "IFCBOOLEANCLIPPINGRESULT",
+        kind: EntityKind::Geometry,
+        // IfcBooleanClippingResult adds no serialised attributes.
+        attrs: chain!(&["Operator", "FirstOperand", "SecondOperand"]),
+    },
+    EntitySchema {
+        keyword: "IFCHALFSPACESOLID",
+        kind: EntityKind::Geometry,
+        // IfcHalfSpaceSolid(BaseSurface, AgreementFlag).
+        attrs: chain!(&["BaseSurface", "AgreementFlag"]),
+    },
+    EntitySchema {
+        keyword: "IFCPOLYGONALBOUNDEDHALFSPACE",
+        kind: EntityKind::Geometry,
+        // IfcHalfSpaceSolid(2) + IfcPolygonalBoundedHalfSpace(Position,
+        // PolygonalBoundary).
+        attrs: chain!(&[
+            "BaseSurface",
+            "AgreementFlag",
+            "Position",
+            "PolygonalBoundary"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCPLANE",
+        kind: EntityKind::Geometry,
+        // IfcElementarySurface(Position); IfcPlane adds nothing.
+        attrs: chain!(&["Position"]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -993,6 +1031,11 @@ mod tests {
             ("IFCCOMPOSITEPROFILEDEF", 4), // Type,Name,Profiles,Label
             ("IFCINDEXEDPOLYCURVE", 3),  // Points,Segments,SelfIntersect
             ("IFCCARTESIANPOINTLIST2D", 1), // CoordList
+            ("IFCBOOLEANRESULT", 3),     // Operator + operands
+            ("IFCBOOLEANCLIPPINGRESULT", 3), // same serialised attrs
+            ("IFCHALFSPACESOLID", 2),    // BaseSurface + AgreementFlag
+            ("IFCPOLYGONALBOUNDEDHALFSPACE", 4), // + Position,Boundary
+            ("IFCPLANE", 1),             // Position
         ];
         for (kw, want) in lens {
             assert_eq!(
