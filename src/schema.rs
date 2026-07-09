@@ -456,6 +456,54 @@ pub const SCHEMA: &[EntitySchema] = &[
         // IfcRevolvedAreaSolid(Axis, Angle).
         attrs: chain!(&["SweptArea", "Position", "Axis", "Angle"]),
     },
+    EntitySchema {
+        keyword: "IFCEXTRUDEDAREASOLID",
+        kind: EntityKind::Geometry,
+        // IfcSweptAreaSolid(SweptArea, Position) +
+        // IfcExtrudedAreaSolid(ExtrudedDirection, Depth).
+        attrs: chain!(&["SweptArea", "Position", "ExtrudedDirection", "Depth"]),
+    },
+    // ---- Profile definitions (swept-area cross-sections) ----
+    EntitySchema {
+        keyword: "IFCARBITRARYCLOSEDPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcProfileDef(ProfileType, ProfileName) +
+        // IfcArbitraryClosedProfileDef(OuterCurve).
+        attrs: chain!(&["ProfileType", "ProfileName", "OuterCurve"]),
+    },
+    EntitySchema {
+        keyword: "IFCRECTANGLEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcProfileDef(2) + IfcParameterizedProfileDef(Position) +
+        // IfcRectangleProfileDef(XDim, YDim).
+        attrs: chain!(&["ProfileType", "ProfileName", "Position", "XDim", "YDim"]),
+    },
+    EntitySchema {
+        keyword: "IFCCIRCLEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcProfileDef(2) + IfcParameterizedProfileDef(Position) +
+        // IfcCircleProfileDef(Radius).
+        attrs: chain!(&["ProfileType", "ProfileName", "Position", "Radius"]),
+    },
+    EntitySchema {
+        keyword: "IFCELLIPSEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcProfileDef(2) + IfcParameterizedProfileDef(Position) +
+        // IfcEllipseProfileDef(SemiAxis1, SemiAxis2).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "SemiAxis1",
+            "SemiAxis2"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCCIRCLE",
+        kind: EntityKind::Geometry,
+        // IfcConic(Position) + IfcCircle(Radius).
+        attrs: chain!(&["Position", "Radius"]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -879,6 +927,12 @@ mod tests {
             ("IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM", 7), // +Scale2,Scale3
             ("IFCAXIS1PLACEMENT", 2),    // Location + Axis
             ("IFCREVOLVEDAREASOLID", 4), // SweptArea,Position,Axis,Angle
+            ("IFCEXTRUDEDAREASOLID", 4), // SweptArea,Position,Direction,Depth
+            ("IFCARBITRARYCLOSEDPROFILEDEF", 3), // Type,Name,OuterCurve
+            ("IFCRECTANGLEPROFILEDEF", 5), // Type,Name,Position,XDim,YDim
+            ("IFCCIRCLEPROFILEDEF", 4),  // Type,Name,Position,Radius
+            ("IFCELLIPSEPROFILEDEF", 5), // Type,Name,Position,SemiAxis1/2
+            ("IFCCIRCLE", 2),            // Position + Radius
         ];
         for (kw, want) in lens {
             assert_eq!(

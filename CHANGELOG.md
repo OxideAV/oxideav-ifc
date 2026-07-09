@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (parameterised-profile widening): `profile_ring` now resolves
+  `IfcCircleProfileDef` (`Radius`), `IfcEllipseProfileDef` (`SemiAxis1`
+  along X, `SemiAxis2` along Y), and `IfcArbitraryClosedProfileDef`
+  outer curves that are a full `IfcCircle` (`IfcConic.Position` +
+  `Radius`), so cylinders / elliptic prisms / tori extrude and revolve
+  through the same swept-solid paths. Attribute orders transcribed from
+  `IFC4_ADD2.exp` (`IfcParameterizedProfileDef.Position` is the shared
+  optional `IfcAxis2Placement2D`, applied to every generated ring
+  point). Circular boundaries are approximated with 48
+  counter-clockwise segments (`CIRCLE_SEGMENTS`, matching the revolve
+  density). 5 new geometry unit tests (cylinder counts/radius check,
+  positioned circle, ellipse equation, circle outer curve, full-turn
+  torus with a vertex-level torus-membership assertion). Also typed in
+  the Phase-2 schema layer (`IfcExtrudedAreaSolid`,
+  `IfcArbitraryClosedProfileDef`, `IfcRectangleProfileDef`,
+  `IfcCircleProfileDef`, `IfcEllipseProfileDef`, `IfcCircle`).
+
 - Phase 3 (revolved-swept-solid slice): `tessellate_item` now revolves
   `IfcRevolvedAreaSolid` (`SweptArea`, `Position`, `Axis`, `Angle`) into
   a tessellated surface of revolution, so revolved bodies flow through

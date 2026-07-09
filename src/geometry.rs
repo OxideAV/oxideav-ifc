@@ -1312,19 +1312,34 @@ fn base_axes(
     [u1, u2, u3]
 }
 
+/// Number of segments a full circle / ellipse profile boundary is
+/// approximated with (matches [`REVOLVE_SEGMENTS_PER_TURN`], so a
+/// revolved circle and a circle profile have consistent density).
+const CIRCLE_SEGMENTS: usize = 48;
+
 /// Resolve an `IfcProfileDef` to its outer-boundary ring as a list of
 /// 2-D `[x, y]` points (no duplicated closing vertex).
 ///
 /// Supported profile kinds:
 /// * `IfcArbitraryClosedProfileDef(ProfileType, ProfileName, OuterCurve)`
-///   — the `OuterCurve` (attribute index 2) is an `IfcPolyline` whose
-///   `Points` are 2-D `IfcCartesianPoint`s.
+///   — the `OuterCurve` (attribute index 2) is a supported planar curve
+///   (see [`curve_points_2d`]).
 /// * `IfcRectangleProfileDef(ProfileType, ProfileName, Position, XDim,
 ///   YDim)` — a rectangle centred on its 2-D `Position` origin with full
 ///   widths `XDim` (index 3) / `YDim` (index 4); the optional `Position`
 ///   `IfcAxis2Placement2D` offsets/rotates it in the profile plane.
+/// * `IfcCircleProfileDef(ProfileType, ProfileName, Position, Radius)` —
+///   a circle of `Radius` (index 3) centred on its `Position` origin
+///   (IFC4 EXPRESS `IfcCircleProfileDef`; the parameterised-profile
+///   `Position` is inherited from `IfcParameterizedProfileDef`).
+/// * `IfcEllipseProfileDef(ProfileType, ProfileName, Position,
+///   SemiAxis1, SemiAxis2)` — an ellipse with semi-axis `SemiAxis1`
+///   (index 3) along the profile X axis and `SemiAxis2` (index 4) along
+///   Y (IFC4 EXPRESS `IfcEllipseProfileDef`).
 ///
-/// Any other profile keyword is [`GeometryError::Unsupported`].
+/// Circular boundaries are approximated with [`CIRCLE_SEGMENTS`]
+/// counter-clockwise segments. Any other profile keyword is
+/// [`GeometryError::Unsupported`].
 fn profile_ring(step: &StepFile, profile_id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
     let inst = step
         .get(profile_id)
@@ -1338,7 +1353,7 @@ fn profile_ring(step: &StepFile, profile_id: u64) -> Result<Vec<[f64; 2]>, Geome
                 .get(2)
                 .and_then(Value::as_reference)
                 .ok_or(GeometryError::BadProfile)?;
-            let ring = polyline_points_2d(step, curve_id)?;
+            let ring = curve_points_2d(step, curve_id)?;
             Ok(close_ring(ring))
         }
         "IFCRECTANGLEPROFILEDEF" => {
@@ -1355,41 +1370,114 @@ fn profile_ring(step: &StepFile, profile_id: u64) -> Result<Vec<[f64; 2]>, Geome
                 .ok_or(GeometryError::BadProfile)?;
             let (hx, hy) = (xdim / 2.0, ydim / 2.0);
             // Centred rectangle, counter-clockwise from the −x/−y corner.
-            let mut ring = vec![[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
-            // Optional 2-D Position (index 2): place each corner.
-            if let Some(pos_id) = inst.args.get(2).and_then(Value::as_reference) {
-                let pl = axis2_placement_2d(step, pos_id)?;
-                for p in &mut ring {
-                    *p = pl.apply(*p);
-                }
+            let ring = vec![[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+            positioned_profile_ring(step, inst.args.get(2), ring)
+        }
+        "IFCCIRCLEPROFILEDEF" => {
+            // (ProfileType, ProfileName, Position, Radius).
+            let radius = inst
+                .args
+                .get(3)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            if radius <= 0.0 {
+                return Err(GeometryError::BadProfile);
             }
-            Ok(ring)
+            positioned_profile_ring(step, inst.args.get(2), ellipse_ring(radius, radius))
+        }
+        "IFCELLIPSEPROFILEDEF" => {
+            // (ProfileType, ProfileName, Position, SemiAxis1, SemiAxis2).
+            let a = inst
+                .args
+                .get(3)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let b = inst
+                .args
+                .get(4)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            if a <= 0.0 || b <= 0.0 {
+                return Err(GeometryError::BadProfile);
+            }
+            positioned_profile_ring(step, inst.args.get(2), ellipse_ring(a, b))
         }
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
 }
 
-/// Resolve an `IfcPolyline` (`Points : LIST OF IfcCartesianPoint`,
-/// attribute index 0) to a list of 2-D `[x, y]` points (a third
-/// component, if present, is dropped — a closed profile curve is planar).
-fn polyline_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
+/// Apply a parameterised profile's optional 2-D `Position` placement
+/// (an `IfcAxis2Placement2D` reference, or `$`) to every ring point.
+fn positioned_profile_ring(
+    step: &StepFile,
+    pos_arg: Option<&Value>,
+    mut ring: Vec<[f64; 2]>,
+) -> Result<Vec<[f64; 2]>, GeometryError> {
+    if let Some(pos_id) = pos_arg.and_then(Value::as_reference) {
+        let pl = axis2_placement_2d(step, pos_id)?;
+        for p in &mut ring {
+            *p = pl.apply(*p);
+        }
+    }
+    Ok(ring)
+}
+
+/// A counter-clockwise ellipse ring centred on the origin with semi-axis
+/// `a` along X and `b` along Y, approximated with [`CIRCLE_SEGMENTS`]
+/// segments (no duplicated closing point). `a == b` gives a circle.
+fn ellipse_ring(a: f64, b: f64) -> Vec<[f64; 2]> {
+    let mut ring = Vec::with_capacity(CIRCLE_SEGMENTS);
+    for i in 0..CIRCLE_SEGMENTS {
+        let theta = 2.0 * core::f64::consts::PI * (i as f64) / (CIRCLE_SEGMENTS as f64);
+        ring.push([a * theta.cos(), b * theta.sin()]);
+    }
+    ring
+}
+
+/// Resolve a bounded planar curve to a list of 2-D `[x, y]` points (a
+/// third component, if present, is dropped — a closed profile curve is
+/// planar).
+///
+/// Supported curve kinds:
+/// * `IfcPolyline` (`Points : LIST OF IfcCartesianPoint`, attribute
+///   index 0) — the points as authored.
+/// * `IfcCircle` (`Position : IfcAxis2Placement` index 0, `Radius`
+///   index 1) — a full circle in the profile plane, approximated with
+///   [`CIRCLE_SEGMENTS`] segments about its 2-D `Position` (IFC4 EXPRESS
+///   `IfcCircle` / `IfcConic.Position`).
+///
+/// Trimmed / composite / indexed curves are surfaced as `Unsupported`
+/// with their keyword so callers can tell why.
+fn curve_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
-    if inst.keyword != "IFCPOLYLINE" {
-        // IfcIndexedPolyCurve / circles / composite curves are out of
-        // this slice; surface the keyword so callers can tell why.
-        return Err(GeometryError::Unsupported(inst.keyword.clone()));
+    match inst.keyword.as_str() {
+        "IFCPOLYLINE" => {
+            let points = inst
+                .args
+                .first()
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadProfile)?;
+            let mut out = Vec::with_capacity(points.len());
+            for p in points {
+                let pt = cartesian_point(step, Some(p))?;
+                out.push([pt[0], pt[1]]);
+            }
+            Ok(out)
+        }
+        "IFCCIRCLE" => {
+            // IfcConic(Position) + IfcCircle(Radius).
+            let radius = inst
+                .args
+                .get(1)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            if radius <= 0.0 {
+                return Err(GeometryError::BadProfile);
+            }
+            positioned_profile_ring(step, inst.args.first(), ellipse_ring(radius, radius))
+        }
+        other => Err(GeometryError::Unsupported(other.to_string())),
     }
-    let points = inst
-        .args
-        .first()
-        .and_then(Value::as_list)
-        .ok_or(GeometryError::BadProfile)?;
-    let mut out = Vec::with_capacity(points.len());
-    for p in points {
-        let pt = cartesian_point(step, Some(p))?;
-        out.push([pt[0], pt[1]]);
-    }
-    Ok(out)
 }
 
 /// Drop a duplicated closing vertex from a profile ring (an `IfcPolyline`
@@ -2213,16 +2301,132 @@ mod tests {
 
     #[test]
     fn extruded_unsupported_profile_surfaces_keyword() {
-        // A circle profile is out of this slice → Unsupported(keyword).
+        // A trapezium profile is out of this slice → Unsupported(keyword).
         let f = parse(
-            "#1=IFCCIRCLEPROFILEDEF(.AREA.,$,$,3.);\n\
+            "#1=IFCTRAPEZIUMPROFILEDEF(.AREA.,$,$,3.,2.,1.,0.5);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
              #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
         );
         assert_eq!(
             tessellate_item(&f, 3).unwrap_err(),
-            GeometryError::Unsupported("IFCCIRCLEPROFILEDEF".to_string())
+            GeometryError::Unsupported("IFCTRAPEZIUMPROFILEDEF".to_string())
         );
+    }
+
+    #[test]
+    fn extruded_circle_profile_is_a_cylinder() {
+        // A circle profile of radius 3 extruded +Z by 5 → a closed
+        // 48-segment cylinder.
+        let f = parse(
+            "#1=IFCCIRCLEPROFILEDEF(.AREA.,$,$,3.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,5.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        // 48 ring points → 96 vertices (bottom + top).
+        assert_eq!(m.vertex_count(), 96);
+        // 2 cap fans (46 tris each) + 48 side quads (2 each) = 188.
+        assert_eq!(m.triangle_count(), 188);
+        // The ring starts at theta = 0: (radius, 0).
+        approx(m.positions[0], [3.0, 0.0, 0.0]);
+        // Quarter turn (12 of 48 segments): (0, radius).
+        approx(m.positions[12], [0.0, 3.0, 0.0]);
+        // Every bottom vertex sits on the radius-3 circle at z = 0, every
+        // top vertex at z = 5.
+        for p in &m.positions[..48] {
+            assert!(((p[0] * p[0] + p[1] * p[1]).sqrt() - 3.0).abs() < 1e-9);
+            assert!(p[2].abs() < 1e-12);
+        }
+        for p in &m.positions[48..] {
+            assert!((p[2] - 5.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn extruded_circle_profile_position_offsets_centre() {
+        // The parameterised profile's 2-D Position shifts the circle
+        // centre to (10, 20).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((10.,20.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLEPROFILEDEF(.AREA.,$,#2,2.);\n\
+             #4=IFCDIRECTION((0.,0.,1.));\n\
+             #5=IFCEXTRUDEDAREASOLID(#3,$,#4,1.);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        approx(m.positions[0], [12.0, 20.0, 0.0]);
+        for p in &m.positions[..48] {
+            let (dx, dy) = (p[0] - 10.0, p[1] - 20.0);
+            assert!(((dx * dx + dy * dy).sqrt() - 2.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn extruded_ellipse_profile_semi_axes() {
+        // SemiAxis1 = 4 along X, SemiAxis2 = 1 along Y.
+        let f = parse(
+            "#1=IFCELLIPSEPROFILEDEF(.AREA.,$,$,4.,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_eq!(m.vertex_count(), 96);
+        // theta = 0 → (4, 0); quarter turn → (0, 1).
+        approx(m.positions[0], [4.0, 0.0, 0.0]);
+        approx(m.positions[12], [0.0, 1.0, 0.0]);
+        // Every bottom vertex satisfies the ellipse equation.
+        for p in &m.positions[..48] {
+            let e = (p[0] / 4.0).powi(2) + p[1].powi(2);
+            assert!((e - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn arbitrary_profile_with_circle_outer_curve() {
+        // An IfcArbitraryClosedProfileDef whose OuterCurve is an
+        // IfcCircle centred at (5, 0) with radius 1.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((5.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLE(#2,1.);\n\
+             #4=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#3);\n\
+             #5=IFCDIRECTION((0.,0.,1.));\n\
+             #6=IFCEXTRUDEDAREASOLID(#4,$,#5,1.);",
+        );
+        let m = tessellate_item(&f, 6).unwrap();
+        assert_eq!(m.vertex_count(), 96);
+        approx(m.positions[0], [6.0, 0.0, 0.0]);
+        for p in &m.positions[..48] {
+            let (dx, dy) = (p[0] - 5.0, p[1]);
+            assert!(((dx * dx + dy * dy).sqrt() - 1.0).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn revolved_circle_profile_makes_torus() {
+        // A radius-1 circle profile centred at x = 5, revolved a full
+        // turn about the Y axis through the origin → a torus: every
+        // vertex is 1 away from the circle of radius 5 about the Y axis.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((5.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLEPROFILEDEF(.AREA.,$,#2,1.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #5=IFCDIRECTION((0.,1.,0.));\n\
+             #6=IFCAXIS1PLACEMENT(#4,#5);\n\
+             #7=IFCREVOLVEDAREASOLID(#3,$,#6,6.283185307179586);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        // 48 rings of 48 points, wrapped closed (no end caps).
+        assert_eq!(m.vertex_count(), 48 * 48);
+        assert_eq!(m.triangle_count(), 48 * 48 * 2);
+        for p in &m.positions {
+            // Distance from the Y axis in the XZ plane, paired with the
+            // Y offset: (r - 5)² + y² = 1².
+            let r = (p[0] * p[0] + p[2] * p[2]).sqrt();
+            let d = ((r - 5.0).powi(2) + p[1] * p[1]).sqrt();
+            assert!((d - 1.0).abs() < 1e-9, "vertex {p:?} off the torus");
+        }
     }
 
     #[test]
