@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (Brep face holes + concave faces): `IfcFace` inner bounds are
+  now real holes. The outer bound is identified by keyword
+  (`IfcFaceOuterBound`, else the first bound); every remaining
+  `IfcFaceBound` loop is projected — together with the outer loop —
+  onto the face plane (Newell normal, robust for slightly non-planar
+  loops) and triangulated hole-aware through the shared bridge +
+  ear-clip machinery, so the hole area stays open instead of being
+  covered. Convex single-bound faces keep the historical fan fast path
+  (identical output); concave single-bound faces are ear-clipped,
+  fixing fan spill outside the boundary. Per-bound `Orientation` flags
+  remain unapplied (their normative description is not in the staged
+  set). 3 new geometry tests with exact area-sum assertions (holed
+  face 8 − 0.5 with hole-avoidance centroids, concave L-face area 3,
+  holed face on a tilted x = z plane with in-plane areas 200 − 4√2).
+
 - Phase 3 (presentation styling): the registry decoder now emits **one
   primitive per representation item** (new public
   `meshed_items_from_product_shape`) and carries the file's styling

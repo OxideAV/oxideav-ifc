@@ -44,12 +44,15 @@
 //! Each shell (`IfcConnectedFaceSet.CfsFaces : SET OF IfcFace`) holds
 //! `IfcFace`s; every face's outer `IfcFaceBound` (the `IfcFaceOuterBound`
 //! when present, else the first bound) carries an `IfcPolyLoop` whose
-//! `Polygon : LIST [3:?] OF IfcCartesianPoint` is fan-triangulated. The
-//! shared vertex table is de-duplicated by `IfcCartesianPoint` id so a
-//! point referenced by several loops contributes one mesh vertex
-//! (§8.8.3.18: "each Cartesian point shall be referenced by at least
-//! three poly loops"). `Voids` inner shells and per-bound `Orientation`
-//! flags are not yet applied — the outer surface is meshed as authored.
+//! `Polygon : LIST [3:?] OF IfcCartesianPoint` is triangulated — convex
+//! single-bound loops by a fan, concave loops and faces with inner
+//! (hole) bounds by projecting onto the face plane (Newell normal) and
+//! ear-clipping hole-aware, so face holes stay open. The shared vertex
+//! table is de-duplicated by `IfcCartesianPoint` id so a point
+//! referenced by several loops contributes one mesh vertex (§8.8.3.18:
+//! "each Cartesian point shall be referenced by at least three poly
+//! loops"). Per-bound `Orientation` flags are not applied — loops are
+//! meshed as authored.
 //!
 //! Beyond the face-set / Brep families this module also sweeps the
 //! linear **swept area solid**:
@@ -2294,11 +2297,17 @@ fn connected_face_set(
 }
 
 /// Triangulate one `IfcFace`: pick its outer bound (the
-/// `IfcFaceOuterBound` if any, else the first `IfcFaceBound`), resolve
-/// that bound's `IfcPolyLoop`, and fan-triangulate the loop polygon.
-/// `Bounds` is attribute index 0; `IfcFaceBound.Bound` (the loop) is its
-/// attribute index 0. Inner bounds (holes) are not subtracted in this
-/// slice.
+/// `IfcFaceOuterBound` if any, else the first `IfcFaceBound`), gather
+/// the remaining bounds as inner (hole) loops, and triangulate the
+/// polygon-with-holes. `Bounds` is attribute index 0;
+/// `IfcFaceBound.Bound` (the loop) is its attribute index 0.
+///
+/// A single convex outer loop takes the fan fast path (the historical
+/// behaviour); a concave loop or a face with inner bounds is projected
+/// onto its own plane (Newell normal) and triangulated hole-aware
+/// through the shared [`triangulate_profile`] machinery, so face holes
+/// are left open instead of being covered. Per-bound `Orientation`
+/// flags are not applied — the loops are meshed as authored.
 fn face(
     step: &StepFile,
     face_id: u64,
@@ -2322,48 +2331,124 @@ fn face(
         return Err(GeometryError::BadCoordinates);
     }
 
-    // Prefer the IfcFaceOuterBound; fall back to the first bound. (A face
-    // may carry just one untyped IfcFaceBound for its outer loop.)
-    let mut chosen: Option<u64> = None;
-    let mut first: Option<u64> = None;
+    // Prefer the IfcFaceOuterBound as the outer loop; fall back to the
+    // first bound. (A face may carry just one untyped IfcFaceBound for
+    // its outer loop.) Every other bound is an inner (hole) loop.
+    let mut bound_ids: Vec<u64> = Vec::with_capacity(bounds.len());
     for b in bounds {
         let Some(bid) = b.as_reference() else {
             continue;
         };
-        if first.is_none() {
-            first = Some(bid);
-        }
-        let bk = step.get(bid).ok_or(GeometryError::MissingInstance(bid))?;
-        if bk.keyword == "IFCFACEOUTERBOUND" {
-            chosen = Some(bid);
-            break;
-        }
+        // Validate existence early for a precise error.
+        step.get(bid).ok_or(GeometryError::MissingInstance(bid))?;
+        bound_ids.push(bid);
     }
-    let bound_id = chosen.or(first).ok_or(GeometryError::BadCoordinates)?;
-    let bound = step
-        .get(bound_id)
-        .ok_or(GeometryError::MissingInstance(bound_id))?;
+    if bound_ids.is_empty() {
+        return Err(GeometryError::BadCoordinates);
+    }
+    let outer_pos = bound_ids
+        .iter()
+        .position(|&bid| {
+            step.get(bid)
+                .is_some_and(|b| b.keyword == "IFCFACEOUTERBOUND")
+        })
+        .unwrap_or(0);
+    let outer_bid = bound_ids.remove(outer_pos);
+
     // IfcFaceBound(Bound : IfcLoop, Orientation : IfcBoolean): Bound is
-    // attribute index 0. Orientation (index 1) is not applied here.
-    let loop_id = bound
-        .args
-        .first()
-        .and_then(Value::as_reference)
-        .ok_or(GeometryError::BadCoordinates)?;
-    poly_loop(step, loop_id, pool, triangles)
+    // attribute index 0.
+    let bound_loop = |bid: u64| -> Result<u64, GeometryError> {
+        step.get(bid)
+            .ok_or(GeometryError::MissingInstance(bid))?
+            .args
+            .first()
+            .and_then(Value::as_reference)
+            .ok_or(GeometryError::BadCoordinates)
+    };
+
+    // Intern the outer loop (encounter order — this keeps the pooled
+    // vertex numbering identical to the historical fan path).
+    let outer = interned_loop(step, bound_loop(outer_bid)?, pool)?;
+
+    // Inner bounds → hole loops.
+    let mut holes: Vec<Vec<(u32, [f64; 3])>> = Vec::with_capacity(bound_ids.len());
+    for bid in bound_ids {
+        holes.push(interned_loop(step, bound_loop(bid)?, pool)?);
+    }
+
+    if holes.is_empty() && convex_loop(&outer) {
+        // Fan from the first vertex — the planar convex fast path.
+        for w in outer[1..].windows(2) {
+            triangles.push([outer[0].0, w[0].0, w[1].0]);
+        }
+        return Ok(());
+    }
+
+    // Project the face onto its own plane and triangulate hole-aware.
+    let pts3: Vec<[f64; 3]> = outer.iter().map(|&(_, p)| p).collect();
+    let n = newell_normal(&pts3);
+    let Some(n) = normalise(n) else {
+        return Err(GeometryError::BadCoordinates);
+    };
+    // In-plane orthonormal basis (u, v) with v = n × u, so the outer
+    // loop projects counter-clockwise (the Newell normal is the side the
+    // loop winds counter-clockwise around).
+    let seed = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let d = dot_raw(seed, n);
+    let u = normalise([seed[0] - d * n[0], seed[1] - d * n[1], seed[2] - d * n[2]])
+        .unwrap_or([1.0, 0.0, 0.0]);
+    let v = cross_raw(n, u);
+    let origin = pts3[0];
+    let project = |p: [f64; 3]| -> [f64; 2] {
+        let r = [p[0] - origin[0], p[1] - origin[1], p[2] - origin[2]];
+        [dot_raw(r, u), dot_raw(r, v)]
+    };
+
+    // Build the profile area; the pool indices are carried in a parallel
+    // concatenated table so triangulator output maps back to the mesh.
+    let mut index_table: Vec<u32> = outer.iter().map(|&(i, _)| i).collect();
+    let outer_2d: Vec<[f64; 2]> = outer.iter().map(|&(_, p)| project(p)).collect();
+    let mut hole_2d: Vec<Vec<[f64; 2]>> = Vec::with_capacity(holes.len());
+    for hole in &holes {
+        let mut ring: Vec<[f64; 2]> = hole.iter().map(|&(_, p)| project(p)).collect();
+        let mut ids: Vec<u32> = hole.iter().map(|&(i, _)| i).collect();
+        // triangulate_profile expects counter-clockwise hole rings.
+        if signed_area_2x(&ring) < 0.0 {
+            ring.reverse();
+            ids.reverse();
+        }
+        hole_2d.push(ring);
+        index_table.extend(ids);
+    }
+    let area = ProfileArea {
+        outer: outer_2d,
+        holes: hole_2d,
+    };
+    let cap = triangulate_profile(&area)?;
+    for [a, b, c] in cap {
+        triangles.push([
+            index_table[a as usize],
+            index_table[b as usize],
+            index_table[c as usize],
+        ]);
+    }
+    Ok(())
 }
 
-/// Fan-triangulate one `IfcPolyLoop` (`Polygon : LIST [3:?] OF
-/// IfcCartesianPoint`, attribute index 0) into `triangles`, interning
-/// each polygon vertex through the shared `pool`. Edge / vertex loops
-/// (`IfcEdgeLoop` / `IfcVertexLoop`) are not polygonal and are surfaced
-/// as `Unsupported`.
-fn poly_loop(
+/// Resolve one `IfcPolyLoop` (`Polygon : LIST [3:?] OF
+/// IfcCartesianPoint`, attribute index 0) into `(pooled vertex index,
+/// position)` pairs, interning each point through the shared `pool`.
+/// Edge / vertex loops (`IfcEdgeLoop` / `IfcVertexLoop`) are not
+/// polygonal and are surfaced as `Unsupported`.
+fn interned_loop(
     step: &StepFile,
     loop_id: u64,
     pool: &mut VertexPool,
-    triangles: &mut Vec<[u32; 3]>,
-) -> Result<(), GeometryError> {
+) -> Result<Vec<(u32, [f64; 3])>, GeometryError> {
     let inst = step
         .get(loop_id)
         .ok_or(GeometryError::MissingInstance(loop_id))?;
@@ -2378,19 +2463,53 @@ fn poly_loop(
     if polygon.len() < 3 {
         return Err(GeometryError::IndexOutOfRange);
     }
-    // Intern each polygon point, then fan from the first vertex.
-    let v0_id = polygon[0]
-        .as_reference()
-        .ok_or(GeometryError::BadCoordinates)?;
-    let v0 = pool.intern(step, v0_id)?;
-    for w in polygon[1..].windows(2) {
-        let a_id = w[0].as_reference().ok_or(GeometryError::BadCoordinates)?;
-        let b_id = w[1].as_reference().ok_or(GeometryError::BadCoordinates)?;
-        let a = pool.intern(step, a_id)?;
-        let b = pool.intern(step, b_id)?;
-        triangles.push([v0, a, b]);
+    let mut out = Vec::with_capacity(polygon.len());
+    for p in polygon {
+        let pid = p.as_reference().ok_or(GeometryError::BadCoordinates)?;
+        let idx = pool.intern(step, pid)?;
+        out.push((idx, pool.positions[idx as usize]));
     }
-    Ok(())
+    Ok(out)
+}
+
+/// Newell's method: the (unnormalised) plane normal of a closed 3-D
+/// polygon — robust for slightly non-planar loops, and oriented so the
+/// loop winds counter-clockwise when viewed from the normal's side.
+fn newell_normal(pts: &[[f64; 3]]) -> [f64; 3] {
+    let mut n = [0.0f64; 3];
+    for i in 0..pts.len() {
+        let a = pts[i];
+        let b = pts[(i + 1) % pts.len()];
+        n[0] += (a[1] - b[1]) * (a[2] + b[2]);
+        n[1] += (a[2] - b[2]) * (a[0] + b[0]);
+        n[2] += (a[0] - b[0]) * (a[1] + b[1]);
+    }
+    n
+}
+
+/// `true` when a 3-D loop is convex: every consecutive edge pair's
+/// cross product points along the loop's Newell normal (within a
+/// scale-relative tolerance, collinear corners allowed).
+fn convex_loop(pts: &[(u32, [f64; 3])]) -> bool {
+    let pts3: Vec<[f64; 3]> = pts.iter().map(|&(_, p)| p).collect();
+    let n = newell_normal(&pts3);
+    let scale = pts3
+        .iter()
+        .map(|p| p[0].abs().max(p[1].abs()).max(p[2].abs()))
+        .fold(1.0f64, f64::max);
+    let eps = 1e-12 * scale * scale;
+    let len = pts3.len();
+    for i in 0..len {
+        let a = pts3[i];
+        let b = pts3[(i + 1) % len];
+        let c = pts3[(i + 2) % len];
+        let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+        let e2 = [c[0] - b[0], c[1] - b[1], c[2] - b[2]];
+        if dot_raw(cross_raw(e1, e2), n) < -eps {
+            return false;
+        }
+    }
+    true
 }
 
 /// Resolve the `Coordinates` reference (the first face-set attribute) to
@@ -2785,10 +2904,32 @@ mod tests {
         assert_eq!(m.triangles[1], [0, 2, 3]);
     }
 
+    /// Sum of the 3-D areas of every triangle in the mesh.
+    fn surface_area(m: &TriMesh) -> f64 {
+        m.triangles
+            .iter()
+            .map(|t| {
+                let a = m.positions[t[0] as usize];
+                let b = m.positions[t[1] as usize];
+                let c = m.positions[t[2] as usize];
+                let e1 = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let e2 = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let x = [
+                    e1[1] * e2[2] - e1[2] * e2[1],
+                    e1[2] * e2[0] - e1[0] * e2[2],
+                    e1[0] * e2[1] - e1[1] * e2[0],
+                ];
+                0.5 * (x[0] * x[0] + x[1] * x[1] + x[2] * x[2]).sqrt()
+            })
+            .sum()
+    }
+
     #[test]
-    fn faceted_brep_outer_bound_preferred_over_inner() {
-        // A face listing an inner IfcFaceBound first then an
-        // IfcFaceOuterBound must mesh the *outer* loop.
+    fn faceted_brep_inner_bound_is_a_hole() {
+        // A face listing an inner IfcFaceBound (a triangle of area 0.5)
+        // ahead of its IfcFaceOuterBound (a triangle of area 8): the
+        // outer loop is identified by keyword regardless of order and
+        // the inner loop is left open, so the meshed area is 8 − 0.5.
         let f = parse(
             "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
              #2=IFCCARTESIANPOINT((4.,0.,0.));\n\
@@ -2805,11 +2946,82 @@ mod tests {
              #41=IFCFACETEDBREP(#40);",
         );
         let m = tessellate_item(&f, 41).unwrap();
-        // Only the outer loop (3 points) is meshed in this slice.
-        assert_eq!(m.vertex_count(), 3);
-        assert_eq!(m.triangle_count(), 1);
+        // Outer (3 points, interned first) + hole (3 points).
+        assert_eq!(m.vertex_count(), 6);
         assert_eq!(m.positions[0], [0.0, 0.0, 0.0]);
         assert_eq!(m.positions[1], [4.0, 0.0, 0.0]);
+        assert!(
+            (surface_area(&m) - 7.5).abs() < 1e-9,
+            "{}",
+            surface_area(&m)
+        );
+        // No triangle centroid falls inside the open hole.
+        for t in &m.triangles {
+            let ps: Vec<[f64; 3]> = t.iter().map(|&v| m.positions[v as usize]).collect();
+            let cx = (ps[0][0] + ps[1][0] + ps[2][0]) / 3.0;
+            let cy = (ps[0][1] + ps[1][1] + ps[2][1]) / 3.0;
+            // Inside-hole test for the (1,1)-(2,1)-(1,2) triangle.
+            let inside = cx > 1.0 && cy > 1.0 && (cx - 1.0) + (cy - 1.0) < 1.0;
+            assert!(!inside, "cap triangle centroid ({cx},{cy}) in the hole");
+        }
+    }
+
+    #[test]
+    fn faceted_brep_concave_face_covers_exact_area() {
+        // A concave L-shaped face (2×2 square minus its 1×1 top-right
+        // corner, area 3) on the z = 5 plane: the fan fast path would
+        // spill outside the notch; the projected ear clip must not.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,5.));\n\
+             #2=IFCCARTESIANPOINT((2.,0.,5.));\n\
+             #3=IFCCARTESIANPOINT((2.,1.,5.));\n\
+             #4=IFCCARTESIANPOINT((1.,1.,5.));\n\
+             #5=IFCCARTESIANPOINT((1.,2.,5.));\n\
+             #6=IFCCARTESIANPOINT((0.,2.,5.));\n\
+             #10=IFCPOLYLOOP((#1,#2,#3,#4,#5,#6));\n\
+             #20=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #30=IFCFACE((#20));\n\
+             #40=IFCCLOSEDSHELL((#30));\n\
+             #41=IFCFACETEDBREP(#40);",
+        );
+        let m = tessellate_item(&f, 41).unwrap();
+        assert_eq!(m.vertex_count(), 6);
+        assert_eq!(m.triangle_count(), 4);
+        assert!((surface_area(&m) - 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn faceted_brep_holed_face_on_tilted_plane() {
+        // A rectangular face with a rectangular hole, lying in the
+        // tilted x = z plane (spanning the (1,0,1)/√2 and Y directions).
+        // Projection through the Newell normal must recover the exact
+        // in-plane areas: outer 10√2 × 10√2 = 200, hole 2√2 × 2 = 4√2.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((10.,0.,10.));\n\
+             #3=IFCCARTESIANPOINT((10.,14.142135623730951,10.));\n\
+             #4=IFCCARTESIANPOINT((0.,14.142135623730951,0.));\n\
+             #5=IFCCARTESIANPOINT((4.,5.,4.));\n\
+             #6=IFCCARTESIANPOINT((6.,5.,6.));\n\
+             #7=IFCCARTESIANPOINT((6.,7.,6.));\n\
+             #8=IFCCARTESIANPOINT((4.,7.,4.));\n\
+             #10=IFCPOLYLOOP((#1,#2,#3,#4));\n\
+             #11=IFCPOLYLOOP((#5,#6,#7,#8));\n\
+             #20=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #21=IFCFACEBOUND(#11,.T.);\n\
+             #30=IFCFACE((#20,#21));\n\
+             #40=IFCCLOSEDSHELL((#30));\n\
+             #41=IFCFACETEDBREP(#40);",
+        );
+        let m = tessellate_item(&f, 41).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        let outer = 200.0f64;
+        let hole = 2.0f64 * 2f64.sqrt() * 2.0;
+        assert!(
+            (surface_area(&m) - (outer - hole)).abs() < 1e-6,
+            "{}",
+            surface_area(&m)
+        );
     }
 
     #[test]
