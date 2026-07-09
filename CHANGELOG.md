@@ -6,6 +6,22 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (polygonal-face voids + product-named nodes):
+  - `IfcIndexedPolygonalFaceWithVoids.InnerCoordIndices` (§8.8.3.39:
+    each inner list is one hole loop of the planar face) is now
+    evaluated — polygonal face-set faces with voids leave their holes
+    open through the shared plane-projection + bridge/ear-clip
+    triangulator (extracted as `triangulate_face_3d`, shared with the
+    Brep `IfcFace` walk). Concave plain polygonal faces are ear-clipped
+    too (fan spill fixed); convex faces keep the fan output unchanged.
+  - The registry decoder names each scene node after the owning
+    product's `IfcRoot.Name` (else `KEYWORD#id`, else the shape's
+    `#id`), so a decoded `Scene3D` reads as "Column #1" rather than
+    anonymous shape ids.
+  - 3 new tests (voided polygonal face area 12 + void-avoidance
+    centroids, concave polygonal L-face area 3, product-named node on
+    the column fixture).
+
 - Phase 3 (Brep face holes + concave faces): `IfcFace` inner bounds are
   now real holes. The outer bound is identified by keyword
   (`IfcFaceOuterBound`, else the first bound); every remaining

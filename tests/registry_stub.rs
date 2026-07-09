@@ -186,6 +186,23 @@ END-ISO-10303-21;
 }
 
 #[test]
+fn decode_names_nodes_after_owning_product() {
+    // The column fixture's body-bearing product carries a Name; the
+    // scene node for its shape must use it rather than a bare #id.
+    let mut decoder = make_decoder();
+    let scene = decoder.decode(COLUMN).expect("column fixture decodes");
+    let named: Vec<&str> = scene
+        .nodes
+        .iter()
+        .filter_map(|n| n.name.as_deref())
+        .collect();
+    assert!(
+        named.iter().any(|n| n.to_lowercase().contains("column")),
+        "expected a product-named node, got {named:?}"
+    );
+}
+
+#[test]
 fn decode_non_step_input_is_invalid_data() {
     let mut decoder = make_decoder();
     match decoder.decode(b"not a step file") {

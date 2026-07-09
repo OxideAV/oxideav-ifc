@@ -844,6 +844,8 @@ fn triangulated_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
 // IfcPolygonalFaceSet
 //   args: Coordinates, Closed, Faces, PnIndex
 //   Faces: LIST OF IfcIndexedPolygonalFace (CoordIndex : LIST [3:?])
+//     …WithVoids adds InnerCoordIndices : LIST OF LIST [3:?] — each
+//     inner list is one hole loop of the planar face (§8.8.3.39).
 // ---------------------------------------------------------------------
 fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
     let positions = coordinates(step, args.first())?;
@@ -856,6 +858,18 @@ fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geomet
 
     let n = positions.len();
     let mut triangles = Vec::new();
+    // Resolve one loop of wire indices into (mesh index, position) pairs.
+    let resolve_loop = |loop_indices: &[Value]| -> Result<Vec<(u32, [f64; 3])>, GeometryError> {
+        if loop_indices.len() < 3 {
+            return Err(GeometryError::IndexOutOfRange);
+        }
+        let mut out = Vec::with_capacity(loop_indices.len());
+        for v in loop_indices {
+            let idx = resolve_vertex(v, &pn, n)?;
+            out.push((idx, positions[idx as usize]));
+        }
+        Ok(out)
+    };
     for face_ref in faces {
         let face_id = face_ref
             .as_reference()
@@ -864,25 +878,28 @@ fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geomet
             .get(face_id)
             .ok_or(GeometryError::MissingInstance(face_id))?;
         // IfcIndexedPolygonalFace (and …WithVoids): CoordIndex is the
-        // first attribute (index 0). Inner void loops (the second
-        // attribute of the …WithVoids subtype) are not subtracted in
-        // this slice — the outer loop is fan-triangulated.
+        // first attribute (index 0).
         let loop_indices = face
             .args
             .first()
             .and_then(Value::as_list)
             .ok_or(GeometryError::BadCoordinates)?;
-        if loop_indices.len() < 3 {
-            return Err(GeometryError::IndexOutOfRange);
+        let outer = resolve_loop(loop_indices)?;
+        // IfcIndexedPolygonalFaceWithVoids.InnerCoordIndices (index 1):
+        // each inner list is one hole loop.
+        let mut holes: Vec<Vec<(u32, [f64; 3])>> = Vec::new();
+        if face.keyword == "IFCINDEXEDPOLYGONALFACEWITHVOIDS" {
+            let inner = face
+                .args
+                .get(1)
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadCoordinates)?;
+            for hole in inner {
+                let hole_indices = hole.as_list().ok_or(GeometryError::BadCoordinates)?;
+                holes.push(resolve_loop(hole_indices)?);
+            }
         }
-        // Fan-triangulate the (assumed convex / planar) polygon:
-        // (v0,v1,v2), (v0,v2,v3), …
-        let v0 = resolve_vertex(&loop_indices[0], &pn, n)?;
-        for w in loop_indices[1..].windows(2) {
-            let v1 = resolve_vertex(&w[0], &pn, n)?;
-            let v2 = resolve_vertex(&w[1], &pn, n)?;
-            triangles.push([v0, v1, v2]);
-        }
+        triangulate_face_3d(&outer, &holes, &mut triangles)?;
     }
     Ok(TriMesh {
         positions,
@@ -2376,7 +2393,23 @@ fn face(
         holes.push(interned_loop(step, bound_loop(bid)?, pool)?);
     }
 
-    if holes.is_empty() && convex_loop(&outer) {
+    triangulate_face_3d(&outer, &holes, triangles)
+}
+
+/// Triangulate one planar 3-D polygon-with-holes into `triangles`,
+/// where every loop vertex carries its final mesh index.
+///
+/// A convex hole-free loop takes the fan fast path; otherwise the loops
+/// are projected onto the polygon plane (Newell normal — robust for
+/// slightly non-planar loops) and triangulated hole-aware through
+/// [`triangulate_profile`]. Shared by the faceted-Brep `IfcFace` walk
+/// and the `IfcIndexedPolygonalFace(WithVoids)` evaluation.
+fn triangulate_face_3d(
+    outer: &[(u32, [f64; 3])],
+    holes: &[Vec<(u32, [f64; 3])>],
+    triangles: &mut Vec<[u32; 3]>,
+) -> Result<(), GeometryError> {
+    if holes.is_empty() && convex_loop(outer) {
         // Fan from the first vertex — the planar convex fast path.
         for w in outer[1..].windows(2) {
             triangles.push([outer[0].0, w[0].0, w[1].0]);
@@ -2408,12 +2441,12 @@ fn face(
         [dot_raw(r, u), dot_raw(r, v)]
     };
 
-    // Build the profile area; the pool indices are carried in a parallel
+    // Build the profile area; the mesh indices are carried in a parallel
     // concatenated table so triangulator output maps back to the mesh.
     let mut index_table: Vec<u32> = outer.iter().map(|&(i, _)| i).collect();
     let outer_2d: Vec<[f64; 2]> = outer.iter().map(|&(_, p)| project(p)).collect();
     let mut hole_2d: Vec<Vec<[f64; 2]>> = Vec::with_capacity(holes.len());
-    for hole in &holes {
+    for hole in holes {
         let mut ring: Vec<[f64; 2]> = hole.iter().map(|&(_, p)| project(p)).collect();
         let mut ids: Vec<u32> = hole.iter().map(|&(i, _)| i).collect();
         // triangulate_profile expects counter-clockwise hole rings.
@@ -2652,6 +2685,65 @@ mod tests {
         assert_eq!(m.triangle_count(), 2);
         assert_eq!(m.triangles[0], [0, 1, 2]);
         assert_eq!(m.triangles[1], [0, 2, 3]);
+    }
+
+    #[test]
+    fn polygonal_face_with_voids_leaves_hole_open() {
+        // A 4×4 square face (area 16) with a central 2×2 void (area 4)
+        // via IfcIndexedPolygonalFaceWithVoids.InnerCoordIndices.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(4.,0.,0.),(4.,4.,0.),(0.,4.,0.),\
+             (1.,1.,0.),(3.,1.,0.),(3.,3.,0.),(1.,3.,0.)));\n\
+             #2=IFCINDEXEDPOLYGONALFACEWITHVOIDS((1,2,3,4),((5,6,7,8)));\n\
+             #3=IFCPOLYGONALFACESET(#1,.F.,(#2),$);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        // Face area = 16 − 4; no triangle centroid inside the void.
+        let area: f64 = m
+            .triangles
+            .iter()
+            .map(|t| {
+                let a = m.positions[t[0] as usize];
+                let b = m.positions[t[1] as usize];
+                let c = m.positions[t[2] as usize];
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            })
+            .sum();
+        assert!((area - 12.0).abs() < 1e-9, "{area}");
+        for t in &m.triangles {
+            let ps: Vec<[f64; 3]> = t.iter().map(|&v| m.positions[v as usize]).collect();
+            let cx = (ps[0][0] + ps[1][0] + ps[2][0]) / 3.0;
+            let cy = (ps[0][1] + ps[1][1] + ps[2][1]) / 3.0;
+            assert!(
+                !(1.0..3.0).contains(&cx) || !(1.0..3.0).contains(&cy),
+                "triangle centroid ({cx},{cy}) inside the void"
+            );
+        }
+    }
+
+    #[test]
+    fn polygonal_concave_face_covers_exact_area() {
+        // A concave L-shaped polygonal face (area 3): the ear-clipped
+        // path must not spill outside the notch.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(2.,0.,0.),(2.,1.,0.),(1.,1.,0.),\
+             (1.,2.,0.),(0.,2.,0.)));\n\
+             #2=IFCINDEXEDPOLYGONALFACE((1,2,3,4,5,6));\n\
+             #3=IFCPOLYGONALFACESET(#1,.F.,(#2),$);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        let area: f64 = m
+            .triangles
+            .iter()
+            .map(|t| {
+                let a = m.positions[t[0] as usize];
+                let b = m.positions[t[1] as usize];
+                let c = m.positions[t[2] as usize];
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            })
+            .sum();
+        assert!((area - 3.0).abs() < 1e-9, "{area}");
     }
 
     #[test]

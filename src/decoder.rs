@@ -129,7 +129,7 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
                 }
                 let mesh_id = scene.add_mesh(mesh);
                 let node = Node::new()
-                    .with_name(format!("#{}", inst.id))
+                    .with_name(shape_node_name(step, inst.id))
                     .with_mesh(mesh_id);
                 let node_id = scene.add_node(node);
                 scene
@@ -341,6 +341,32 @@ fn shape_world_transform(step: &StepFile, shape_id: u64) -> crate::geometry::Tra
         return placement_transform(step, placement_id).unwrap_or(Transform::IDENTITY);
     }
     Transform::IDENTITY
+}
+
+/// Human-readable label for the product owning a shape: the product's
+/// `IfcRoot.Name` (attribute index 2 on every rooted entity) when
+/// present, else `KEYWORD#id`. Falls back to the shape's own `#id` when
+/// no owning product is found.
+fn shape_node_name(step: &StepFile, shape_id: u64) -> String {
+    for inst in step.instances.values() {
+        // The owning product references the shape as its Representation
+        // and carries an ObjectPlacement / GlobalId, i.e. is a rooted
+        // product — a plain reference scan suffices here because a shape
+        // is referenced by exactly its product(s).
+        if inst.keyword.starts_with("IFC")
+            && inst.args.iter().any(|a| a.as_reference() == Some(shape_id))
+            && inst.args.first().and_then(Value::as_str).is_some()
+        {
+            // IfcRoot(GlobalId, OwnerHistory, Name, Description).
+            if let Some(name) = inst.args.get(2).and_then(Value::as_str) {
+                if !name.is_empty() {
+                    return name.to_string();
+                }
+            }
+            return format!("{}#{}", inst.keyword, inst.id);
+        }
+    }
+    format!("#{shape_id}")
 }
 
 /// Convert a crate-local [`TriMesh`] into one `Triangles` [`Primitive`].
