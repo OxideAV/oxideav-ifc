@@ -76,12 +76,19 @@
 //!   Mapped items may nest (a source representation can contain further
 //!   mapped items); recursion is bounded by a depth cap.
 //!
+//! Swept-solid profiles are resolved as full areas ([`ProfileArea`]):
+//! arbitrary closed profiles (polyline or full-circle outer curves,
+//! with or without voids), rectangles (plain and hollow), circles
+//! (plain and hollow), and ellipses. Caps are triangulated hole-aware
+//! (hole bridging + ear clipping), so concave and holed profiles mesh
+//! correctly; hole side walls are emitted for hollow / voided profiles.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
-//! (`IfcRevolvedAreaSolid`, `IfcSurfaceCurveSweptAreaSolid`, the tapered
-//! extrusion), parameterised profiles beyond the rectangle, curved
-//! (`IfcIndexedPolyCurve`/circle) profile curves, advanced/curved breps
-//! (`IfcAdvancedBrep`, `IfcFaceSurface`), and boolean results.
+//! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), trimmed /
+//! composite / indexed profile curves, the named parameterised profiles
+//! (I/L/T/U/Z/C shapes), advanced/curved breps (`IfcAdvancedBrep`,
+//! `IfcFaceSurface`), and boolean results.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -855,11 +862,12 @@ fn surface_model(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryErr
 // result is then mapped into the representation's local space by the
 // `Position` IfcAxis2Placement3D affine.
 //
-// The mesh built here is a closed prism over the (assumed convex,
-// planar, CCW) profile ring: a bottom cap, a top cap offset by
-// `Depth · ExtrudedDirection`, and a quad side wall per profile edge.
-// Profile inner boundaries (holes) and the tapered subtype are not yet
-// applied — the outer ring is meshed as authored.
+// The mesh built here is a closed prism over the profile area: a bottom
+// cap, a top cap offset by `Depth · ExtrudedDirection`, and a quad side
+// wall per boundary edge (outer ring and hole rings alike). The caps are
+// ear-clipped through `triangulate_profile`, so concave outer boundaries
+// and profile holes (hollow / voided profile kinds) triangulate
+// correctly. The tapered subtype is not yet applied.
 // ---------------------------------------------------------------------
 fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
     // SweptArea (profile) — attribute index 0.
@@ -867,10 +875,7 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .first()
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadProfile)?;
-    let ring = profile_ring(step, profile_id)?;
-    if ring.len() < 3 {
-        return Err(GeometryError::BadProfile);
-    }
+    let area = profile_area(step, profile_id)?;
 
     // ExtrudedDirection (index 2) and Depth (index 3), both in the
     // Position coordinate system.
@@ -883,37 +888,53 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     let d = normalise(dir).unwrap_or(dir);
     let sweep = [d[0] * depth, d[1] * depth, d[2] * depth];
 
-    let n = ring.len();
-    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n * 2);
-    // Bottom ring (profile plane, local z = 0).
-    for &[x, y] in &ring {
-        positions.push([x, y, 0.0]);
+    let total = area.point_count();
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(total * 2);
+    // Bottom rings (profile plane, local z = 0): outer, then each hole.
+    for ring in area.rings() {
+        for &[x, y] in ring {
+            positions.push([x, y, 0.0]);
+        }
     }
-    // Top ring (bottom + sweep).
-    for &[x, y] in &ring {
-        positions.push([x + sweep[0], y + sweep[1], sweep[2]]);
+    // Top rings (bottom + sweep), same order.
+    for ring in area.rings() {
+        for &[x, y] in ring {
+            positions.push([x + sweep[0], y + sweep[1], sweep[2]]);
+        }
     }
 
-    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity((n - 2) * 2 + n * 2);
-    // Bottom cap (fan from vertex 0), wound to face away from the sweep
-    // (reversed relative to the top cap).
-    for i in 1..(n - 1) {
-        triangles.push([0, (i + 1) as u32, i as u32]);
+    // Caps: the hole-aware profile triangulation (indices address the
+    // concatenated rings in the same order as `positions`).
+    let cap = triangulate_profile(&area)?;
+    let top = total as u32;
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(cap.len() * 2 + total * 2);
+    // Bottom cap wound to face away from the sweep (reversed), top cap
+    // in profile (CCW) winding.
+    for &[a, b, c] in &cap {
+        triangles.push([a, c, b]);
     }
-    // Top cap (fan from the first top vertex), normal winding.
-    let top = n as u32;
-    for i in 1..(n - 1) {
-        triangles.push([top, top + i as u32, top + (i + 1) as u32]);
+    for &[a, b, c] in &cap {
+        triangles.push([top + a, top + b, top + c]);
     }
-    // Side walls: one quad (two triangles) per profile edge i → i+1.
-    for i in 0..n {
-        let i_next = (i + 1) % n;
-        let b0 = i as u32;
-        let b1 = i_next as u32;
-        let t0 = top + i as u32;
-        let t1 = top + i_next as u32;
-        triangles.push([b0, b1, t1]);
-        triangles.push([b0, t1, t0]);
+    // Side walls: one quad (two triangles) per ring edge. Hole walls are
+    // wound opposite the outer wall so their faces look into the hole.
+    let mut offset = 0u32;
+    for (ri, ring) in area.rings().enumerate() {
+        let k = ring.len();
+        for i in 0..k {
+            let b0 = offset + i as u32;
+            let b1 = offset + ((i + 1) % k) as u32;
+            let t0 = top + b0;
+            let t1 = top + b1;
+            if ri == 0 {
+                triangles.push([b0, b1, t1]);
+                triangles.push([b0, t1, t0]);
+            } else {
+                triangles.push([b1, b0, t0]);
+                triangles.push([b1, t0, t1]);
+            }
+        }
+        offset += k as u32;
     }
 
     let mut mesh = TriMesh {
@@ -961,10 +982,7 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .first()
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadProfile)?;
-    let ring = profile_ring(step, profile_id)?;
-    if ring.len() < 3 {
-        return Err(GeometryError::BadProfile);
-    }
+    let area = profile_area(step, profile_id)?;
 
     // Axis : IfcAxis1Placement (index 2) — its Location and direction.
     let axis_id = args
@@ -991,41 +1009,56 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     let full_turn = (angle.abs() - two_pi).abs() < 1e-9 || angle.abs() > two_pi;
     let ring_count = if full_turn { segments } else { segments + 1 };
 
-    let n = ring.len();
+    // One "slice" per angular step: the concatenated profile rings
+    // (outer, then each hole) rotated into position.
+    let n = area.point_count();
     let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n * ring_count);
     for s in 0..ring_count {
-        // Angular position of this ring (the last ring of a full turn is
-        // not emitted separately — it reuses ring 0).
+        // Angular position of this slice (the last slice of a full turn
+        // is not emitted separately — it reuses slice 0).
         let theta = angle * (s as f64) / (segments as f64);
-        for &[x, y] in &ring {
-            let p = [x, y, 0.0];
-            positions.push(rotate_about_axis(p, axis_origin, axis_dir, theta));
+        for ring in area.rings() {
+            for &[x, y] in ring {
+                let p = [x, y, 0.0];
+                positions.push(rotate_about_axis(p, axis_origin, axis_dir, theta));
+            }
         }
     }
 
     let mut triangles: Vec<[u32; 3]> = Vec::new();
-    // Side walls: stitch each adjacent pair of rings into quads.
+    // Side walls: stitch each adjacent pair of slices, ring by ring.
+    // Hole-ring walls are wound opposite the outer wall so their faces
+    // look into the revolved hole channel.
     for s in 0..segments {
         let a = ((s % ring_count) * n) as u32;
         let b = (((s + 1) % ring_count) * n) as u32;
-        for i in 0..n {
-            let i_next = ((i + 1) % n) as u32;
-            let i = i as u32;
-            // Quad (a+i, a+i_next, b+i_next, b+i).
-            triangles.push([a + i, a + i_next, b + i_next]);
-            triangles.push([a + i, b + i_next, b + i]);
+        let mut offset = 0u32;
+        for (ri, ring) in area.rings().enumerate() {
+            let k = ring.len();
+            for i in 0..k {
+                let i_next = offset + ((i + 1) % k) as u32;
+                let i = offset + i as u32;
+                if ri == 0 {
+                    // Quad (a+i, a+i_next, b+i_next, b+i).
+                    triangles.push([a + i, a + i_next, b + i_next]);
+                    triangles.push([a + i, b + i_next, b + i]);
+                } else {
+                    triangles.push([a + i_next, a + i, b + i]);
+                    triangles.push([a + i_next, b + i, b + i_next]);
+                }
+            }
+            offset += k as u32;
         }
     }
-    // End caps for a partial revolution: fan-triangulate the first and
-    // last profile rings (the open ends of the swept volume).
+    // End caps for a partial revolution: the hole-aware profile
+    // triangulation applied to the first and last slices (the open ends
+    // of the swept volume).
     if !full_turn {
-        let first = 0u32;
-        for i in 1..(n - 1) {
-            triangles.push([first, first + (i + 1) as u32, first + i as u32]);
-        }
+        let cap = triangulate_profile(&area)?;
         let last = (segments * n) as u32;
-        for i in 1..(n - 1) {
-            triangles.push([last, last + i as u32, last + (i + 1) as u32]);
+        for &[a, b, c] in &cap {
+            triangles.push([a, c, b]);
+            triangles.push([last + a, last + b, last + c]);
         }
     }
 
@@ -1346,8 +1379,8 @@ fn profile_ring(step: &StepFile, profile_id: u64) -> Result<Vec<[f64; 2]>, Geome
         .ok_or(GeometryError::MissingInstance(profile_id))?;
     match inst.keyword.as_str() {
         "IFCARBITRARYCLOSEDPROFILEDEF" | "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
-            // OuterCurve : IfcCurve — attribute index 2. Inner voids (the
-            // …WithVoids subtype) are not subtracted in this slice.
+            // OuterCurve : IfcCurve — attribute index 2. (The …WithVoids
+            // inner curves are handled by [`profile_area`].)
             let curve_id = inst
                 .args
                 .get(2)
@@ -1478,6 +1511,411 @@ fn curve_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryEr
         }
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
+}
+
+/// A 2-D profile area: one outer boundary ring plus zero or more hole
+/// rings, all counter-clockwise, none with a duplicated closing vertex.
+///
+/// The mesh vertex order of a swept solid concatenates the rings
+/// (outer first, then each hole), so a ring point's index is its ring
+/// offset plus its position within the ring.
+struct ProfileArea {
+    outer: Vec<[f64; 2]>,
+    holes: Vec<Vec<[f64; 2]>>,
+}
+
+impl ProfileArea {
+    /// Total number of boundary points across all rings.
+    fn point_count(&self) -> usize {
+        self.outer.len() + self.holes.iter().map(Vec::len).sum::<usize>()
+    }
+
+    /// The rings in mesh-vertex order: outer first, then each hole.
+    fn rings(&self) -> impl Iterator<Item = &Vec<[f64; 2]>> {
+        core::iter::once(&self.outer).chain(self.holes.iter())
+    }
+}
+
+/// Resolve an `IfcProfileDef` to its full [`ProfileArea`] — the outer
+/// ring plus any inner (hole) rings.
+///
+/// Beyond the single-ring kinds of [`profile_ring`] this resolves:
+/// * `IfcArbitraryProfileDefWithVoids(…, OuterCurve, InnerCurves)` — the
+///   `InnerCurves : SET [1:?] OF IfcCurve` (attribute index 3) become
+///   hole rings (IFC4 EXPRESS `IfcArbitraryProfileDefWithVoids`).
+/// * `IfcCircleHollowProfileDef(…, Position, Radius, WallThickness)` —
+///   an annulus: outer circle of `Radius` (index 3), inner circle of
+///   `Radius − WallThickness` (index 4); the EXPRESS WR1 requires
+///   `WallThickness < Radius`.
+/// * `IfcRectangleHollowProfileDef(…, Position, XDim, YDim,
+///   WallThickness, InnerFilletRadius, OuterFilletRadius)` — a
+///   rectangular tube: the inner rectangle is `XDim − 2·WallThickness` ×
+///   `YDim − 2·WallThickness` (`WallThickness` at index 5); the optional
+///   fillet radii (indices 6/7) are not applied in this slice — corners
+///   stay square.
+///
+/// Ring orientation is normalised: every returned ring is
+/// counter-clockwise (holes are re-oriented during cap triangulation).
+fn profile_area(step: &StepFile, profile_id: u64) -> Result<ProfileArea, GeometryError> {
+    let inst = step
+        .get(profile_id)
+        .ok_or(GeometryError::MissingInstance(profile_id))?;
+    let mut area = match inst.keyword.as_str() {
+        "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
+            let outer = profile_ring(step, profile_id)?;
+            // InnerCurves : SET [1:?] OF IfcCurve (attribute index 3).
+            let inner = inst
+                .args
+                .get(3)
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadProfile)?;
+            let mut holes = Vec::with_capacity(inner.len());
+            for c in inner {
+                let cid = c.as_reference().ok_or(GeometryError::BadProfile)?;
+                let ring = close_ring(curve_points_2d(step, cid)?);
+                if ring.len() < 3 {
+                    return Err(GeometryError::BadProfile);
+                }
+                holes.push(ring);
+            }
+            ProfileArea { outer, holes }
+        }
+        "IFCCIRCLEHOLLOWPROFILEDEF" => {
+            // (ProfileType, ProfileName, Position, Radius, WallThickness).
+            let radius = inst
+                .args
+                .get(3)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let wall = inst
+                .args
+                .get(4)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            if radius <= 0.0 || wall <= 0.0 || wall >= radius {
+                return Err(GeometryError::BadProfile);
+            }
+            let pos = inst.args.get(2);
+            let outer = positioned_profile_ring(step, pos, ellipse_ring(radius, radius))?;
+            let r_in = radius - wall;
+            let hole = positioned_profile_ring(step, pos, ellipse_ring(r_in, r_in))?;
+            ProfileArea {
+                outer,
+                holes: vec![hole],
+            }
+        }
+        "IFCRECTANGLEHOLLOWPROFILEDEF" => {
+            // (ProfileType, ProfileName, Position, XDim, YDim,
+            //  WallThickness, InnerFilletRadius, OuterFilletRadius).
+            let xdim = inst
+                .args
+                .get(3)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let ydim = inst
+                .args
+                .get(4)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let wall = inst
+                .args
+                .get(5)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            // EXPRESS ValidWallThickness: WallThickness < XDim/2 ∧ < YDim/2.
+            if wall <= 0.0 || wall >= xdim / 2.0 || wall >= ydim / 2.0 {
+                return Err(GeometryError::BadProfile);
+            }
+            let rect = |hx: f64, hy: f64| vec![[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+            let pos = inst.args.get(2);
+            let outer = positioned_profile_ring(step, pos, rect(xdim / 2.0, ydim / 2.0))?;
+            let hole =
+                positioned_profile_ring(step, pos, rect(xdim / 2.0 - wall, ydim / 2.0 - wall))?;
+            ProfileArea {
+                outer,
+                holes: vec![hole],
+            }
+        }
+        // Every single-ring profile kind (and the unsupported-keyword
+        // error path) comes from profile_ring.
+        _ => ProfileArea {
+            outer: profile_ring(step, profile_id)?,
+            holes: Vec::new(),
+        },
+    };
+    if area.outer.len() < 3 {
+        return Err(GeometryError::BadProfile);
+    }
+    // Normalise every ring counter-clockwise so wall winding and cap
+    // triangulation see a consistent orientation regardless of how the
+    // file authored its curves.
+    make_ccw(&mut area.outer);
+    for h in &mut area.holes {
+        make_ccw(h);
+    }
+    Ok(area)
+}
+
+/// Twice the signed area of a 2-D ring (positive when
+/// counter-clockwise) — the shoelace sum.
+fn signed_area_2x(ring: &[[f64; 2]]) -> f64 {
+    let mut sum = 0.0;
+    for i in 0..ring.len() {
+        let a = ring[i];
+        let b = ring[(i + 1) % ring.len()];
+        sum += a[0] * b[1] - b[0] * a[1];
+    }
+    sum
+}
+
+/// Reverse a ring in place if it is clockwise.
+fn make_ccw(ring: &mut [[f64; 2]]) {
+    if signed_area_2x(ring) < 0.0 {
+        ring.reverse();
+    }
+}
+
+/// 2-D cross product of `(b − a)` × `(c − a)` — positive when `c` lies
+/// to the left of the directed line `a → b`.
+fn cross2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
+    (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])
+}
+
+/// Triangulate a [`ProfileArea`] cap — an outer polygon with holes — by
+/// bridging each hole into the outer boundary and ear-clipping the
+/// resulting simple polygon. Returned triangle indices address the
+/// concatenated ring points (outer first, then each hole, matching
+/// [`ProfileArea::rings`]) and wind counter-clockwise in the profile
+/// plane.
+///
+/// This is plain computational geometry, not IFC semantics: the EXPRESS
+/// schema defines the profile *area*; how the planar caps are decomposed
+/// into triangles is an extraction choice. Ear clipping handles concave
+/// outer boundaries (which the previous cap fan did not).
+fn triangulate_profile(area: &ProfileArea) -> Result<Vec<[u32; 3]>, GeometryError> {
+    // Working polygon: (original concatenated index, position). Outer is
+    // CCW; holes are walked clockwise when merged so the bridged polygon
+    // stays consistently oriented.
+    let mut poly: Vec<(u32, [f64; 2])> = area
+        .outer
+        .iter()
+        .enumerate()
+        .map(|(i, &p)| (i as u32, p))
+        .collect();
+
+    // All rings' edges (for bridge-visibility tests) as point pairs.
+    let mut all_edges: Vec<([f64; 2], [f64; 2])> = Vec::new();
+    for ring in area.rings() {
+        for i in 0..ring.len() {
+            all_edges.push((ring[i], ring[(i + 1) % ring.len()]));
+        }
+    }
+
+    let mut offset = area.outer.len() as u32;
+    for hole in &area.holes {
+        // Hole vertices clockwise (the ring is stored CCW), tagged with
+        // their concatenated-index positions.
+        let hverts: Vec<(u32, [f64; 2])> = hole
+            .iter()
+            .enumerate()
+            .rev()
+            .map(|(i, &p)| (offset + i as u32, p))
+            .collect();
+        merge_hole(&mut poly, &hverts, &all_edges)?;
+        offset += hole.len() as u32;
+    }
+
+    ear_clip(poly)
+}
+
+/// Splice one hole (given clockwise) into the outer polygon through a
+/// mutually visible vertex pair, duplicating the two bridge vertices.
+///
+/// Visibility is brute force: candidate (outer, hole) vertex pairs are
+/// tried nearest-first, accepting the first bridge segment that crosses
+/// no ring edge. Ring sizes are small (profile boundaries), so the
+/// quadratic scan is cheap and avoids the corner cases of ray-casting
+/// approaches.
+fn merge_hole(
+    poly: &mut Vec<(u32, [f64; 2])>,
+    hole: &[(u32, [f64; 2])],
+    all_edges: &[([f64; 2], [f64; 2])],
+) -> Result<(), GeometryError> {
+    let mut pairs: Vec<(f64, usize, usize)> = Vec::with_capacity(poly.len() * hole.len());
+    for (pi, &(_, pp)) in poly.iter().enumerate() {
+        for (hi, &(_, hp)) in hole.iter().enumerate() {
+            let d2 = (pp[0] - hp[0]).powi(2) + (pp[1] - hp[1]).powi(2);
+            pairs.push((d2, pi, hi));
+        }
+    }
+    pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+
+    for &(_, pi, hi) in &pairs {
+        let a = poly[pi].1;
+        let b = hole[hi].1;
+        if bridge_is_clear(a, b, all_edges) {
+            // poly[..=pi] ++ hole[hi..] ++ hole[..=hi] ++ poly[pi..]:
+            // walk the whole hole cycle starting (and ending, duplicated)
+            // at hi, then return to the duplicated outer vertex pi.
+            let mut spliced: Vec<(u32, [f64; 2])> = Vec::with_capacity(poly.len() + hole.len() + 2);
+            spliced.extend_from_slice(&poly[..=pi]);
+            spliced.extend_from_slice(&hole[hi..]);
+            spliced.extend_from_slice(&hole[..=hi]);
+            spliced.extend_from_slice(&poly[pi..]);
+            *poly = spliced;
+            return Ok(());
+        }
+    }
+    Err(GeometryError::BadProfile)
+}
+
+/// `true` when the open segment `a–b` crosses none of `edges` (touching
+/// an edge exactly at `a` or `b` is allowed — the bridge ends on ring
+/// vertices).
+fn bridge_is_clear(a: [f64; 2], b: [f64; 2], edges: &[([f64; 2], [f64; 2])]) -> bool {
+    for &(p, q) in edges {
+        if segments_cross(a, b, p, q) {
+            return false;
+        }
+    }
+    true
+}
+
+/// Segment intersection test for the bridge scan: `true` when segment
+/// `a–b` and segment `p–q` intersect anywhere other than at a shared
+/// endpoint of `a`/`b`.
+fn segments_cross(a: [f64; 2], b: [f64; 2], p: [f64; 2], q: [f64; 2]) -> bool {
+    let eps = 1e-12
+        * [a, b, p, q]
+            .iter()
+            .map(|v| v[0].abs().max(v[1].abs()))
+            .fold(1.0f64, f64::max)
+            .powi(2);
+    let same =
+        |u: [f64; 2], v: [f64; 2]| (u[0] - v[0]).abs() < 1e-12 && (u[1] - v[1]).abs() < 1e-12;
+    // Edges sharing a bridge endpoint never disqualify the bridge.
+    if same(a, p) || same(a, q) || same(b, p) || same(b, q) {
+        return false;
+    }
+    let d1 = cross2(a, b, p);
+    let d2 = cross2(a, b, q);
+    let d3 = cross2(p, q, a);
+    let d4 = cross2(p, q, b);
+    if ((d1 > eps && d2 < -eps) || (d1 < -eps && d2 > eps))
+        && ((d3 > eps && d4 < -eps) || (d3 < -eps && d4 > eps))
+    {
+        return true;
+    }
+    // Collinear touch: an endpoint of one segment lying on the other.
+    let on_segment = |u: [f64; 2], v: [f64; 2], w: [f64; 2], d: f64| {
+        d.abs() <= eps
+            && w[0] >= u[0].min(v[0]) - 1e-12
+            && w[0] <= u[0].max(v[0]) + 1e-12
+            && w[1] >= u[1].min(v[1]) - 1e-12
+            && w[1] <= u[1].max(v[1]) + 1e-12
+    };
+    on_segment(a, b, p, d1)
+        || on_segment(a, b, q, d2)
+        || on_segment(p, q, a, d3)
+        || on_segment(p, q, b, d4)
+}
+
+/// Ear-clip a (weakly) simple counter-clockwise polygon into triangles
+/// over the vertices' original indices. Bridge splices duplicate
+/// vertices, so containment tests skip points coincident with the ear's
+/// corners. A degenerate pass (no strict ear found) drops the flattest
+/// vertex to guarantee termination on collinear spurs.
+fn ear_clip(mut poly: Vec<(u32, [f64; 2])>) -> Result<Vec<[u32; 3]>, GeometryError> {
+    if poly.len() < 3 {
+        return Err(GeometryError::BadProfile);
+    }
+    // Scale-relative epsilon for area / orientation comparisons.
+    let scale = poly
+        .iter()
+        .map(|(_, p)| p[0].abs().max(p[1].abs()))
+        .fold(1.0f64, f64::max);
+    let eps = 1e-12 * scale * scale;
+
+    let mut tris: Vec<[u32; 3]> = Vec::with_capacity(poly.len().saturating_sub(2));
+    while poly.len() > 3 {
+        let n = poly.len();
+        let mut clipped = false;
+        for i in 0..n {
+            let prev = poly[(i + n - 1) % n];
+            let cur = poly[i];
+            let next = poly[(i + 1) % n];
+            let cr = cross2(prev.1, cur.1, next.1);
+            if cr <= eps {
+                continue; // reflex or flat corner: not an ear
+            }
+            if any_point_inside(&poly, prev.1, cur.1, next.1, eps) {
+                continue;
+            }
+            tris.push([prev.0, cur.0, next.0]);
+            poly.remove(i);
+            clipped = true;
+            break;
+        }
+        if !clipped {
+            // No strict ear (collinear spur / duplicated bridge run):
+            // drop the flattest corner to make progress; emit it only if
+            // it has real area.
+            let n = poly.len();
+            let (mut flat_i, mut flat_cr) = (0usize, f64::INFINITY);
+            for i in 0..n {
+                let cr = cross2(poly[(i + n - 1) % n].1, poly[i].1, poly[(i + 1) % n].1).abs();
+                if cr < flat_cr {
+                    flat_cr = cr;
+                    flat_i = i;
+                }
+            }
+            if flat_cr > eps {
+                // Nothing flat and no ear: the polygon is malformed
+                // (self-intersecting profile) — stop rather than loop.
+                return Err(GeometryError::BadProfile);
+            }
+            poly.remove(flat_i);
+            if poly.len() < 3 {
+                break;
+            }
+        }
+    }
+    if poly.len() == 3 {
+        let cr = cross2(poly[0].1, poly[1].1, poly[2].1);
+        if cr.abs() > eps {
+            tris.push([poly[0].0, poly[1].0, poly[2].0]);
+        }
+    }
+    if tris.is_empty() {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok(tris)
+}
+
+/// `true` when any polygon vertex other than the ear's own corners lies
+/// inside (or on the boundary of) triangle `a b c`.
+fn any_point_inside(
+    poly: &[(u32, [f64; 2])],
+    a: [f64; 2],
+    b: [f64; 2],
+    c: [f64; 2],
+    eps: f64,
+) -> bool {
+    let same =
+        |u: [f64; 2], v: [f64; 2]| (u[0] - v[0]).abs() < 1e-12 && (u[1] - v[1]).abs() < 1e-12;
+    for &(_, p) in poly {
+        // Skip the corners themselves and their bridge duplicates.
+        if same(p, a) || same(p, b) || same(p, c) {
+            continue;
+        }
+        let d1 = cross2(a, b, p);
+        let d2 = cross2(b, c, p);
+        let d3 = cross2(c, a, p);
+        if d1 >= -eps && d2 >= -eps && d3 >= -eps {
+            return true;
+        }
+    }
+    false
 }
 
 /// Drop a duplicated closing vertex from a profile ring (an `IfcPolyline`
@@ -2400,6 +2838,147 @@ mod tests {
             let (dx, dy) = (p[0] - 5.0, p[1]);
             assert!(((dx * dx + dy * dy).sqrt() - 1.0).abs() < 1e-9);
         }
+    }
+
+    /// Sum of the (absolute) areas of every triangle whose three
+    /// vertices all sit in the z = 0 plane — i.e. the bottom cap of a
+    /// +Z extrusion.
+    fn cap_area_z0(m: &TriMesh) -> f64 {
+        m.triangles
+            .iter()
+            .filter(|t| t.iter().all(|&v| m.positions[v as usize][2].abs() < 1e-9))
+            .map(|t| {
+                let a = m.positions[t[0] as usize];
+                let b = m.positions[t[1] as usize];
+                let c = m.positions[t[2] as usize];
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            })
+            .sum()
+    }
+
+    #[test]
+    fn extruded_concave_profile_caps_cover_exact_area() {
+        // An L-shaped (concave) profile: a 2×2 square missing its 1×1
+        // top-right corner (area 3). A naive cap fan from vertex 0 would
+        // spill outside the notch; the ear-clipped cap must cover
+        // exactly 3 area units.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCCARTESIANPOINT((2.,0.));\n\
+             #3=IFCCARTESIANPOINT((2.,1.));\n\
+             #4=IFCCARTESIANPOINT((1.,1.));\n\
+             #5=IFCCARTESIANPOINT((1.,2.));\n\
+             #6=IFCCARTESIANPOINT((0.,2.));\n\
+             #7=IFCPOLYLINE((#1,#2,#3,#4,#5,#6,#1));\n\
+             #8=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#7);\n\
+             #9=IFCDIRECTION((0.,0.,1.));\n\
+             #10=IFCEXTRUDEDAREASOLID(#8,$,#9,1.);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_eq!(m.vertex_count(), 12);
+        // 4 cap triangles per cap + 6 side quads = 4 + 4 + 12 = 20.
+        assert_eq!(m.triangle_count(), 20);
+        assert!((cap_area_z0(&m) - 3.0).abs() < 1e-9, "{}", cap_area_z0(&m));
+    }
+
+    #[test]
+    fn extruded_rectangle_hollow_profile_is_a_tube() {
+        // A 4×4 rectangle with wall thickness 1: outer ring 4 points,
+        // inner hole ring 4 points (2×2), cap area 16 − 4 = 12.
+        let f = parse(
+            "#1=IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,$,4.,4.,1.,$,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        // 8 profile points × 2 (bottom + top).
+        assert_eq!(m.vertex_count(), 16);
+        // The hole ring occupies indices 4..8: 2×2 centred rectangle.
+        for p in &m.positions[4..8] {
+            assert!((p[0].abs() - 1.0).abs() < 1e-9);
+            assert!((p[1].abs() - 1.0).abs() < 1e-9);
+        }
+        assert!((cap_area_z0(&m) - 12.0).abs() < 1e-9);
+        // Every cap triangle avoids the hole: its centroid is outside
+        // the open inner square.
+        for t in &m.triangles {
+            let ps: Vec<[f64; 3]> = t.iter().map(|&v| m.positions[v as usize]).collect();
+            if ps.iter().any(|p| p[2].abs() > 1e-9) {
+                continue; // side wall / top cap
+            }
+            let cx = (ps[0][0] + ps[1][0] + ps[2][0]) / 3.0;
+            let cy = (ps[0][1] + ps[1][1] + ps[2][1]) / 3.0;
+            assert!(
+                cx.abs() > 1.0 - 1e-9 || cy.abs() > 1.0 - 1e-9,
+                "cap triangle centroid ({cx},{cy}) inside the hole"
+            );
+        }
+    }
+
+    #[test]
+    fn extruded_circle_hollow_profile_is_an_annulus() {
+        // Radius 5, wall 2 → outer ring r=5, hole ring r=3; the cap area
+        // is the 48-gon annulus area.
+        let f = parse(
+            "#1=IFCCIRCLEHOLLOWPROFILEDEF(.AREA.,$,$,5.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_eq!(m.vertex_count(), 48 * 2 * 2);
+        // Bottom vertices sit on one of the two circles.
+        for p in &m.positions[..96] {
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!((r - 5.0).abs() < 1e-9 || (r - 3.0).abs() < 1e-9);
+        }
+        // Regular 48-gon area = ½·n·r²·sin(2π/n); annulus = outer − inner.
+        let n = 48.0f64;
+        let gon = |r: f64| 0.5 * n * r * r * (2.0 * core::f64::consts::PI / n).sin();
+        assert!((cap_area_z0(&m) - (gon(5.0) - gon(3.0))).abs() < 1e-6);
+    }
+
+    #[test]
+    fn extruded_arbitrary_profile_with_voids() {
+        // A 4×4 polyline square with a 1×1 polyline void at its centre:
+        // cap area 16 − 1 = 15.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCCARTESIANPOINT((4.,0.));\n\
+             #3=IFCCARTESIANPOINT((4.,4.));\n\
+             #4=IFCCARTESIANPOINT((0.,4.));\n\
+             #5=IFCPOLYLINE((#1,#2,#3,#4,#1));\n\
+             #6=IFCCARTESIANPOINT((1.5,1.5));\n\
+             #7=IFCCARTESIANPOINT((2.5,1.5));\n\
+             #8=IFCCARTESIANPOINT((2.5,2.5));\n\
+             #9=IFCCARTESIANPOINT((1.5,2.5));\n\
+             #10=IFCPOLYLINE((#6,#7,#8,#9,#6));\n\
+             #11=IFCARBITRARYPROFILEDEFWITHVOIDS(.AREA.,$,#5,(#10));\n\
+             #12=IFCDIRECTION((0.,0.,1.));\n\
+             #13=IFCEXTRUDEDAREASOLID(#11,$,#12,1.);",
+        );
+        let m = tessellate_item(&f, 13).unwrap();
+        assert_eq!(m.vertex_count(), 16);
+        assert!((cap_area_z0(&m) - 15.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn revolved_hollow_profile_quarter_turn_counts() {
+        // A 2×2/wall-0.5 hollow rectangle centred at x = 5, revolved 90°
+        // about the Y axis: 12 segments → 13 slices of 8 points, walls
+        // for both rings, hole-aware end caps.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((5.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,#2,2.,2.,0.5,$,$);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #5=IFCDIRECTION((0.,1.,0.));\n\
+             #6=IFCAXIS1PLACEMENT(#4,#5);\n\
+             #7=IFCREVOLVEDAREASOLID(#3,$,#6,1.5707963267948966);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_eq!(m.vertex_count(), 13 * 8);
+        // Walls: 12 segments × 8 edges × 2 tris; caps: 8 tris × 2 ends.
+        assert_eq!(m.triangle_count(), 12 * 8 * 2 + 16);
     }
 
     #[test]

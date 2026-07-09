@@ -504,6 +504,41 @@ pub const SCHEMA: &[EntitySchema] = &[
         // IfcConic(Position) + IfcCircle(Radius).
         attrs: chain!(&["Position", "Radius"]),
     },
+    EntitySchema {
+        keyword: "IFCARBITRARYPROFILEDEFWITHVOIDS",
+        kind: EntityKind::Geometry,
+        // IfcArbitraryClosedProfileDef(3) +
+        // IfcArbitraryProfileDefWithVoids(InnerCurves).
+        attrs: chain!(&["ProfileType", "ProfileName", "OuterCurve", "InnerCurves"]),
+    },
+    EntitySchema {
+        keyword: "IFCCIRCLEHOLLOWPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcCircleProfileDef(4) + IfcCircleHollowProfileDef(WallThickness).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "Radius",
+            "WallThickness"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCRECTANGLEHOLLOWPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcRectangleProfileDef(5) + IfcRectangleHollowProfileDef(
+        // WallThickness, InnerFilletRadius, OuterFilletRadius).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "XDim",
+            "YDim",
+            "WallThickness",
+            "InnerFilletRadius",
+            "OuterFilletRadius"
+        ]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -933,6 +968,9 @@ mod tests {
             ("IFCCIRCLEPROFILEDEF", 4),  // Type,Name,Position,Radius
             ("IFCELLIPSEPROFILEDEF", 5), // Type,Name,Position,SemiAxis1/2
             ("IFCCIRCLE", 2),            // Position + Radius
+            ("IFCARBITRARYPROFILEDEFWITHVOIDS", 4), // + InnerCurves
+            ("IFCCIRCLEHOLLOWPROFILEDEF", 5), // + WallThickness
+            ("IFCRECTANGLEHOLLOWPROFILEDEF", 8), // + Wall,fillet radii
         ];
         for (kw, want) in lens {
             assert_eq!(

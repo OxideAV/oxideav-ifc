@@ -6,6 +6,30 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (profile holes + hole-aware caps): swept-solid profiles now
+  resolve to a full `ProfileArea` (outer ring + hole rings), and the
+  extrusion / revolution caps are triangulated by hole bridging + ear
+  clipping instead of a convex fan.
+  - New profile kinds: `IfcArbitraryProfileDefWithVoids` (`InnerCurves`
+    become hole rings), `IfcCircleHollowProfileDef` (annulus of `Radius`
+    / `Radius − WallThickness`), and `IfcRectangleHollowProfileDef`
+    (rectangular tube, `WallThickness` inset; the optional fillet radii
+    are not yet applied). Attribute orders transcribed from
+    `IFC4_ADD2.exp`; EXPRESS wall-thickness WHERE bounds enforced.
+  - Hole side walls are emitted with inward winding for both extrusion
+    and revolution; ring orientation is normalised counter-clockwise
+    regardless of how the file authored its curves.
+  - Bug fix: concave arbitrary profiles previously fan-triangulated
+    their caps from vertex 0, spilling triangles outside the profile
+    boundary; the ear-clipped caps now cover exactly the profile area
+    (regression-tested with an L-profile whose cap area is asserted).
+  - 5 new geometry unit tests with vertex-level / area-sum assertions
+    (L-profile exact cap area, rectangular tube cap area 12 +
+    hole-avoidance centroids, 48-gon annulus area, voided arbitrary
+    profile area 15, hollow quarter-revolution counts). Also typed in
+    the Phase-2 schema layer (`IfcArbitraryProfileDefWithVoids`,
+    `IfcCircleHollowProfileDef`, `IfcRectangleHollowProfileDef`).
+
 - Phase 3 (parameterised-profile widening): `profile_ring` now resolves
   `IfcCircleProfileDef` (`Radius`), `IfcEllipseProfileDef` (`SemiAxis1`
   along X, `SemiAxis2` along Y), and `IfcArbitraryClosedProfileDef`
