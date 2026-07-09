@@ -596,6 +596,30 @@ pub const SCHEMA: &[EntitySchema] = &[
         // IfcElementarySurface(Position); IfcPlane adds nothing.
         attrs: chain!(&["Position"]),
     },
+    // ---- Units ----
+    EntitySchema {
+        keyword: "IFCUNITASSIGNMENT",
+        kind: EntityKind::Other,
+        attrs: chain!(&["Units"]),
+    },
+    EntitySchema {
+        keyword: "IFCSIUNIT",
+        kind: EntityKind::Other,
+        // IfcNamedUnit(Dimensions, UnitType) + IfcSIUnit(Prefix, Name);
+        // Dimensions is re-derived on IfcSIUnit so the wire carries `*`.
+        attrs: chain!(&["Dimensions", "UnitType", "Prefix", "Name"]),
+    },
+    EntitySchema {
+        keyword: "IFCCONVERSIONBASEDUNIT",
+        kind: EntityKind::Other,
+        // IfcNamedUnit(2) + IfcConversionBasedUnit(Name, ConversionFactor).
+        attrs: chain!(&["Dimensions", "UnitType", "Name", "ConversionFactor"]),
+    },
+    EntitySchema {
+        keyword: "IFCMEASUREWITHUNIT",
+        kind: EntityKind::Other,
+        attrs: chain!(&["ValueComponent", "UnitComponent"]),
+    },
 ];
 
 /// Look up the [`EntitySchema`] for an entity keyword
@@ -604,6 +628,114 @@ pub const SCHEMA: &[EntitySchema] = &[
 pub fn schema_of(keyword: &str) -> Option<&'static EntitySchema> {
     let want = keyword.to_ascii_uppercase();
     SCHEMA.iter().find(|s| s.keyword == want)
+}
+
+/// Metres per model length unit, resolved from the project's global
+/// unit assignment.
+///
+/// The walk is `IfcProject.UnitsInContext` →
+/// `IfcUnitAssignment.Units : SET [1:?] OF IfcUnit` → the unit whose
+/// `UnitType` is `.LENGTHUNIT.` (the §8.11.3.11 WHERE rule guarantees
+/// at most one per assignment):
+///
+/// * `IfcSIUnit(Dimensions*, UnitType, Prefix, Name)` with Name
+///   `.METRE.` — the scale is the SI prefix multiplier (`.MILLI.` →
+///   10⁻³, absent prefix → 1.0).
+/// * `IfcConversionBasedUnit(Dimensions, UnitType, Name,
+///   ConversionFactor)` — the factor's
+///   `IfcMeasureWithUnit(ValueComponent, UnitComponent)` value times
+///   the (recursively resolved) SI unit it is expressed in.
+///
+/// Returns `None` when the model has no resolvable length unit (the
+/// caller keeps raw model units — the decoder does not rescale).
+pub fn length_unit_scale(step: &StepFile) -> Option<f64> {
+    // IfcProject: IfcRoot(4) + IfcContext(ObjectType, LongName, Phase,
+    // RepresentationContexts, UnitsInContext) → UnitsInContext index 8.
+    let project = step
+        .instances
+        .values()
+        .find(|i| i.keyword == "IFCPROJECT")?;
+    let assignment_id = project.args.get(8).and_then(Value::as_reference)?;
+    let assignment = step.get(assignment_id)?;
+    if assignment.keyword != "IFCUNITASSIGNMENT" {
+        return None;
+    }
+    let units = assignment.args.first().and_then(Value::as_list)?;
+    for unit in units {
+        let Some(uid) = unit.as_reference() else {
+            continue;
+        };
+        if let Some(scale) = length_unit_metres(step, uid) {
+            return Some(scale);
+        }
+    }
+    None
+}
+
+/// Resolve one named unit to metres if it is a length unit.
+fn length_unit_metres(step: &StepFile, unit_id: u64) -> Option<f64> {
+    let unit = step.get(unit_id)?;
+    match unit.keyword.as_str() {
+        // IfcSIUnit(Dimensions [derived, `*` on the wire], UnitType,
+        // Prefix, Name).
+        "IFCSIUNIT" => {
+            if unit.args.get(1).and_then(Value::as_enum) != Some("LENGTHUNIT")
+                || unit.args.get(3).and_then(Value::as_enum) != Some("METRE")
+            {
+                return None;
+            }
+            Some(match unit.args.get(2).and_then(Value::as_enum) {
+                Some(prefix) => si_prefix_multiplier(prefix)?,
+                None => 1.0,
+            })
+        }
+        // IfcConversionBasedUnit(Dimensions, UnitType, Name,
+        // ConversionFactor : IfcMeasureWithUnit).
+        "IFCCONVERSIONBASEDUNIT" | "IFCCONVERSIONBASEDUNITWITHOFFSET" => {
+            if unit.args.get(1).and_then(Value::as_enum) != Some("LENGTHUNIT") {
+                return None;
+            }
+            let mwu_id = unit.args.get(3).and_then(Value::as_reference)?;
+            let mwu = step.get(mwu_id)?;
+            if mwu.keyword != "IFCMEASUREWITHUNIT" {
+                return None;
+            }
+            // ValueComponent : IfcValue — a plain real or a typed
+            // measure wrapper (e.g. IFCRATIOMEASURE(0.3048)).
+            let value = match mwu.args.first()? {
+                v @ (Value::Real(_) | Value::Integer(_)) => v.as_number()?,
+                Value::Typed { args, .. } => args.first().and_then(Value::as_number)?,
+                _ => return None,
+            };
+            let base_id = mwu.args.get(1).and_then(Value::as_reference)?;
+            Some(value * length_unit_metres(step, base_id)?)
+        }
+        _ => None,
+    }
+}
+
+/// SI prefix multiplier (ISO 80000 decimal prefixes, as enumerated by
+/// the EXPRESS `IfcSIPrefix` type).
+fn si_prefix_multiplier(prefix: &str) -> Option<f64> {
+    Some(match prefix {
+        "EXA" => 1e18,
+        "PETA" => 1e15,
+        "TERA" => 1e12,
+        "GIGA" => 1e9,
+        "MEGA" => 1e6,
+        "KILO" => 1e3,
+        "HECTO" => 1e2,
+        "DECA" => 1e1,
+        "DECI" => 1e-1,
+        "CENTI" => 1e-2,
+        "MILLI" => 1e-3,
+        "MICRO" => 1e-6,
+        "NANO" => 1e-9,
+        "PICO" => 1e-12,
+        "FEMTO" => 1e-15,
+        "ATTO" => 1e-18,
+        _ => return None,
+    })
 }
 
 /// A schema-typed view of one parsed instance: positional [`Value`]s

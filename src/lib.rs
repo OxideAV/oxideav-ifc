@@ -103,7 +103,9 @@ pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use parser::{
     parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
 };
-pub use schema::{schema_of, EntityKind, EntitySchema, Model, SpatialKind, TypedEntity, SCHEMA};
+pub use schema::{
+    length_unit_scale, schema_of, EntityKind, EntitySchema, Model, SpatialKind, TypedEntity, SCHEMA,
+};
 pub use value::Value;
 
 #[cfg(feature = "registry")]

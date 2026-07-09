@@ -215,3 +215,62 @@ fn wall_axis_polyline_is_typed() {
         );
     }
 }
+
+#[test]
+fn wall_fixture_length_unit_is_millimetres() {
+    // The wall fixture's project assigns IFCSIUNIT(*, .LENGTHUNIT.,
+    // .MILLI., .METRE.) — 10⁻³ metres per model unit.
+    let f = parse_step(WALL).expect("parse");
+    assert_eq!(oxideav_ifc::length_unit_scale(&f), Some(1e-3));
+}
+
+#[test]
+fn column_fixture_length_unit_is_inches() {
+    // The column fixture assigns IFCCONVERSIONBASEDUNIT('inch') whose
+    // ConversionFactor is IFCMEASUREWITHUNIT(IFCLENGTHMEASURE(0.0254),
+    // <SI metre>) — the real-fixture conversion-based path.
+    let f = parse_step(COLUMN).expect("parse");
+    let s = oxideav_ifc::length_unit_scale(&f).expect("scale");
+    assert!((s - 0.0254).abs() < 1e-12);
+}
+
+#[test]
+fn conversion_based_length_unit_resolves_through_si_base() {
+    // A conversion-based unit (0.3048 of a metre) expressed through
+    // IfcMeasureWithUnit over an SI metre.
+    let text = b"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('u.ifc','2026-07-09T00:00:00',('a'),('o'),'p','s','auth');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);
+#2=IFCMEASUREWITHUNIT(IFCRATIOMEASURE(0.3048),#1);
+#3=IFCCONVERSIONBASEDUNIT(*,.LENGTHUNIT.,'FOOT',#2);
+#4=IFCUNITASSIGNMENT((#3));
+#5=IFCPROJECT('x',$,$,$,$,$,$,$,#4);
+ENDSEC;
+END-ISO-10303-21;
+";
+    let f = parse_step(text).expect("parse");
+    let s = oxideav_ifc::length_unit_scale(&f).expect("scale");
+    assert!((s - 0.3048).abs() < 1e-12);
+}
+
+#[test]
+fn model_without_units_has_no_length_scale() {
+    let text = b"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('u.ifc','2026-07-09T00:00:00',('a'),('o'),'p','s','auth');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#5=IFCPROJECT('x',$,$,$,$,$,$,$,$);
+ENDSEC;
+END-ISO-10303-21;
+";
+    let f = parse_step(text).expect("parse");
+    assert_eq!(oxideav_ifc::length_unit_scale(&f), None);
+}

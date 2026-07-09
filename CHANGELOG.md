@@ -6,6 +6,20 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 2 (unit resolution): new public `length_unit_scale(&StepFile)`
+  — metres per model length unit, walked from
+  `IfcProject.UnitsInContext` → `IfcUnitAssignment.Units` (§8.11.3.11:
+  at most one unit per unit type) → the `.LENGTHUNIT.` unit. Supports
+  `IfcSIUnit` (`.METRE.` with the full ISO 80000 decimal-prefix
+  multiplier table) and `IfcConversionBasedUnit`(`WithOffset`) through
+  its `IfcMeasureWithUnit` factor over a recursively resolved SI base.
+  Returns `None` when unresolvable; the decoder keeps raw model units
+  (no silent rescale). Typed entries for `IfcUnitAssignment`,
+  `IfcSIUnit`, `IfcConversionBasedUnit`, `IfcMeasureWithUnit`. 4 new
+  tests: wall fixture millimetres (10⁻³), column fixture inches
+  (0.0254 via the real conversion-based chain), synthetic
+  foot-through-metre resolution, unitless model → `None`.
+
 - Phase 3 (polygonal-face voids + product-named nodes):
   - `IfcIndexedPolygonalFaceWithVoids.InnerCoordIndices` (§8.8.3.39:
     each inner list is one hole loop of the planar face) is now
