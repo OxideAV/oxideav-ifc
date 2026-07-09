@@ -875,7 +875,7 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .first()
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadProfile)?;
-    let area = profile_area(step, profile_id)?;
+    let areas = profile_areas(step, profile_id)?;
 
     // ExtrudedDirection (index 2) and Depth (index 3), both in the
     // Position coordinate system.
@@ -888,6 +888,24 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     let d = normalise(dir).unwrap_or(dir);
     let sweep = [d[0] * depth, d[1] * depth, d[2] * depth];
 
+    // One closed prism per profile area (a composite profile is the
+    // union of its component areas), merged into a single mesh.
+    let mut mesh = TriMesh::default();
+    for area in &areas {
+        append_mesh(&mut mesh, extrude_area(area, sweep)?);
+    }
+
+    // Position: OPTIONAL IfcAxis2Placement3D (index 1). When present it
+    // re-places the whole swept solid; absent → local identity.
+    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
+        let xform = axis2_placement_3d(step, pos_id)?;
+        mesh.transform(&xform);
+    }
+    Ok(mesh)
+}
+
+/// Build the closed prism of one [`ProfileArea`] swept by `sweep`.
+fn extrude_area(area: &ProfileArea, sweep: [f64; 3]) -> Result<TriMesh, GeometryError> {
     let total = area.point_count();
     let mut positions: Vec<[f64; 3]> = Vec::with_capacity(total * 2);
     // Bottom rings (profile plane, local z = 0): outer, then each hole.
@@ -905,7 +923,7 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
 
     // Caps: the hole-aware profile triangulation (indices address the
     // concatenated rings in the same order as `positions`).
-    let cap = triangulate_profile(&area)?;
+    let cap = triangulate_profile(area)?;
     let top = total as u32;
     let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(cap.len() * 2 + total * 2);
     // Bottom cap wound to face away from the sweep (reversed), top cap
@@ -937,18 +955,10 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         offset += k as u32;
     }
 
-    let mut mesh = TriMesh {
+    Ok(TriMesh {
         positions,
         triangles,
-    };
-
-    // Position: OPTIONAL IfcAxis2Placement3D (index 1). When present it
-    // re-places the whole swept solid; absent → local identity.
-    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
-        let xform = axis2_placement_3d(step, pos_id)?;
-        mesh.transform(&xform);
-    }
-    Ok(mesh)
+    })
 }
 
 // ---------------------------------------------------------------------
@@ -982,7 +992,7 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .first()
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadProfile)?;
-    let area = profile_area(step, profile_id)?;
+    let areas = profile_areas(step, profile_id)?;
 
     // Axis : IfcAxis1Placement (index 2) — its Location and direction.
     let axis_id = args
@@ -1000,6 +1010,30 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         return Err(GeometryError::BadProfile);
     }
 
+    // One surface of revolution per profile area (a composite profile is
+    // the union of its component areas), merged into a single mesh.
+    let mut mesh = TriMesh::default();
+    for area in &areas {
+        append_mesh(&mut mesh, revolve_area(area, axis_origin, axis_dir, angle)?);
+    }
+
+    // Position: OPTIONAL IfcAxis2Placement3D (index 1) re-places the solid.
+    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
+        let xform = axis2_placement_3d(step, pos_id)?;
+        mesh.transform(&xform);
+    }
+    Ok(mesh)
+}
+
+/// Build the tessellated surface of revolution of one [`ProfileArea`]
+/// about the axis line through `axis_origin` with direction `axis_dir`,
+/// swept by `angle` radians.
+fn revolve_area(
+    area: &ProfileArea,
+    axis_origin: [f64; 3],
+    axis_dir: [f64; 3],
+    angle: f64,
+) -> Result<TriMesh, GeometryError> {
     // Segment count proportional to the swept angle (≥1).
     let frac = (angle.abs() / (2.0 * core::f64::consts::PI)).min(1.0);
     let segments = ((REVOLVE_SEGMENTS_PER_TURN as f64 * frac).ceil() as usize).max(1);
@@ -1054,7 +1088,7 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     // triangulation applied to the first and last slices (the open ends
     // of the swept volume).
     if !full_turn {
-        let cap = triangulate_profile(&area)?;
+        let cap = triangulate_profile(area)?;
         let last = (segments * n) as u32;
         for &[a, b, c] in &cap {
             triangles.push([a, c, b]);
@@ -1062,17 +1096,10 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         }
     }
 
-    let mut mesh = TriMesh {
+    Ok(TriMesh {
         positions,
         triangles,
-    };
-
-    // Position: OPTIONAL IfcAxis2Placement3D (index 1) re-places the solid.
-    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
-        let xform = axis2_placement_3d(step, pos_id)?;
-        mesh.transform(&xform);
-    }
-    Ok(mesh)
+    })
 }
 
 /// Resolve an `IfcAxis1Placement(Location, Axis)` to its `(origin,
@@ -1509,8 +1536,86 @@ fn curve_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryEr
             }
             positioned_profile_ring(step, inst.args.first(), ellipse_ring(radius, radius))
         }
+        "IFCINDEXEDPOLYCURVE" => {
+            // IfcIndexedPolyCurve(Points : IfcCartesianPointList,
+            // Segments : OPTIONAL LIST OF IfcSegmentIndexSelect,
+            // SelfIntersect). With `$` Segments the curve is the point
+            // list in order (IFC4 EXPRESS `IfcIndexedPolyCurve`); with
+            // Segments each `IfcLineIndex` contributes its indexed
+            // points in sequence (the EXPRESS `Consecutive` WHERE rule
+            // makes adjacent segments share their junction point, which
+            // is emitted once). `IfcArcIndex` segments are curved and
+            // remain `Unsupported` in this slice.
+            let points_id = inst
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadProfile)?;
+            let pts = cartesian_point_list_2d(step, points_id)?;
+            match inst.args.get(1) {
+                None | Some(Value::Unset) => Ok(pts),
+                Some(Value::List(segments)) => {
+                    let mut out: Vec<[f64; 2]> = Vec::new();
+                    let mut last_idx: Option<usize> = None;
+                    for seg in segments {
+                        let (kw, sargs) = seg.as_typed().ok_or(GeometryError::BadProfile)?;
+                        if kw != "IFCLINEINDEX" {
+                            // IFCARCINDEX (three-point arc) or another
+                            // SELECT member: not evaluated here.
+                            return Err(GeometryError::Unsupported(kw.to_string()));
+                        }
+                        let idxs = sargs
+                            .first()
+                            .and_then(Value::as_list)
+                            .ok_or(GeometryError::BadProfile)?;
+                        for v in idxs {
+                            let raw = v.as_integer().ok_or(GeometryError::IndexOutOfRange)?;
+                            if raw < 1 || raw as usize > pts.len() {
+                                return Err(GeometryError::IndexOutOfRange);
+                            }
+                            let idx = raw as usize;
+                            // Consecutive segments share their junction
+                            // point — skip the repeat.
+                            if last_idx == Some(idx) {
+                                continue;
+                            }
+                            out.push(pts[idx - 1]);
+                            last_idx = Some(idx);
+                        }
+                    }
+                    Ok(out)
+                }
+                Some(_) => Err(GeometryError::BadProfile),
+            }
+        }
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
+}
+
+/// Resolve an `IfcCartesianPointList2D` (`CoordList : LIST OF LIST
+/// [2:2] OF IfcLengthMeasure`) — or, leniently, a 3-D point list whose
+/// Z is dropped — to 2-D points.
+fn cartesian_point_list_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCCARTESIANPOINTLIST2D" && inst.keyword != "IFCCARTESIANPOINTLIST3D" {
+        return Err(GeometryError::BadProfile);
+    }
+    let rows = inst
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let comps = row.as_list().ok_or(GeometryError::BadCoordinate)?;
+        if comps.len() < 2 || comps.len() > 3 {
+            return Err(GeometryError::BadCoordinate);
+        }
+        let x = comps[0].as_number().ok_or(GeometryError::BadCoordinate)?;
+        let y = comps[1].as_number().ok_or(GeometryError::BadCoordinate)?;
+        out.push([x, y]);
+    }
+    Ok(out)
 }
 
 /// A 2-D profile area: one outer boundary ring plus zero or more hole
@@ -1654,6 +1759,40 @@ fn profile_area(step: &StepFile, profile_id: u64) -> Result<ProfileArea, Geometr
         make_ccw(h);
     }
     Ok(area)
+}
+
+/// Resolve an `IfcProfileDef` to one or more [`ProfileArea`]s.
+///
+/// `IfcCompositeProfileDef(ProfileType, ProfileName, Profiles, Label)`
+/// is the union of its component profiles (`Profiles : SET [2:?] OF
+/// IfcProfileDef`, attribute index 2; the EXPRESS `NoRecursion` WHERE
+/// rule forbids nested composites) — each component becomes its own
+/// area, swept independently and merged. Every other profile kind
+/// resolves to a single [`profile_area`].
+fn profile_areas(step: &StepFile, profile_id: u64) -> Result<Vec<ProfileArea>, GeometryError> {
+    let inst = step
+        .get(profile_id)
+        .ok_or(GeometryError::MissingInstance(profile_id))?;
+    if inst.keyword != "IFCCOMPOSITEPROFILEDEF" {
+        return Ok(vec![profile_area(step, profile_id)?]);
+    }
+    let profiles = inst
+        .args
+        .get(2)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    if profiles.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    let mut areas = Vec::with_capacity(profiles.len());
+    for p in profiles {
+        let pid = p.as_reference().ok_or(GeometryError::BadProfile)?;
+        // A nested composite falls through profile_area → profile_ring,
+        // which surfaces it as Unsupported (the NoRecursion WHERE rule
+        // forbids it anyway).
+        areas.push(profile_area(step, pid)?);
+    }
+    Ok(areas)
 }
 
 /// Twice the signed area of a 2-D ring (positive when
@@ -2979,6 +3118,84 @@ mod tests {
         assert_eq!(m.vertex_count(), 13 * 8);
         // Walls: 12 segments × 8 edges × 2 tris; caps: 8 tris × 2 ends.
         assert_eq!(m.triangle_count(), 12 * 8 * 2 + 16);
+    }
+
+    #[test]
+    fn extruded_indexed_polycurve_without_segments() {
+        // An IfcIndexedPolyCurve with `$` Segments is the point list in
+        // order: a unit square from an IfcCartesianPointList2D.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(1.,0.),(1.,1.),(0.,1.)));\n\
+             #2=IFCINDEXEDPOLYCURVE(#1,$,.F.);\n\
+             #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\n\
+             #4=IFCDIRECTION((0.,0.,1.));\n\
+             #5=IFCEXTRUDEDAREASOLID(#3,$,#4,2.);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        assert_eq!(m.triangle_count(), 12);
+        assert!((cap_area_z0(&m) - 1.0).abs() < 1e-9);
+        approx(m.positions[0], [0.0, 0.0, 0.0]);
+        approx(m.positions[6], [1.0, 1.0, 2.0]);
+    }
+
+    #[test]
+    fn extruded_indexed_polycurve_line_segments_share_junctions() {
+        // Two IfcLineIndex segments (1,2,3) + (3,4,1): the shared
+        // junction 3 and the closing 1 are emitted once → a 4-point
+        // square ring.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(2.,0.),(2.,2.),(0.,2.)));\n\
+             #2=IFCINDEXEDPOLYCURVE(#1,(IFCLINEINDEX((1,2,3)),IFCLINEINDEX((3,4,1))),.F.);\n\
+             #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\n\
+             #4=IFCDIRECTION((0.,0.,1.));\n\
+             #5=IFCEXTRUDEDAREASOLID(#3,$,#4,1.);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        assert_eq!(m.vertex_count(), 8);
+        assert!((cap_area_z0(&m) - 4.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn indexed_polycurve_arc_segment_unsupported() {
+        // IfcArcIndex (a three-point arc segment) is not evaluated yet;
+        // the SELECT keyword is surfaced.
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(1.,1.),(2.,0.)));\n\
+             #2=IFCINDEXEDPOLYCURVE(#1,(IFCARCINDEX((1,2,3))),.F.);\n\
+             #3=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#2);\n\
+             #4=IFCDIRECTION((0.,0.,1.));\n\
+             #5=IFCEXTRUDEDAREASOLID(#3,$,#4,1.);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 5).unwrap_err(),
+            GeometryError::Unsupported("IFCARCINDEX".to_string())
+        );
+    }
+
+    #[test]
+    fn extruded_composite_profile_unions_components() {
+        // Two 1×1 rectangles side by side (centres at x = ±2) → two
+        // separate prisms in one mesh: 16 vertices, 24 triangles, total
+        // bottom-cap area 2.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((-2.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCRECTANGLEPROFILEDEF(.AREA.,$,#2,1.,1.);\n\
+             #4=IFCCARTESIANPOINT((2.,0.));\n\
+             #5=IFCAXIS2PLACEMENT2D(#4,$);\n\
+             #6=IFCRECTANGLEPROFILEDEF(.AREA.,$,#5,1.,1.);\n\
+             #7=IFCCOMPOSITEPROFILEDEF(.AREA.,$,(#3,#6),$);\n\
+             #8=IFCDIRECTION((0.,0.,1.));\n\
+             #9=IFCEXTRUDEDAREASOLID(#7,$,#8,3.);",
+        );
+        let m = tessellate_item(&f, 9).unwrap();
+        assert_eq!(m.vertex_count(), 16);
+        assert_eq!(m.triangle_count(), 24);
+        assert!((cap_area_z0(&m) - 2.0).abs() < 1e-9);
+        // Component prisms stay centred on their own Positions.
+        assert!(m.positions[..8].iter().all(|p| p[0] < 0.0));
+        assert!(m.positions[8..].iter().all(|p| p[0] > 0.0));
     }
 
     #[test]

@@ -524,6 +524,25 @@ pub const SCHEMA: &[EntitySchema] = &[
         ]),
     },
     EntitySchema {
+        keyword: "IFCCOMPOSITEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcProfileDef(2) + IfcCompositeProfileDef(Profiles, Label).
+        attrs: chain!(&["ProfileType", "ProfileName", "Profiles", "Label"]),
+    },
+    EntitySchema {
+        keyword: "IFCINDEXEDPOLYCURVE",
+        kind: EntityKind::Geometry,
+        // IfcBoundedCurve adds nothing; IfcIndexedPolyCurve(Points,
+        // Segments, SelfIntersect).
+        attrs: chain!(&["Points", "Segments", "SelfIntersect"]),
+    },
+    EntitySchema {
+        keyword: "IFCCARTESIANPOINTLIST2D",
+        kind: EntityKind::Geometry,
+        // IfcCartesianPointList adds nothing; (CoordList).
+        attrs: chain!(&["CoordList"]),
+    },
+    EntitySchema {
         keyword: "IFCRECTANGLEHOLLOWPROFILEDEF",
         kind: EntityKind::Geometry,
         // IfcRectangleProfileDef(5) + IfcRectangleHollowProfileDef(
@@ -971,6 +990,9 @@ mod tests {
             ("IFCARBITRARYPROFILEDEFWITHVOIDS", 4), // + InnerCurves
             ("IFCCIRCLEHOLLOWPROFILEDEF", 5), // + WallThickness
             ("IFCRECTANGLEHOLLOWPROFILEDEF", 8), // + Wall,fillet radii
+            ("IFCCOMPOSITEPROFILEDEF", 4), // Type,Name,Profiles,Label
+            ("IFCINDEXEDPOLYCURVE", 3),  // Points,Segments,SelfIntersect
+            ("IFCCARTESIANPOINTLIST2D", 1), // CoordList
         ];
         for (kw, want) in lens {
             assert_eq!(

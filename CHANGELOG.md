@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (indexed poly curves + composite profiles): profile boundary
+  curves may now be `IfcIndexedPolyCurve` over an
+  `IfcCartesianPointList2D` — either the whole point list in order (`$`
+  `Segments`) or `IfcLineIndex` segments whose shared junction points
+  are emitted once (the EXPRESS `Consecutive` WHERE rule); `IfcArcIndex`
+  (three-point arc) segments remain `Unsupported` pending their
+  semantics doc. `IfcCompositeProfileDef` resolves to the union of its
+  component profiles, each swept independently and merged (extrusion and
+  revolution both; the EXPRESS `NoRecursion` rule falls out naturally as
+  `Unsupported`). 4 new geometry tests (segment-less polycurve,
+  junction-sharing line segments, arc surfacing, two-component composite
+  with per-component position checks); Phase-2 typed entries for
+  `IfcIndexedPolyCurve`, `IfcCartesianPointList2D`,
+  `IfcCompositeProfileDef`.
+
 - Phase 3 (profile holes + hole-aware caps): swept-solid profiles now
   resolve to a full `ProfileArea` (outer ring + hole rings), and the
   extrusion / revolution caps are triangulated by hole bridging + ear
