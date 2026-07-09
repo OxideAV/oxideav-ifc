@@ -1,27 +1,38 @@
 //! Framework integration (`registry` feature): a [`Mesh3DDecoder`]
 //! implementation plus the [`Mesh3DRegistry`] registration helper.
 //!
-//! Phase 3 (this release) extracts tessellated geometry
-//! (`IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET`) and faceted
-//! boundary representations (`IFCFACETEDBREP`(`WITHVOIDS`),
-//! `IFCFACEBASEDSURFACEMODEL`, `IFCSHELLBASEDSURFACEMODEL`) into a
-//! [`Scene3D`]: the decoder probes the `ISO-10303-21;` magic, fully
-//! parses + validates the exchange structure, then walks every
-//! `IfcProductDefinitionShape` to its supported body items and emits
-//! one scene node + mesh per shape. Each shape's vertices are then
-//! positioned in **world space** by resolving the owning product's
+//! The decoder probes the `ISO-10303-21;` magic, fully parses +
+//! validates the exchange structure, then walks every
+//! `IfcProductDefinitionShape` to its supported body items —
+//! tessellated face sets, faceted Breps / surface models, extruded and
+//! revolved swept solids, boolean results, and mapped items — and emits
+//! one scene node + mesh per shape, with **one primitive per
+//! representation item**. Each shape's vertices are positioned in
+//! **world space** by resolving the owning product's
 //! `IfcLocalPlacement` chain (`placement_transform`); a shape with no
-//! discoverable product placement stays in its local frame. Swept-solid
-//! / advanced-brep / boolean / mapped-item geometry styles remain later
-//! Phase-3 slices.
+//! discoverable product placement stays in its local frame.
+//!
+//! Presentation is carried over where the file styles its items: an
+//! `IfcStyledItem` → `IfcSurfaceStyle` shading colour becomes the
+//! primitive's [`Material`] (`base_color`, deduplicated per style), and
+//! an `IfcIndexedColourMap` on a triangulated face set becomes
+//! per-vertex colours (vertices split per face so each triangle keeps
+//! its flat colour). Advanced (curved) breps and boolean intersections
+//! remain later Phase-3 slices.
+
+use std::collections::HashMap;
 
 use oxideav_core::Error as CoreError;
 use oxideav_mesh3d::{
-    Indices, Mesh, Mesh3DDecoder, Mesh3DRegistry, Node, Primitive, Scene3D, Topology,
+    Indices, Material, MaterialId, Mesh, Mesh3DDecoder, Mesh3DRegistry, Node, Primitive, Scene3D,
+    Topology,
 };
 
-use crate::geometry::{mesh_from_product_shape, placement_transform, GeometryError, TriMesh};
+use crate::geometry::{
+    meshed_items_from_product_shape, placement_transform, GeometryError, TriMesh,
+};
 use crate::parser::{parse_step_with_limits, probe_step, StepFile, StepLimits};
+use crate::value::Value;
 use crate::Error;
 
 /// IFC decoder front-end for the OxideAV 3D-format registry.
@@ -59,13 +70,14 @@ impl Mesh3DDecoder for IfcDecoder {
 
 /// Build a [`Scene3D`] from a parsed IFC exchange structure by
 /// tessellating every `IfcProductDefinitionShape` with a supported
-/// (tessellated) body representation.
+/// body representation.
 ///
-/// Each shape that yields geometry becomes one [`Mesh`] (a single
-/// `Triangles` primitive with a `U32` index buffer) plus one [`Node`]
-/// (named after the shape's `#id`) parented under a single scene root.
-/// Before meshing, the shape's vertices are positioned in world space by
-/// the owning product's `IfcLocalPlacement` chain (see
+/// Each shape that yields geometry becomes one [`Mesh`] — one
+/// `Triangles` [`Primitive`] per representation item, carrying that
+/// item's surface-style material and/or per-vertex colour map — plus
+/// one [`Node`] (named after the shape's `#id`) parented under a single
+/// scene root. Before meshing, the shape's vertices are positioned in
+/// world space by the owning product's `IfcLocalPlacement` chain (see
 /// [`shape_world_transform`]); a shape with no discoverable placement
 /// stays in its local frame. Shapes whose representations are all
 /// unsupported geometry styles are skipped. If no shape produced any
@@ -79,6 +91,8 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
 
     let mut emitted = 0usize;
     let mut last_unsupported: Option<String> = None;
+    // Styled-item materials are deduplicated per IfcSurfaceStyle id.
+    let mut material_cache: HashMap<u64, MaterialId> = HashMap::new();
 
     // Walk every IfcProductDefinitionShape: it is the `Representation`
     // target of any geometric product, so this catches tessellated
@@ -88,14 +102,32 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
         if inst.keyword != "IFCPRODUCTDEFINITIONSHAPE" {
             continue;
         }
-        match mesh_from_product_shape(step, inst.id) {
-            Ok(mut tri) if !tri.is_empty() => {
+        match meshed_items_from_product_shape(step, inst.id) {
+            Ok(items) => {
                 // Position the body in world space via the owning
                 // product's IfcLocalPlacement chain (identity when none
                 // is discoverable / interpretable).
                 let xform = shape_world_transform(step, inst.id);
-                tri.transform(&xform);
-                let mesh_id = scene.add_mesh(tri_to_mesh(&tri, inst.id));
+                let mut mesh = Mesh::new(Some(format!("#{}", inst.id)));
+                for (item_id, mut tri) in items {
+                    tri.transform(&xform);
+                    let mut prim = tri_to_primitive(&tri, step, item_id);
+                    // Surface style (IfcStyledItem → IfcSurfaceStyle →
+                    // shading colour) becomes the primitive material.
+                    if let Some((style_id, name, rgba)) = surface_style_of_item(step, item_id) {
+                        let mat_id = *material_cache.entry(style_id).or_insert_with(|| {
+                            let mut mat = Material::new().with_base_color(rgba);
+                            mat.name = name;
+                            scene.add_material(mat)
+                        });
+                        prim.material = Some(mat_id);
+                    }
+                    mesh.primitives.push(prim);
+                }
+                if mesh.primitives.is_empty() {
+                    continue;
+                }
+                let mesh_id = scene.add_mesh(mesh);
                 let node = Node::new()
                     .with_name(format!("#{}", inst.id))
                     .with_mesh(mesh_id);
@@ -107,7 +139,6 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
                     .push(node_id);
                 emitted += 1;
             }
-            Ok(_) => {}
             Err(GeometryError::Unsupported(kw)) => last_unsupported = Some(kw),
             // A shape with no usable representations is not fatal — other
             // shapes in the file may still tessellate.
@@ -119,13 +150,145 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
         let detail = match last_unsupported {
             Some(kw) => format!(
                 "no tessellated geometry: only unsupported representation styles present \
-                 (e.g. `{kw}`); swept-solid / Brep extraction is a later Phase-3 slice"
+                 (e.g. `{kw}`); advanced-brep / boolean-intersection extraction is a later \
+                 Phase-3 slice"
             ),
             None => "no geometric representations present in the model".to_string(),
         };
         return Err(CoreError::Unsupported(detail));
     }
     Ok(scene)
+}
+
+/// Resolve the surface colour a representation item is styled with, if
+/// any: `(IfcSurfaceStyle id, style name, RGBA)`.
+///
+/// The presentation chain (IFC4 EXPRESS,
+/// `IfcPresentationAppearanceResource`): an `IfcStyledItem(Item, Styles,
+/// Name)` back-references the representation item; each of its `Styles`
+/// is an `IfcStyleAssignmentSelect` — either an `IfcPresentationStyle`
+/// directly or the (deprecated but common) wrapper
+/// `IfcPresentationStyleAssignment(Styles)`. An `IfcSurfaceStyle(Name,
+/// Side, Styles)` among them carries up to one shading member
+/// (`IfcSurfaceStyleShading(SurfaceColour, Transparency)` or its
+/// `IfcSurfaceStyleRendering` subtype, which shares those two leading
+/// attributes); its `SurfaceColour` is an `IfcColourRgb(Name, Red,
+/// Green, Blue)` and the optional `Transparency` (0 = opaque) maps to
+/// alpha `1 − Transparency`.
+fn surface_style_of_item(step: &StepFile, item_id: u64) -> Option<(u64, Option<String>, [f32; 4])> {
+    for styled in step.instances.values() {
+        if styled.keyword != "IFCSTYLEDITEM"
+            || styled.args.first().and_then(Value::as_reference) != Some(item_id)
+        {
+            continue;
+        }
+        // Styles : SET [1:?] OF IfcStyleAssignmentSelect (index 1).
+        let selects = styled.args.get(1).and_then(Value::as_list)?;
+        // Flatten one level of IfcPresentationStyleAssignment.
+        let mut style_ids: Vec<u64> = Vec::new();
+        for sel in selects {
+            let Some(sid) = sel.as_reference() else {
+                continue;
+            };
+            let Some(sel_inst) = step.get(sid) else {
+                continue;
+            };
+            if sel_inst.keyword == "IFCPRESENTATIONSTYLEASSIGNMENT" {
+                if let Some(inner) = sel_inst.args.first().and_then(Value::as_list) {
+                    style_ids.extend(inner.iter().filter_map(Value::as_reference));
+                }
+            } else {
+                style_ids.push(sid);
+            }
+        }
+        for style_id in style_ids {
+            let Some(style) = step.get(style_id) else {
+                continue;
+            };
+            if style.keyword != "IFCSURFACESTYLE" {
+                continue;
+            }
+            // IfcPresentationStyle(Name) + IfcSurfaceStyle(Side, Styles).
+            let name = style
+                .args
+                .first()
+                .and_then(Value::as_str)
+                .map(str::to_string);
+            let members = style.args.get(2).and_then(Value::as_list)?;
+            for member in members {
+                let Some(mid) = member.as_reference() else {
+                    continue;
+                };
+                let Some(m) = step.get(mid) else {
+                    continue;
+                };
+                if m.keyword != "IFCSURFACESTYLESHADING" && m.keyword != "IFCSURFACESTYLERENDERING"
+                {
+                    continue;
+                }
+                // SurfaceColour (index 0) → IfcColourRgb(Name, R, G, B);
+                // Transparency (index 1) optional.
+                let colour_id = m.args.first().and_then(Value::as_reference)?;
+                let colour = step.get(colour_id)?;
+                if colour.keyword != "IFCCOLOURRGB" {
+                    continue;
+                }
+                let r = colour.args.get(1).and_then(Value::as_number)?;
+                let g = colour.args.get(2).and_then(Value::as_number)?;
+                let b = colour.args.get(3).and_then(Value::as_number)?;
+                let alpha = 1.0 - m.args.get(1).and_then(Value::as_number).unwrap_or(0.0);
+                return Some((style_id, name, [r as f32, g as f32, b as f32, alpha as f32]));
+            }
+        }
+    }
+    None
+}
+
+/// Resolve the `IfcIndexedColourMap` attached to a tessellated face
+/// set, if any: `(optional opacity, colour rows, one-based per-face
+/// colour indices)`.
+///
+/// `IfcIndexedColourMap(MappedTo, Opacity, Colours, ColourIndex)` —
+/// `MappedTo` back-references the face set, `Colours` is an
+/// `IfcColourRgbList(ColourList)` and `ColourIndex` holds one one-based
+/// row per face (IFC4 EXPRESS `IfcIndexedColourMap`).
+type ColourMap = (Option<f64>, Vec<[f32; 3]>, Vec<usize>);
+fn indexed_colour_map_of(step: &StepFile, item_id: u64) -> Option<ColourMap> {
+    for map in step.instances.values() {
+        if map.keyword != "IFCINDEXEDCOLOURMAP"
+            || map.args.first().and_then(Value::as_reference) != Some(item_id)
+        {
+            continue;
+        }
+        let opacity = map.args.get(1).and_then(Value::as_number);
+        let colours_id = map.args.get(2).and_then(Value::as_reference)?;
+        let colours_inst = step.get(colours_id)?;
+        if colours_inst.keyword != "IFCCOLOURRGBLIST" {
+            continue;
+        }
+        let rows = colours_inst.args.first().and_then(Value::as_list)?;
+        let mut colours = Vec::with_capacity(rows.len());
+        for row in rows {
+            let c = row.as_list()?;
+            if c.len() != 3 {
+                return None;
+            }
+            colours.push([
+                c[0].as_number()? as f32,
+                c[1].as_number()? as f32,
+                c[2].as_number()? as f32,
+            ]);
+        }
+        let idx = map.args.get(3).and_then(Value::as_list)?;
+        let indices: Vec<usize> = idx
+            .iter()
+            .filter_map(Value::as_integer)
+            .filter(|&v| v >= 1)
+            .map(|v| v as usize)
+            .collect();
+        return Some((opacity, colours, indices));
+    }
+    None
 }
 
 /// Resolve the world transform for an `IfcProductDefinitionShape` by
@@ -180,11 +343,46 @@ fn shape_world_transform(step: &StepFile, shape_id: u64) -> crate::geometry::Tra
     Transform::IDENTITY
 }
 
-/// Convert a crate-local [`TriMesh`] into an `oxideav_mesh3d::Mesh`: one
-/// `Triangles` primitive with `f32` positions and a flattened `U32`
-/// index buffer.
-fn tri_to_mesh(tri: &TriMesh, shape_id: u64) -> Mesh {
+/// Convert a crate-local [`TriMesh`] into one `Triangles` [`Primitive`].
+///
+/// The common case is an indexed primitive (`f32` positions + a
+/// flattened `U32` index buffer). When the source item is an
+/// `IfcTriangulatedFaceSet` carrying an `IfcIndexedColourMap` (whose
+/// `ColourIndex` assigns one colour row per triangle), the primitive is
+/// instead emitted **non-indexed with per-vertex colours**: vertices are
+/// split per triangle so each face can carry its own flat colour (a
+/// shared vertex may belong to differently-coloured faces). Faces
+/// beyond the end of `ColourIndex`, or rows out of range, fall back to
+/// white; the map's optional `Opacity` supplies alpha.
+fn tri_to_primitive(tri: &TriMesh, step: &StepFile, item_id: u64) -> Primitive {
     let mut prim = Primitive::new(Topology::Triangles);
+
+    let is_triangulated = step
+        .get(item_id)
+        .is_some_and(|i| i.keyword == "IFCTRIANGULATEDFACESET");
+    if is_triangulated {
+        if let Some((opacity, colours, colour_index)) = indexed_colour_map_of(step, item_id) {
+            let alpha = 1.0f32.min(opacity.unwrap_or(1.0) as f32).max(0.0);
+            let mut positions = Vec::with_capacity(tri.triangles.len() * 3);
+            let mut vert_colours = Vec::with_capacity(tri.triangles.len() * 3);
+            for (face, t) in tri.triangles.iter().enumerate() {
+                let rgb = colour_index
+                    .get(face)
+                    .and_then(|&one_based| colours.get(one_based - 1))
+                    .copied()
+                    .unwrap_or([1.0, 1.0, 1.0]);
+                for &v in t {
+                    let p = tri.positions[v as usize];
+                    positions.push([p[0] as f32, p[1] as f32, p[2] as f32]);
+                    vert_colours.push([rgb[0], rgb[1], rgb[2], alpha]);
+                }
+            }
+            prim.positions = positions;
+            prim.colors = vec![vert_colours];
+            return prim;
+        }
+    }
+
     prim.positions = tri
         .positions
         .iter()
@@ -197,7 +395,7 @@ fn tri_to_mesh(tri: &TriMesh, shape_id: u64) -> Mesh {
         idx.push(t[2]);
     }
     prim.indices = Some(Indices::U32(idx));
-    Mesh::new(Some(format!("#{shape_id}"))).with_primitive(prim)
+    prim
 }
 
 /// Direct (registry-free) constructor — the conventional `make_`

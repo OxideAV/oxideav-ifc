@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (presentation styling): the registry decoder now emits **one
+  primitive per representation item** (new public
+  `meshed_items_from_product_shape`) and carries the file's styling
+  onto each primitive:
+  - `IfcStyledItem` → `IfcSurfaceStyle` (directly or through the
+    `IfcPresentationStyleAssignment` wrapper) →
+    `IfcSurfaceStyleShading`/`IfcSurfaceStyleRendering.SurfaceColour`
+    (`IfcColourRgb`) becomes the primitive's `Material.base_color`,
+    with alpha `1 − Transparency`; materials are deduplicated per
+    `IfcSurfaceStyle` and named from the style `Name`.
+  - `IfcIndexedColourMap` on an `IfcTriangulatedFaceSet` becomes
+    per-vertex colours: vertices are split per face (non-indexed
+    primitive) so each triangle keeps its flat `ColourIndex` colour;
+    the optional `Opacity` supplies alpha and out-of-range / missing
+    rows fall back to white. The tessellation-with-individual-colors
+    fixture now decodes with its red/green/yellow faces.
+  - 2 new end-to-end registry tests (colour-map fixture with per-face
+    colour assertions incl. the 11-of-12 `ColourIndex` fallback;
+    synthetic styled extruded box asserting material name, RGB and
+    alpha 0.75).
+
 - Phase 3 (boolean composition): `tessellate_item` now evaluates
   `IfcBooleanResult` / `IfcBooleanClippingResult` (`Operator`,
   `FirstOperand`, `SecondOperand`, ISO 16739 §8.8.3.5) at the

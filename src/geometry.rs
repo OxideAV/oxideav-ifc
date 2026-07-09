@@ -420,6 +420,66 @@ pub fn mesh_from_product_shape(
     }
 }
 
+/// Tessellate every supported representation item of a product shape
+/// **individually**, returning one `(item id, mesh)` pair per item that
+/// produced geometry.
+///
+/// Same walk as [`mesh_from_product_shape`], but the per-item
+/// granularity is preserved so callers can attach per-item presentation
+/// (surface styles, colour maps) to each mesh. Items with unsupported
+/// geometry styles are skipped; if **no** item produced geometry the
+/// first unsupported keyword is surfaced.
+pub fn meshed_items_from_product_shape(
+    step: &StepFile,
+    product_def_shape_id: u64,
+) -> Result<Vec<(u64, TriMesh)>, GeometryError> {
+    let inst = step
+        .get(product_def_shape_id)
+        .ok_or(GeometryError::MissingInstance(product_def_shape_id))?;
+    // IfcProductDefinitionShape.Representations (index 2).
+    let reps = inst
+        .args
+        .get(2)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+
+    let mut out: Vec<(u64, TriMesh)> = Vec::new();
+    let mut first_unsupported: Option<GeometryError> = None;
+    for rep in reps {
+        let Some(rep_id) = rep.as_reference() else {
+            continue;
+        };
+        let Some(rep_inst) = step.get(rep_id) else {
+            return Err(GeometryError::MissingInstance(rep_id));
+        };
+        // IfcShapeRepresentation.Items (index 3); a representation with
+        // no usable Items list is tolerated (axis / footprint styles).
+        let Some(items) = rep_inst.args.get(3).and_then(Value::as_list) else {
+            continue;
+        };
+        for item in items {
+            let Some(item_id) = item.as_reference() else {
+                continue;
+            };
+            match tessellate_item(step, item_id) {
+                Ok(mesh) if !mesh.is_empty() => out.push((item_id, mesh)),
+                Ok(_) => {}
+                Err(e @ GeometryError::Unsupported(_)) => {
+                    if first_unsupported.is_none() {
+                        first_unsupported = Some(e);
+                    }
+                }
+                Err(other) => return Err(other),
+            }
+        }
+    }
+    if out.is_empty() {
+        Err(first_unsupported.unwrap_or(GeometryError::BadCoordinates))
+    } else {
+        Ok(out)
+    }
+}
+
 impl TriMesh {
     /// Return a copy of this mesh with every vertex mapped through
     /// `xform` (triangle connectivity is unchanged).

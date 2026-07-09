@@ -17,6 +17,8 @@ const WALL: &[u8] = include_bytes!("fixtures/ifc4-wall-with-opening-and-window.i
 const TESS: &[u8] = include_bytes!("fixtures/ifc4-tessellated-item.ifc");
 // A column whose body is a 12-triangle triangulated face set.
 const COLUMN: &[u8] = include_bytes!("fixtures/ifc4-column-straight-rectangle-tessellation.ifc");
+// A cube face set with an IfcIndexedColourMap assigning per-face colours.
+const COLORS: &[u8] = include_bytes!("fixtures/ifc4-tessellation-with-individual-colors.ifc");
 
 #[test]
 fn registry_lookup_by_extension_and_format() {
@@ -111,6 +113,76 @@ fn decode_extruded_swept_solid_model_yields_scene() {
             && (p[2] - 2000.0).abs() < 1e-1),
         "expected the wall body's far-top corner at (3000, 300, 2000)"
     );
+}
+
+#[test]
+fn decode_indexed_colour_map_splits_vertices_with_face_colours() {
+    // The colour-map cube's 12 triangles carry ColourIndex
+    // (1,1,2,2,3,3,1,1,1,1,1) into a red/green/yellow IfcColourRgbList
+    // — 11 entries for 12 faces, so the last face falls back to white.
+    let mut decoder = make_decoder();
+    let scene = decoder.decode(COLORS).expect("colour fixture decodes");
+    let prim = scene
+        .meshes
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .find(|p| !p.colors.is_empty())
+        .expect("a primitive with vertex colours");
+    // Vertices are split per face: 12 triangles → 36 vertices, no index
+    // buffer, one colour per vertex.
+    assert_eq!(prim.positions.len(), 36);
+    assert!(prim.indices.is_none());
+    assert_eq!(prim.colors[0].len(), 36);
+    // Faces 0-1 red, 2-3 green (0,0.5,0), 4-5 yellow, 6-10 red, 11 white.
+    assert_eq!(prim.colors[0][0], [1.0, 0.0, 0.0, 1.0]);
+    assert_eq!(prim.colors[0][2 * 3], [0.0, 0.5, 0.0, 1.0]);
+    assert_eq!(prim.colors[0][4 * 3], [1.0, 1.0, 0.0, 1.0]);
+    assert_eq!(prim.colors[0][11 * 3], [1.0, 1.0, 1.0, 1.0]);
+    // All three vertices of one face share its flat colour.
+    assert_eq!(prim.colors[0][1], prim.colors[0][0]);
+    assert_eq!(prim.colors[0][2], prim.colors[0][0]);
+}
+
+#[test]
+fn decode_styled_item_becomes_primitive_material() {
+    // A synthetic model: an extruded box whose representation item is
+    // styled dark red (0.6, 0.1, 0.1) with transparency 0.25 through
+    // IfcStyledItem → IfcPresentationStyleAssignment → IfcSurfaceStyle
+    // → IfcSurfaceStyleShading → IfcColourRgb.
+    let model = b"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('styled.ifc','2026-07-09T00:00:00',('a'),('o'),'p','s','auth');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);
+#2=IFCDIRECTION((0.,0.,1.));
+#3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);
+#4=IFCCOLOURRGB($,0.6,0.1,0.1);
+#5=IFCSURFACESTYLESHADING(#4,0.25);
+#6=IFCSURFACESTYLE('DarkRed',.BOTH.,(#5));
+#7=IFCPRESENTATIONSTYLEASSIGNMENT((#6));
+#8=IFCSTYLEDITEM(#3,(#7),$);
+#9=IFCSHAPEREPRESENTATION(#99,'Body','SweptSolid',(#3));
+#10=IFCPRODUCTDEFINITIONSHAPE($,$,(#9));
+ENDSEC;
+END-ISO-10303-21;
+";
+    let mut decoder = make_decoder();
+    let scene = decoder.decode(model).expect("styled model decodes");
+    assert_eq!(scene.materials.len(), 1);
+    let mat = &scene.materials[0];
+    assert_eq!(mat.name.as_deref(), Some("DarkRed"));
+    // Alpha = 1 − Transparency = 0.75.
+    let c = mat.base_color;
+    assert!((c[0] - 0.6).abs() < 1e-6);
+    assert!((c[1] - 0.1).abs() < 1e-6);
+    assert!((c[2] - 0.1).abs() < 1e-6);
+    assert!((c[3] - 0.75).abs() < 1e-6);
+    // The box primitive references the material.
+    let prim = &scene.meshes[0].primitives[0];
+    assert_eq!(prim.material, Some(oxideav_mesh3d::MaterialId(0)));
 }
 
 #[test]

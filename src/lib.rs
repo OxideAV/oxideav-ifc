@@ -96,8 +96,8 @@ pub mod decoder;
 
 pub use error::{Error, Result};
 pub use geometry::{
-    mesh_from_product_shape, mesh_from_shape_representation, placement_transform, tessellate_item,
-    GeometryError, Transform, TriMesh,
+    mesh_from_product_shape, mesh_from_shape_representation, meshed_items_from_product_shape,
+    placement_transform, tessellate_item, GeometryError, Transform, TriMesh,
 };
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use parser::{
