@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: `IFCTRIANGULATEDFACESET` / `IFCPOLYGONALFACESET` tessellations, faceted Breps (`IfcFacetedBrep`(`WithVoids`)) + face/shell surface models, swept solids (`IfcExtrudedAreaSolid` + `IfcRevolvedAreaSolid`), mapped-item instancing (`IfcMappedItem`), and `IfcLocalPlacement` world-positioning | ✅ this release (tessellation + Brep + extrusion + revolution + mapped-item + placement slices); curved/advanced solids later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (incl. face holes), face/shell surface models, swept solids over a wide profile family (arbitrary ± voids, rectangle ± hollow, circle ± hollow, ellipse, composite; polyline / circle / indexed-poly-curve boundaries), boolean composition, mapped-item instancing, `IfcLocalPlacement` world-positioning, and surface-style materials | ✅ this release; advanced (curved) breps, boolean carving/intersection, arc segments + named profiles later |
 
 ## Phase 1 surface
 
@@ -147,6 +147,8 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   Both read their vertices from the shared `IfcCartesianPointList3D`
   reached through the `IfcTessellatedFaceSet.Coordinates` supertype
   attribute. Any other keyword → `GeometryError::Unsupported`.
+* Tessellated faces may carry holes: `IfcIndexedPolygonalFaceWithVoids`
+  inner loops are left open, triangulated hole-aware on the face plane.
 * `tessellate_item` additionally evaluates the **faceted boundary
   representation** family, whose faces are explicit polygons of
   `IfcCartesianPoint` references rather than indices into a shared list:
@@ -154,41 +156,48 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `Voids` `IfcClosedShell`s), `IfcFaceBasedSurfaceModel` (`FbsmFaces`),
   and `IfcShellBasedSurfaceModel` (`SbsmBoundary`, the `IfcShell` SELECT
   of `IfcClosedShell` / `IfcOpenShell`). Each shell
-  (`IfcConnectedFaceSet.CfsFaces`) is walked to its `IfcFace`s; every
-  face's outer `IfcFaceBound` / `IfcFaceOuterBound` resolves to an
-  `IfcPolyLoop` (`Polygon : LIST [3:?] OF IfcCartesianPoint`) that is
-  fan-triangulated. The shared vertex table is de-duplicated by
-  `IfcCartesianPoint` id, so a point referenced by several loops (the
-  §8.8.3.18 invariant guarantees at least three) becomes one mesh
-  vertex. Per-bound `Orientation` flags and `Voids` boolean subtraction
-  are not yet applied — the outer surface is meshed as authored; advanced
-  (curved) breps and `IfcFaceSurface` faces remain `Unsupported`.
+  (`IfcConnectedFaceSet.CfsFaces`) is walked to its `IfcFace`s; the
+  `IfcFaceOuterBound` loop is the boundary and every other
+  `IfcFaceBound` is an inner **hole** — the loops are projected onto the
+  face plane (Newell normal) and triangulated hole-aware (bridge + ear
+  clip), so concave faces and face holes mesh exactly; convex
+  single-bound faces keep the fan fast path. The shared vertex table is
+  de-duplicated by `IfcCartesianPoint` id, so a point referenced by
+  several loops (the §8.8.3.18 invariant guarantees at least three)
+  becomes one mesh vertex. Per-bound `Orientation` flags are not
+  applied; advanced (curved) breps and `IfcFaceSurface` faces remain
+  `Unsupported`.
 * `tessellate_item` also sweeps the **extruded area solid**
   `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
-  `Depth`): the 2-D profile is resolved to its outer ring — from an
-  `IfcArbitraryClosedProfileDef` whose `OuterCurve` is an `IfcPolyline`
-  (a duplicated closing point is dropped), or an `IfcRectangleProfileDef`
-  (a centred `XDim`×`YDim` rectangle, with its optional 2-D `Position`
-  applied) — and swept into a closed prism: a bottom cap, a
-  `Depth · ExtrudedDirection`-offset top cap, and one side-wall quad per
-  profile edge. The optional `Position` `IfcAxis2Placement3D` re-places
-  the whole solid. The wall fixture's body/opening/window each extrude a
-  polyline profile and now mesh as 8-vertex boxes. Revolved /
-  surface-curve / tapered swept solids, non-rectangle parameterised
-  profiles, curved profile curves, and `Voids` (profile-hole)
-  subtraction remain `Unsupported`.
-* `tessellate_item` also revolves the **revolved area solid**
-  `IfcRevolvedAreaSolid` (`SweptArea`, `Position`, `Axis`, `Angle`): the
-  2-D profile ring (in the `Position` XY-plane) is stepped through a fan
-  of angular positions about the `Axis` `IfcAxis1Placement` line by
-  `Angle` radians (Rodrigues' rotation), emitting a profile ring per
-  step. A full 2π revolution wraps closed (side-wall quads only); a
-  partial sweep fan-triangulates the open first/last rings as end caps.
-  Angular resolution is 48 segments per full turn, scaled by the swept
-  fraction; the optional `Position` `IfcAxis2Placement3D` re-places the
-  solid. Reuses the same `profile_ring` as the extrusion (polyline +
-  rectangle profiles). The tapered subtype, non-rectangle parameterised
-  and curved-curve profiles remain `Unsupported`.
+  `Depth`) into a closed prism — hole-aware caps (ear-clipped, so
+  concave profiles are exact), one side-wall quad per boundary edge
+  (outer and hole rings alike), the optional `Position`
+  `IfcAxis2Placement3D` re-placing the whole solid — and revolves the
+  **revolved area solid** `IfcRevolvedAreaSolid` (`SweptArea`,
+  `Position`, `Axis`, `Angle`) about its `IfcAxis1Placement` line by
+  `Angle` radians (Rodrigues' rotation, 48 segments per full turn; a
+  full 2π wraps closed, a partial sweep gets hole-aware end caps).
+* The shared **profile family** behind both sweeps
+  (`profile_area`/`profile_areas`): `IfcArbitraryClosedProfileDef` and
+  `IfcArbitraryProfileDefWithVoids` (inner curves become hole rings),
+  `IfcRectangleProfileDef` / `IfcRectangleHollowProfileDef`
+  (`WallThickness` inset; fillet radii not yet applied),
+  `IfcCircleProfileDef` / `IfcCircleHollowProfileDef` (48-segment
+  circles / annuli), `IfcEllipseProfileDef`, and
+  `IfcCompositeProfileDef` (each component swept independently and
+  merged). Boundary curves may be an `IfcPolyline` (duplicated closing
+  point dropped), a full `IfcCircle`, or an `IfcIndexedPolyCurve` over
+  an `IfcCartesianPointList2D` (`$` segments or `IfcLineIndex` runs
+  with shared junctions; `IfcArcIndex` remains `Unsupported`). All
+  rings are normalised counter-clockwise; parameterised profiles apply
+  their optional 2-D `Position`.
+* `tessellate_item` composes **boolean results** (`IfcBooleanResult` /
+  `IfcBooleanClippingResult`, §8.8.3.5) at the surface-mesh level:
+  `UNION` merges the operand boundaries, `DIFFERENCE` emits the first
+  operand as authored (half-space carving pends the
+  `IfcHalfSpaceSolid.AgreementFlag` side-convention documentation), and
+  `INTERSECTION` surfaces as `Unsupported`. Operands recurse (clipping
+  chains nest) under a shared depth cap.
 * `tessellate_item` also evaluates the **mapped item**
   `IfcMappedItem` (`MappingSource`, `MappingTarget`) — the inserted
   instance of a reusable source representation. `MappingSource` is an
@@ -221,25 +230,36 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   are bounded by a depth cap.
 
 With the `registry` feature, `IfcDecoder` walks every
-`IfcProductDefinitionShape`, tessellates its supported body items, and
-positions the result in **world space** via the owning product's
-`IfcLocalPlacement` chain — one `Scene3D` node + mesh per tessellated
-body. The product owning a shape is found by back-scanning for the
-instance whose `Representation` references the shape (so geometry-bearing
-products outside the typed schema slice, e.g. `IfcBuildingElementProxy`,
-are still placed). The five fixture models decode to 8/24-vertex boxes
-(cube proxy, column, colour cube) and the dense basin mesh; the column
-body lands at its placed origin `(432, 288, 48)`. The swept-solid wall
-model now decodes to three 8-vertex boxes — its wall body, opening and
-window extruded from polyline profiles. Faceted Breps, face/shell surface
-models and extruded swept solids flow through the same product-shape walk
-and lift into the scene identically.
+`IfcProductDefinitionShape`, tessellates its supported body items —
+**one primitive per representation item** — and positions the result in
+**world space** via the owning product's `IfcLocalPlacement` chain. The
+scene node is named after the owning product's `Name` (the column
+fixture decodes as "Column #1"); the product is found by back-scanning
+for the instance whose `Representation` references the shape, so
+geometry-bearing products outside the typed schema slice
+(e.g. `IfcBuildingElementProxy`) are still placed and named.
+Presentation carries over: an `IfcStyledItem` → `IfcSurfaceStyle`
+shading colour becomes the primitive's `Material` (`base_color` with
+alpha `1 − Transparency`, named from the style, deduplicated per
+style), and an `IfcIndexedColourMap` on a triangulated face set becomes
+per-vertex colours (vertices split per face so each triangle keeps its
+flat colour — the individual-colors fixture decodes with its
+red/green/yellow faces). The five fixture models decode to their boxes
+and the dense basin mesh; the column body lands at its placed origin
+`(432, 288, 48)` and the wall model decodes to its wall body, opening
+and window prisms.
+
+`length_unit_scale(&StepFile)` resolves metres-per-model-unit from the
+project's `IfcUnitAssignment` (`IfcSIUnit` prefixes and
+`IfcConversionBasedUnit` factors — the wall fixture is millimetres, the
+column fixture inches); the decoder itself keeps raw model units.
 
 Still later in Phase 3: the remaining swept solids
-(`IfcSurfaceCurveSweptAreaSolid` / the tapered extrusion + revolution),
-non-rectangle parameterised + curved-curve profiles, advanced (curved)
-breps (`IfcAdvancedBrep` / `IfcFaceSurface`), boolean results, `Voids`
-subtraction, and EXPRESS WHERE-rule validation.
+(`IfcSurfaceCurveSweptAreaSolid` / the tapered subtypes /
+`IfcSweptDiskSolid`), `IfcArcIndex` poly-curve segments + named
+parameterised profiles (I/L/T/U/Z/C), advanced (curved) breps
+(`IfcAdvancedBrep` / `IfcFaceSurface`), boolean half-space carving +
+intersection, and EXPRESS WHERE-rule validation.
 
 ## Cargo features
 
@@ -248,10 +268,11 @@ subtraction, and EXPRESS WHERE-rule validation.
   direct constructor, and `register_mesh3d(&mut Mesh3DRegistry)`
   (format id `"ifc"`, extension `.ifc`). The decoder probes the magic,
   fully parses + validates the exchange structure, and extracts every
-  tessellated / faceted-Brep / extruded- or revolved-swept-solid /
-  mapped-item product shape into the `Scene3D`; a model with no
-  extractable geometry (only curved/advanced breps) decodes to
-  `Unsupported`.
+  tessellated / faceted-Brep / swept-solid / boolean-result /
+  mapped-item product shape into the `Scene3D` — product-named nodes,
+  per-item primitives, surface-style materials, per-face colour maps;
+  a model with no extractable geometry (only curved/advanced breps)
+  decodes to `Unsupported`.
 * `--no-default-features` — standalone STEP parser only, std types,
   zero dependencies.
 
