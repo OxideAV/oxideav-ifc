@@ -106,6 +106,13 @@
 //! in `IfcIndexedPolyCurve`, full `IfcEllipse` boundaries, and
 //! `IfcCompositeCurve` chains with per-segment `SameSense`.
 //!
+//! **`IfcSweptDiskSolid`** (and its `…Polygonal` subtype) sweeps a disk
+//! or annulus along a 3-D directrix (polyline, indexed poly-curve with
+//! line/arc segments, trimmed or full circle, composite curve):
+//! parallel-transported ring frames, exact elliptical mitre junctions
+//! at path corners, end caps on open paths and seamless wrap on closed
+//! ones — pipes, rods and rebar mesh watertight.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
 //! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), the named
@@ -246,6 +253,8 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         "IFCEXTRUDEDAREASOLID" => extruded_area_solid(step, &inst.args),
         // Revolved area solid: revolve a 2-D profile about an axis line.
         "IFCREVOLVEDAREASOLID" => revolved_area_solid(step, &inst.args),
+        // Swept disk solid: a disk / annulus swept along a 3-D directrix.
+        "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => swept_disk_solid(step, &inst.args),
         // Mapped item: instance a source representation under a Cartesian
         // transformation operator.
         "IFCMAPPEDITEM" => mapped_item(step, &inst.args, depth),
@@ -2017,6 +2026,616 @@ fn cross_raw(a: [f64; 3], b: [f64; 3]) -> [f64; 3] {
         a[2] * b[0] - a[0] * b[2],
         a[0] * b[1] - a[1] * b[0],
     ]
+}
+
+// =====================================================================
+// IfcSweptDiskSolid (Directrix, Radius, InnerRadius, StartParam,
+// EndParam) — swept-disk digest §1.
+//
+// A disk of `Radius` (an annulus when `InnerRadius` is present) rides
+// along the 3-D `Directrix`, held perpendicular to the directrix
+// tangent: pipes, rods, railings, rebar. The directrix must be bounded
+// (or carry both trim parameters — supported here for a full-circle
+// directrix, whose parameter is the conic angle).
+//
+// The tube frame is propagated by parallel transport: an initial
+// normal ⟂ to the first tangent is rotated by the minimal rotation
+// carrying each tangent onto the next, which avoids the twisting a
+// fixed reference axis would produce on curved paths. A closed
+// directrix (first point ≈ last) wraps without end caps.
+// =====================================================================
+
+fn swept_disk_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let directrix_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let radius = args
+        .get(1)
+        .and_then(Value::as_number)
+        .ok_or(GeometryError::BadCoordinate)?;
+    if radius <= 0.0 {
+        return Err(GeometryError::BadProfile);
+    }
+    // InnerRadius : OPTIONAL (index 2); EXPRESS InnerRadiusSize
+    // requires Radius > InnerRadius.
+    let inner = match args.get(2) {
+        None | Some(Value::Unset) => None,
+        Some(v) => {
+            let r = v.as_number().ok_or(GeometryError::BadCoordinate)?;
+            if r <= 0.0 || r >= radius {
+                return Err(GeometryError::BadProfile);
+            }
+            Some(r)
+        }
+    };
+    // StartParam / EndParam (indices 3, 4): only meaningful here for a
+    // full-conic directrix, whose parameter is the angle.
+    let start_param = match args.get(3) {
+        None | Some(Value::Unset) => None,
+        Some(v) => Some(v.as_number().ok_or(GeometryError::BadCoordinate)?),
+    };
+    let end_param = match args.get(4) {
+        None | Some(Value::Unset) => None,
+        Some(v) => Some(v.as_number().ok_or(GeometryError::BadCoordinate)?),
+    };
+
+    let mut path = directrix_points_3d(step, directrix_id, start_param, end_param)?;
+    // Collapse coincident consecutive points, then detect closure.
+    let same_point = |a: [f64; 3], b: [f64; 3]| {
+        let scale = a.iter().chain(b.iter()).fold(1.0f64, |m, c| m.max(c.abs()));
+        (a[0] - b[0]).abs() <= 1e-9 * scale
+            && (a[1] - b[1]).abs() <= 1e-9 * scale
+            && (a[2] - b[2]).abs() <= 1e-9 * scale
+    };
+    path.dedup_by(|a, b| same_point(*a, *b));
+    let closed = path.len() > 2 && same_point(path[0], path[path.len() - 1]);
+    if closed {
+        path.pop();
+    }
+    if path.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+
+    // Per-segment unit directions, then per-point mitre data: the ring
+    // plane normal is the bisector of the incoming and outgoing
+    // segment directions, and the ring is stretched by 1/cos(half
+    // bend) along the in-plane mitre direction so the junction is the
+    // exact cylinder∩mitre-plane ellipse (a plain circle would pinch
+    // the elbow).
+    let n_path = path.len();
+    let n_seg = if closed { n_path } else { n_path - 1 };
+    let mut seg_dirs: Vec<[f64; 3]> = Vec::with_capacity(n_seg);
+    for i in 0..n_seg {
+        let a = path[i];
+        let b = path[(i + 1) % n_path];
+        seg_dirs.push(
+            normalise([b[0] - a[0], b[1] - a[1], b[2] - a[2]]).ok_or(GeometryError::BadProfile)?,
+        );
+    }
+    // (tangent, bend-plane normal, stretch) per path point.
+    let mut tangents: Vec<[f64; 3]> = Vec::with_capacity(n_path);
+    let mut mitres: Vec<([f64; 3], f64)> = Vec::with_capacity(n_path);
+    for i in 0..n_path {
+        let (d_in, d_out) = if closed {
+            (seg_dirs[(i + n_seg - 1) % n_seg], seg_dirs[i % n_seg])
+        } else if i == 0 {
+            (seg_dirs[0], seg_dirs[0])
+        } else if i == n_path - 1 {
+            (seg_dirs[n_seg - 1], seg_dirs[n_seg - 1])
+        } else {
+            (seg_dirs[i - 1], seg_dirs[i])
+        };
+        let t = normalise([d_in[0] + d_out[0], d_in[1] + d_out[1], d_in[2] + d_out[2]])
+            .ok_or(GeometryError::BadProfile)?; // 180° fold: no mitre plane
+        let cos_half = dot_raw(t, d_out).clamp(-1.0, 1.0);
+        if cos_half <= 1e-9 {
+            return Err(GeometryError::BadProfile);
+        }
+        let bend = normalise(cross_raw(d_in, d_out));
+        tangents.push(t);
+        mitres.push((bend.unwrap_or([0.0; 3]), 1.0 / cos_half));
+    }
+
+    // Parallel-transport frames: (u, v) ⟂ tangent at every path point.
+    let t0 = tangents[0];
+    let seed = if t0[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let d0 = dot_raw(seed, t0);
+    let mut u = normalise([
+        seed[0] - d0 * t0[0],
+        seed[1] - d0 * t0[1],
+        seed[2] - d0 * t0[2],
+    ])
+    .ok_or(GeometryError::BadProfile)?;
+    let mut frames: Vec<([f64; 3], [f64; 3])> = Vec::with_capacity(n_path);
+    for i in 0..n_path {
+        if i > 0 {
+            // Rotate u by the minimal rotation tangents[i-1] → tangents[i].
+            let (ta, tb) = (tangents[i - 1], tangents[i]);
+            let axis = cross_raw(ta, tb);
+            let sin = dot_raw(axis, axis).sqrt();
+            let cos = dot_raw(ta, tb).clamp(-1.0, 1.0);
+            if sin > 1e-12 {
+                let angle = sin.atan2(cos);
+                u = rotate_about_axis(u, [0.0; 3], axis, angle);
+            }
+            // Numerical hygiene: keep u exactly ⟂ to the new tangent.
+            let d = dot_raw(u, tangents[i]);
+            u = normalise([
+                u[0] - d * tangents[i][0],
+                u[1] - d * tangents[i][1],
+                u[2] - d * tangents[i][2],
+            ])
+            .ok_or(GeometryError::BadProfile)?;
+        }
+        frames.push((u, cross_raw(tangents[i], u)));
+    }
+
+    // Ring emission: outer ring (and inner ring for an annulus) at
+    // every path point. Ring point k of ring i indexes
+    // i·ring_len + k (+ inner_offset for the inner tube). The mitre
+    // stretch is applied to the ring vector's component ⟂ to the bend
+    // normal (within the mitre plane).
+    let ring_len = CIRCLE_SEGMENTS;
+    let ring_point = |i: usize, r: f64, k: usize| {
+        let theta = 2.0 * core::f64::consts::PI * (k as f64) / (ring_len as f64);
+        let (fu, fv) = frames[i];
+        let (c, s) = (theta.cos(), theta.sin());
+        let mut w = [
+            r * (c * fu[0] + s * fv[0]),
+            r * (c * fu[1] + s * fv[1]),
+            r * (c * fu[2] + s * fv[2]),
+        ];
+        let (bend, stretch) = mitres[i];
+        if (stretch - 1.0).abs() > 1e-15 {
+            let wb = dot_raw(w, bend);
+            for (wc, bc) in w.iter_mut().zip(bend) {
+                *wc = wb * bc + (*wc - wb * bc) * stretch;
+            }
+        }
+        let centre = path[i];
+        [centre[0] + w[0], centre[1] + w[1], centre[2] + w[2]]
+    };
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n_path * ring_len * 2);
+    for i in 0..n_path {
+        for k in 0..ring_len {
+            positions.push(ring_point(i, radius, k));
+        }
+    }
+    let inner_offset = positions.len() as u32;
+    if let Some(ri) = inner {
+        for i in 0..n_path {
+            for k in 0..ring_len {
+                positions.push(ring_point(i, ri, k));
+            }
+        }
+    }
+
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    let spans = if closed { n_path } else { n_path - 1 };
+    for i in 0..spans {
+        let a = (i * ring_len) as u32;
+        let b = (((i + 1) % n_path) * ring_len) as u32;
+        for k in 0..ring_len {
+            let k1 = ((k + 1) % ring_len) as u32;
+            let k = k as u32;
+            // Outer wall: outward normals (the ring winds CCW about
+            // the tangent, so around-then-along traversal faces out).
+            triangles.push([a + k, a + k1, b + k1]);
+            triangles.push([a + k, b + k1, b + k]);
+            if inner.is_some() {
+                // Inner wall: reversed (faces into the bore).
+                let (ia, ib) = (inner_offset + a, inner_offset + b);
+                triangles.push([ia + k, ib + k1, ia + k1]);
+                triangles.push([ia + k, ib + k, ib + k1]);
+            }
+        }
+    }
+    if !closed {
+        // End caps: a disk fan (solid rod) or annulus (pipe) on each
+        // open end, facing outward along ∓tangent.
+        let last = ((n_path - 1) * ring_len) as u32;
+        if let Some(_ri) = inner {
+            let cap = |out: &mut Vec<[u32; 3]>, ring0: u32, reverse: bool| {
+                for k in 0..ring_len {
+                    let k1 = (k + 1) % ring_len;
+                    let (o0, o1) = (ring0 + k as u32, ring0 + k1 as u32);
+                    let (i0, i1) = (
+                        inner_offset + ring0 + k as u32,
+                        inner_offset + ring0 + k1 as u32,
+                    );
+                    if reverse {
+                        out.push([o0, i1, i0]);
+                        out.push([o0, o1, i1]);
+                    } else {
+                        out.push([o0, i0, i1]);
+                        out.push([o0, i1, o1]);
+                    }
+                }
+            };
+            // `reverse: false` faces −tangent (the start), `true`
+            // faces +tangent (the end).
+            cap(&mut triangles, 0, false);
+            cap(&mut triangles, last, true);
+        } else {
+            for k in 1..(ring_len - 1) {
+                let k = k as u32;
+                // Start cap faces −tangent (reverse of ring winding).
+                triangles.push([0, k + 1, k]);
+                // End cap faces +tangent.
+                triangles.push([last, last + k, last + k + 1]);
+            }
+        }
+    }
+
+    Ok(TriMesh {
+        positions,
+        triangles,
+    })
+}
+
+/// Evaluate a swept-disk directrix into a 3-D point run. `start` /
+/// `end` trim parameters are honoured for a full-conic directrix
+/// (their unit is the model plane-angle unit); a bounded directrix
+/// must not carry them here (surfaced as unsupported when it does).
+fn directrix_points_3d(
+    step: &StepFile,
+    id: u64,
+    start: Option<f64>,
+    end: Option<f64>,
+) -> Result<Vec<[f64; 3]>, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword == "IFCCIRCLE" {
+        // Full circle, or an arc when both trim parameters are given.
+        let conic = conic_3d(step, &inst.keyword, &inst.args)?;
+        let two_pi = 2.0 * core::f64::consts::PI;
+        let (u1, sweep) = match (start, end) {
+            (Some(s), Some(e)) => {
+                let scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+                let (s, e) = (s * scale, e * scale);
+                let mut d = (e - s).rem_euclid(two_pi);
+                if d < 1e-12 {
+                    d = two_pi;
+                }
+                (s, d)
+            }
+            _ => (0.0, two_pi),
+        };
+        let segments = ((CIRCLE_SEGMENTS as f64 * sweep / two_pi).ceil() as usize).max(2);
+        return Ok((0..=segments)
+            .map(|i| conic.point_at(u1 + sweep * (i as f64) / (segments as f64)))
+            .collect());
+    }
+    if start.is_some() || end.is_some() {
+        // Parameter-trimming a non-conic directrix needs that curve's
+        // own parameterisation — not modelled in this slice.
+        return Err(GeometryError::Unsupported(format!(
+            "{}(StartParam/EndParam)",
+            inst.keyword
+        )));
+    }
+    curve_points_3d(step, id, 0)
+}
+
+/// A 3-D conic: placement frame + semi-axes (`a == b` for a circle).
+struct Conic3D {
+    origin: [f64; 3],
+    x_axis: [f64; 3],
+    y_axis: [f64; 3],
+    a: f64,
+    b: f64,
+}
+
+impl Conic3D {
+    fn point_at(&self, u: f64) -> [f64; 3] {
+        let (c, s) = (u.cos(), u.sin());
+        [
+            self.origin[0] + self.a * c * self.x_axis[0] + self.b * s * self.y_axis[0],
+            self.origin[1] + self.a * c * self.x_axis[1] + self.b * s * self.y_axis[1],
+            self.origin[2] + self.a * c * self.x_axis[2] + self.b * s * self.y_axis[2],
+        ]
+    }
+
+    fn param_of(&self, p: [f64; 3]) -> f64 {
+        let d = [
+            p[0] - self.origin[0],
+            p[1] - self.origin[1],
+            p[2] - self.origin[2],
+        ];
+        (dot_raw(d, self.y_axis) / self.b).atan2(dot_raw(d, self.x_axis) / self.a)
+    }
+}
+
+/// Resolve an `IfcCircle` / `IfcEllipse` with a 3-D placement.
+fn conic_3d(step: &StepFile, keyword: &str, args: &[Value]) -> Result<Conic3D, GeometryError> {
+    let pos_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let frame = axis2_placement_3d(step, pos_id)?;
+    let (a, b) = if keyword == "IFCCIRCLE" {
+        let r = args
+            .get(1)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadProfile)?;
+        (r, r)
+    } else {
+        let a = args
+            .get(1)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadProfile)?;
+        let b = args
+            .get(2)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadProfile)?;
+        (a, b)
+    };
+    if a <= 0.0 || b <= 0.0 {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok(Conic3D {
+        origin: frame.translation,
+        x_axis: frame.cols[0],
+        y_axis: frame.cols[1],
+        a,
+        b,
+    })
+}
+
+/// Resolve a bounded 3-D curve to a point run: `IfcPolyline`,
+/// `IfcIndexedPolyCurve` over an `IfcCartesianPointList3D` (line and
+/// three-point-arc segments), `IfcTrimmedCurve` over a 3-D conic, and
+/// `IfcCompositeCurve` chains of the above.
+fn curve_points_3d(step: &StepFile, id: u64, depth: usize) -> Result<Vec<[f64; 3]>, GeometryError> {
+    if depth >= MAX_CURVE_DEPTH {
+        return Err(GeometryError::BadProfile);
+    }
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    match inst.keyword.as_str() {
+        "IFCPOLYLINE" => {
+            let points = inst
+                .args
+                .first()
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadProfile)?;
+            let mut out = Vec::with_capacity(points.len());
+            for p in points {
+                out.push(cartesian_point(step, Some(p))?);
+            }
+            Ok(out)
+        }
+        "IFCCIRCLE" | "IFCELLIPSE" => {
+            let conic = conic_3d(step, &inst.keyword, &inst.args)?;
+            let two_pi = 2.0 * core::f64::consts::PI;
+            Ok((0..=CIRCLE_SEGMENTS)
+                .map(|i| conic.point_at(two_pi * (i as f64) / (CIRCLE_SEGMENTS as f64)))
+                .collect())
+        }
+        "IFCTRIMMEDCURVE" => trimmed_curve_points_3d(step, &inst.args),
+        "IFCCOMPOSITECURVE" => {
+            let segments = inst
+                .args
+                .first()
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadProfile)?;
+            let mut out: Vec<[f64; 3]> = Vec::new();
+            for seg in segments {
+                let sid = seg.as_reference().ok_or(GeometryError::BadProfile)?;
+                let sinst = step.get(sid).ok_or(GeometryError::MissingInstance(sid))?;
+                if sinst.keyword != "IFCCOMPOSITECURVESEGMENT"
+                    && sinst.keyword != "IFCREPARAMETRISEDCOMPOSITECURVESEGMENT"
+                {
+                    return Err(GeometryError::Unsupported(sinst.keyword.clone()));
+                }
+                let same_sense = match sinst.args.get(1).and_then(Value::as_enum) {
+                    Some("T") => true,
+                    Some("F") => false,
+                    _ => return Err(GeometryError::BadProfile),
+                };
+                let parent_id = sinst
+                    .args
+                    .get(2)
+                    .and_then(Value::as_reference)
+                    .ok_or(GeometryError::BadProfile)?;
+                let mut pts = curve_points_3d(step, parent_id, depth + 1)?;
+                if !same_sense {
+                    pts.reverse();
+                }
+                for p in pts {
+                    push_point_3d(&mut out, p);
+                }
+            }
+            if out.len() < 2 {
+                return Err(GeometryError::BadProfile);
+            }
+            Ok(out)
+        }
+        "IFCINDEXEDPOLYCURVE" => {
+            let points_id = inst
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadProfile)?;
+            let pts = cartesian_point_list_3d_rows(step, points_id)?;
+            let resolve = |v: &Value| -> Result<[f64; 3], GeometryError> {
+                let raw = v.as_integer().ok_or(GeometryError::IndexOutOfRange)?;
+                if raw < 1 || raw as usize > pts.len() {
+                    return Err(GeometryError::IndexOutOfRange);
+                }
+                Ok(pts[(raw - 1) as usize])
+            };
+            match inst.args.get(1) {
+                None | Some(Value::Unset) => Ok(pts),
+                Some(Value::List(segments)) => {
+                    let mut out: Vec<[f64; 3]> = Vec::new();
+                    for seg in segments {
+                        let (kw, sargs) = seg.as_typed().ok_or(GeometryError::BadProfile)?;
+                        let idxs = sargs
+                            .first()
+                            .and_then(Value::as_list)
+                            .ok_or(GeometryError::BadProfile)?;
+                        match kw {
+                            "IFCLINEINDEX" => {
+                                for v in idxs {
+                                    push_point_3d(&mut out, resolve(v)?);
+                                }
+                            }
+                            "IFCARCINDEX" => {
+                                if idxs.len() != 3 {
+                                    return Err(GeometryError::BadProfile);
+                                }
+                                let a = resolve(&idxs[0])?;
+                                let b = resolve(&idxs[1])?;
+                                let c = resolve(&idxs[2])?;
+                                for p in three_point_arc_3d(a, b, c)? {
+                                    push_point_3d(&mut out, p);
+                                }
+                            }
+                            other => {
+                                return Err(GeometryError::Unsupported(other.to_string()));
+                            }
+                        }
+                    }
+                    Ok(out)
+                }
+                Some(_) => Err(GeometryError::BadProfile),
+            }
+        }
+        other => Err(GeometryError::Unsupported(other.to_string())),
+    }
+}
+
+/// Append `p` to a 3-D point run, skipping coincident repeats.
+fn push_point_3d(out: &mut Vec<[f64; 3]>, p: [f64; 3]) {
+    if let Some(last) = out.last() {
+        let scale = last.iter().fold(1.0f64, |m, c| m.max(c.abs()));
+        if (last[0] - p[0]).abs() <= 1e-9 * scale
+            && (last[1] - p[1]).abs() <= 1e-9 * scale
+            && (last[2] - p[2]).abs() <= 1e-9 * scale
+        {
+            return;
+        }
+    }
+    out.push(p);
+}
+
+/// `IfcTrimmedCurve` over a 3-D conic basis (the swept-disk directrix
+/// case). Cartesian trims are inverted through the conic frame,
+/// parameter trims scaled by the model plane-angle unit;
+/// `SenseAgreement` / `MasterRepresentation` as in the 2-D evaluator.
+fn trimmed_curve_points_3d(
+    step: &StepFile,
+    args: &[Value],
+) -> Result<Vec<[f64; 3]>, GeometryError> {
+    let basis_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let basis = step
+        .get(basis_id)
+        .ok_or(GeometryError::MissingInstance(basis_id))?;
+    if basis.keyword != "IFCCIRCLE" && basis.keyword != "IFCELLIPSE" {
+        return Err(GeometryError::Unsupported(basis.keyword.clone()));
+    }
+    let conic = conic_3d(step, &basis.keyword, &basis.args)?;
+    let trim1 = trim_select(step, args.get(1))?;
+    let trim2 = trim_select(step, args.get(2))?;
+    let sense = match args.get(3).and_then(Value::as_enum) {
+        Some("T") => true,
+        Some("F") => false,
+        _ => return Err(GeometryError::BadProfile),
+    };
+    let master = args
+        .get(4)
+        .and_then(Value::as_enum)
+        .unwrap_or("UNSPECIFIED");
+    let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+    let angle_of = |trim: &TrimSelect| -> Result<f64, GeometryError> {
+        let by_param = trim.param.map(|p| p * angle_scale);
+        let by_point = trim.point.map(|p| conic.param_of(p));
+        match master {
+            "PARAMETER" => by_param.or(by_point),
+            _ => by_point.or(by_param),
+        }
+        .ok_or(GeometryError::BadProfile)
+    };
+    let u1 = angle_of(&trim1)?;
+    let u2 = angle_of(&trim2)?;
+    let two_pi = 2.0 * core::f64::consts::PI;
+    let mut sweep = if sense {
+        (u2 - u1).rem_euclid(two_pi)
+    } else {
+        (u1 - u2).rem_euclid(two_pi)
+    };
+    if sweep < 1e-12 {
+        sweep = two_pi;
+    }
+    let segments = ((CIRCLE_SEGMENTS as f64 * sweep / two_pi).ceil() as usize).max(1);
+    let dir = if sense { 1.0 } else { -1.0 };
+    Ok((0..=segments)
+        .map(|i| conic.point_at(u1 + dir * sweep * (i as f64) / (segments as f64)))
+        .collect())
+}
+
+/// The circular arc through three 3-D points (start, on-arc mid, end):
+/// the 2-D three-point construction carried out in the plane of the
+/// triangle.
+fn three_point_arc_3d(
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+) -> Result<Vec<[f64; 3]>, GeometryError> {
+    let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+    let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+    let n = normalise(cross_raw(ab, ac)).ok_or(GeometryError::BadProfile)?;
+    let u = normalise(ab).ok_or(GeometryError::BadProfile)?;
+    let v = cross_raw(n, u);
+    let project = |p: [f64; 3]| -> [f64; 2] {
+        let d = [p[0] - a[0], p[1] - a[1], p[2] - a[2]];
+        [dot_raw(d, u), dot_raw(d, v)]
+    };
+    let arc = three_point_arc(project(a), project(b), project(c))?;
+    Ok(arc
+        .into_iter()
+        .map(|[x, y]| {
+            [
+                a[0] + x * u[0] + y * v[0],
+                a[1] + x * u[1] + y * v[1],
+                a[2] + x * u[2] + y * v[2],
+            ]
+        })
+        .collect())
+}
+
+/// The rows of an `IfcCartesianPointList3D` (`CoordList : LIST OF LIST
+/// [3:3]`), tolerating 2-D rows by zero-padding Z.
+fn cartesian_point_list_3d_rows(step: &StepFile, id: u64) -> Result<Vec<[f64; 3]>, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCCARTESIANPOINTLIST3D" && inst.keyword != "IFCCARTESIANPOINTLIST2D" {
+        return Err(GeometryError::BadProfile);
+    }
+    let rows = inst
+        .args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let comps = row.as_list().ok_or(GeometryError::BadCoordinate)?;
+        if comps.len() < 2 || comps.len() > 3 {
+            return Err(GeometryError::BadCoordinate);
+        }
+        let mut p = [0.0f64; 3];
+        for (i, c) in comps.iter().enumerate() {
+            p[i] = c.as_number().ok_or(GeometryError::BadCoordinate)?;
+        }
+        out.push(p);
+    }
+    Ok(out)
 }
 
 // =====================================================================
@@ -5280,6 +5899,195 @@ mod tests {
         );
         let m = mesh_from_shape_representation(&f, 4).unwrap();
         assert_eq!(m.triangle_count(), 2);
+    }
+
+    /// Area of the inscribed CIRCLE_SEGMENTS-gon of a radius-`r`
+    /// circle: (n/2)·r²·sin(2π/n).
+    fn disk_polygon_area(r: f64) -> f64 {
+        24.0 * r * r * (core::f64::consts::PI / 24.0).sin()
+    }
+
+    #[test]
+    fn swept_disk_straight_pipe_exact_volume() {
+        // A solid rod: disk radius 1 swept along a straight 5-unit
+        // polyline directrix → a 48-gon prism, volume A₄₈·5.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((0.,0.,5.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCSWEPTDISKSOLID(#3,1.,$,$,$);",
+        );
+        let m = tessellate_item(&f, 4).unwrap();
+        assert_closed(&m);
+        let want = disk_polygon_area(1.0) * 5.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        // Every wall vertex is at distance 1 from the axis.
+        for p in &m.positions {
+            let d = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!((d - 1.0).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn swept_disk_hollow_pipe_annular_volume() {
+        // InnerRadius present → a hollow pipe with annular caps:
+        // volume (A₄₈(R) − A₄₈(r))·L, wall vertices on both radii.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((0.,0.,5.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCSWEPTDISKSOLID(#3,1.,0.6,$,$);",
+        );
+        let m = tessellate_item(&f, 4).unwrap();
+        assert_closed(&m);
+        let want = (disk_polygon_area(1.0) - disk_polygon_area(0.6)) * 5.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        for p in &m.positions {
+            let d = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!((d - 1.0).abs() < 1e-9 || (d - 0.6).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn swept_disk_circle_directrix_wraps_torus() {
+        // A full IfcCircle directrix (R = 5 about the world Z axis)
+        // wraps closed — no end caps — into a torus of volume
+        // ≈ 2π²·R·r² (within tessellation shrinkage).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCCIRCLE(#2,5.);\n\
+             #4=IFCSWEPTDISKSOLID(#3,1.,$,$,$);",
+        );
+        let m = tessellate_item(&f, 4).unwrap();
+        assert_closed(&m);
+        let analytic = 2.0 * core::f64::consts::PI.powi(2) * 5.0;
+        let v = m.signed_volume();
+        assert!(v > 0.0 && (v - analytic).abs() < 0.02 * analytic, "{v}");
+        // Torus membership: every ring lies on a mitre plane between
+        // two 48-gon path chords, so the distance from the R = 5
+        // circle is between r and r/cos(π/48) (the mitre stretch).
+        let stretch = 1.0 / (core::f64::consts::PI / 48.0).cos();
+        for p in &m.positions {
+            let ring = (((p[0] * p[0] + p[1] * p[1]).sqrt() - 5.0).powi(2) + p[2] * p[2]).sqrt();
+            assert!(
+                ring >= 1.0 - 1e-9 && ring <= stretch + 1e-9,
+                "{p:?} ring {ring}"
+            );
+        }
+    }
+
+    #[test]
+    fn swept_disk_three_point_arc_directrix() {
+        // The digest's hollow-pipe example: a 3-D IfcArcIndex directrix
+        // through (0,0,0)–(500,0,300)–(1000,0,0), outer 50 / inner 45.
+        // The circumcircle has centre (500,0,−800/3), radius √321111.…
+        // and the swept volume is annulus-area × arc-length (Pappus)
+        // within tessellation tolerance.
+        let f = parse(
+            "#10=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(500.,0.,300.),(1000.,0.,0.)));\n\
+             #11=IFCINDEXEDPOLYCURVE(#10,(IFCARCINDEX((1,2,3))),$);\n\
+             #20=IFCSWEPTDISKSOLID(#11,50.,45.,$,$);",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_closed(&m);
+        // Circumcircle of the three points (exact): centre z0 solves
+        // 500² + z0² = (300 − z0)² → z0 = −800/3.
+        let z0 = -800.0 / 3.0;
+        let rc = (500.0f64.powi(2) + z0 * z0).sqrt();
+        let half_angle = (500.0 / (-z0)).atan();
+        let arc_len = rc * 2.0 * half_angle;
+        let analytic = core::f64::consts::PI * (50.0f64.powi(2) - 45.0f64.powi(2)) * arc_len;
+        let v = m.signed_volume();
+        assert!(
+            v > 0.0 && (v - analytic).abs() < 0.02 * analytic,
+            "{v} vs {analytic}"
+        );
+    }
+
+    #[test]
+    fn swept_disk_trimmed_conic_params_quarter() {
+        // StartParam/EndParam on a full-circle directrix trim the sweep
+        // to the parameter range (conic angle): a quarter of the R = 10
+        // ring, end-capped, volume ≈ A(r)·(π/2·10).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCCIRCLE(#2,10.);\n\
+             #4=IFCSWEPTDISKSOLID(#3,1.,$,0.,1.5707963267948966);",
+        );
+        let m = tessellate_item(&f, 4).unwrap();
+        assert_closed(&m);
+        let analytic = core::f64::consts::PI * (core::f64::consts::PI / 2.0) * 10.0;
+        let v = m.signed_volume();
+        assert!(
+            v > 0.0 && (v - analytic).abs() < 0.02 * analytic,
+            "{v} vs {analytic}"
+        );
+        // The sweep stays in the first quadrant (x, y ≥ −r).
+        assert!(m
+            .positions
+            .iter()
+            .all(|p| p[0] >= -1.0 - 1e-9 && p[1] >= -1.0 - 1e-9));
+    }
+
+    #[test]
+    fn swept_disk_polygonal_mitres_corner_exactly() {
+        // IfcSweptDiskSolidPolygonal: a right-angle polyline directrix.
+        // The corner ring is the exact cylinder∩mitre-plane ellipse
+        // (the transported ring stretched by 1/cos(45°) in the bend
+        // plane), so each leg is an obliquely-cut prism through the
+        // corner point and the volume is EXACTLY area × total length.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((5.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((5.,5.,0.));\n\
+             #4=IFCPOLYLINE((#1,#2,#3));\n\
+             #5=IFCSWEPTDISKSOLIDPOLYGONAL(#4,0.5,$,$,$,$);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        assert_closed(&m);
+        let want = disk_polygon_area(0.5) * 10.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn clipped_swept_disk_first_operand() {
+        // An IfcSweptDiskSolid as the FIRST operand of a clipping
+        // (accepted per the digest despite the schema's DISC/DISK WHERE
+        // typo): the straight rod is halved by the z = 2.5 plane.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((0.,0.,5.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCSWEPTDISKSOLID(#3,1.,$,$,$);\n\
+             #5=IFCCARTESIANPOINT((0.,0.,2.5));\n\
+             #6=IFCAXIS2PLACEMENT3D(#5,$,$);\n\
+             #7=IFCPLANE(#6);\n\
+             #8=IFCHALFSPACESOLID(#7,.F.);\n\
+             #9=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#4,#8);",
+        );
+        let m = tessellate_item(&f, 9).unwrap();
+        assert_closed(&m);
+        let want = disk_polygon_area(1.0) * 2.5;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        assert!(m.positions.iter().all(|p| p[2] <= 2.5 + 1e-9));
     }
 
     #[test]

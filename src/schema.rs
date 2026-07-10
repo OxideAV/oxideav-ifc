@@ -505,6 +505,76 @@ pub const SCHEMA: &[EntitySchema] = &[
         attrs: chain!(&["Position", "Radius"]),
     },
     EntitySchema {
+        keyword: "IFCELLIPSE",
+        kind: EntityKind::Geometry,
+        // IfcConic(Position) + IfcEllipse(SemiAxis1, SemiAxis2).
+        attrs: chain!(&["Position", "SemiAxis1", "SemiAxis2"]),
+    },
+    EntitySchema {
+        keyword: "IFCLINE",
+        kind: EntityKind::Geometry,
+        // IfcLine(Pnt, Dir).
+        attrs: chain!(&["Pnt", "Dir"]),
+    },
+    EntitySchema {
+        keyword: "IFCVECTOR",
+        kind: EntityKind::Geometry,
+        // IfcVector(Orientation, Magnitude).
+        attrs: chain!(&["Orientation", "Magnitude"]),
+    },
+    EntitySchema {
+        keyword: "IFCTRIMMEDCURVE",
+        kind: EntityKind::Geometry,
+        // IfcBoundedCurve adds nothing; IfcTrimmedCurve(BasisCurve,
+        // Trim1, Trim2, SenseAgreement, MasterRepresentation).
+        attrs: chain!(&[
+            "BasisCurve",
+            "Trim1",
+            "Trim2",
+            "SenseAgreement",
+            "MasterRepresentation"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCCOMPOSITECURVE",
+        kind: EntityKind::Geometry,
+        // IfcCompositeCurve(Segments, SelfIntersect).
+        attrs: chain!(&["Segments", "SelfIntersect"]),
+    },
+    EntitySchema {
+        keyword: "IFCCOMPOSITECURVESEGMENT",
+        kind: EntityKind::Geometry,
+        // IfcSegment(Transition) + IfcCompositeCurveSegment(SameSense,
+        // ParentCurve).
+        attrs: chain!(&["Transition", "SameSense", "ParentCurve"]),
+    },
+    EntitySchema {
+        keyword: "IFCSWEPTDISKSOLID",
+        kind: EntityKind::Geometry,
+        // IfcSweptDiskSolid(Directrix, Radius, InnerRadius, StartParam,
+        // EndParam).
+        attrs: chain!(&[
+            "Directrix",
+            "Radius",
+            "InnerRadius",
+            "StartParam",
+            "EndParam"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCSWEPTDISKSOLIDPOLYGONAL",
+        kind: EntityKind::Geometry,
+        // IfcSweptDiskSolid(5) + IfcSweptDiskSolidPolygonal(FilletRadius).
+        attrs: chain!(&[
+            "Directrix",
+            "Radius",
+            "InnerRadius",
+            "StartParam",
+            "EndParam",
+            "FilletRadius"
+        ]),
+    },
+    EntitySchema {
         keyword: "IFCARBITRARYPROFILEDEFWITHVOIDS",
         kind: EntityKind::Geometry,
         // IfcArbitraryClosedProfileDef(3) +

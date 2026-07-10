@@ -6,6 +6,38 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (swept-disk solids): `tessellate_item` now sweeps
+  `IfcSweptDiskSolid` / `IfcSweptDiskSolidPolygonal` (`Directrix`,
+  `Radius`, `InnerRadius`, `StartParam`, `EndParam`) into a watertight
+  tube per the staged swept-disk digest — pipes, rods, railings,
+  reinforcement bars.
+  - 3-D directrix evaluation (`curve_points_3d`): `IfcPolyline`,
+    `IfcIndexedPolyCurve` over `IfcCartesianPointList3D` with
+    `IfcLineIndex` and three-point `IfcArcIndex` segments (the 2-D
+    circumcircle construction carried out in the plane of the three
+    points), `IfcTrimmedCurve` over a 3-D conic, full `IfcCircle` /
+    `IfcEllipse`, and `IfcCompositeCurve` chains. `StartParam` /
+    `EndParam` are honoured on a full-conic directrix (conic angle in
+    the model plane-angle unit); a closed directrix (first ≈ last
+    point) wraps seamlessly with no end caps.
+  - Ring frames by parallel transport (the minimal rotation carrying
+    each tangent to the next — no twist), with **exact elliptical mitre
+    junctions**: at each path corner the ring plane is the mitre
+    (bisector-normal) plane and the transported ring is stretched by
+    1/cos(half-bend) within the bend plane, so a mitred polyline tube's
+    volume is exactly cross-section-area × path-length. Solid rods get
+    fan caps, `InnerRadius` pipes annular caps + a reversed inner wall.
+  - 7 new tests: straight rod and hollow pipe (exact 48-gon volumes +
+    radius membership), full-circle directrix torus (closed, volume
+    within tessellation bounds, mitre-aware membership band), the
+    digest's 3-D arc-directrix hollow pipe against Pappus, quarter-arc
+    `StartParam`/`EndParam` trim, exact right-angle mitre volume, and a
+    swept-disk first operand of an `IfcBooleanClippingResult`
+    (documenting the schema's DISC/DISK WHERE-literal typo — the WHERE
+    is deliberately not enforced). Phase-2 typed entries for
+    `IfcSweptDiskSolid(Polygonal)`, `IfcTrimmedCurve`,
+    `IfcCompositeCurve(Segment)`, `IfcEllipse`, `IfcLine`, `IfcVector`.
+
 - Phase 3 (arcs + trimmed curves): profile boundary curves now cover
   the arc family per the staged arcs/trimmed-curves digest.
   - `IfcTrimmedCurve` over an `IfcCircle` / `IfcEllipse` / `IfcLine`
