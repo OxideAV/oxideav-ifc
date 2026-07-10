@@ -113,6 +113,15 @@
 //! at path corners, end caps on open paths and seamless wrap on closed
 //! ones — pipes, rods and rebar mesh watertight.
 //!
+//! The **CSG primitives** (`IfcBlock`, `IfcRectangularPyramid`,
+//! `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcSphere`)
+//! mesh with their per-primitive anchoring (block/pyramid by base
+//! corner, cone on its base centre, cylinder and sphere centred), and
+//! `IfcCsgSolid` evaluates its tree root. Any Boolean DIFFERENCE /
+//! INTERSECTION whose tool tessellates to a closed **convex** mesh
+//! (a primitive, an extruded convex profile, …) carves through the
+//! same plane-splitting path as the half-space family.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
 //! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), the named
@@ -255,6 +264,25 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         "IFCREVOLVEDAREASOLID" => revolved_area_solid(step, &inst.args),
         // Swept disk solid: a disk / annulus swept along a 3-D directrix.
         "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => swept_disk_solid(step, &inst.args),
+        // Parametric CSG primitives (swept-disk digest §3) and the CSG
+        // tree root wrapper.
+        "IFCBLOCK"
+        | "IFCRECTANGULARPYRAMID"
+        | "IFCRIGHTCIRCULARCONE"
+        | "IFCRIGHTCIRCULARCYLINDER"
+        | "IFCSPHERE" => csg_primitive(step, &inst.keyword, &inst.args),
+        "IFCCSGSOLID" => {
+            // IfcCsgSolid(TreeRootExpression : IfcCsgSelect).
+            if depth >= MAX_MAP_DEPTH {
+                return Err(GeometryError::Unsupported("IFCCSGSOLID".to_string()));
+            }
+            let root = inst
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            tessellate_item_depth(step, root, depth + 1)
+        }
         // Mapped item: instance a source representation under a Cartesian
         // transformation operator.
         "IFCMAPPEDITEM" => mapped_item(step, &inst.args, depth),
@@ -344,10 +372,21 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
                     }
                     Ok(mesh)
                 }
-                // Tool is not a half-space solid: mesh–mesh subtraction
-                // is a later slice — emit the base boundary as authored
-                // (visible rather than dropped).
-                None => Ok(base),
+                // A solid tool: carve when it tessellates to a closed
+                // CONVEX mesh (an extruded convex profile, a CSG
+                // primitive, …) — a convex polyhedron is the
+                // intersection of its face half-spaces, so the same
+                // plane-splitting path applies. A non-convex (or
+                // unsupported) tool falls back to the base boundary as
+                // authored — visible rather than dropped; general
+                // mesh–mesh CSG is a later slice.
+                None => match tessellate_item_depth(step, second, depth + 1) {
+                    Ok(tool) => match convex_region_of_mesh(&tool) {
+                        Some(region) => Ok(subtract_convex_region(&base, &region)),
+                        None => Ok(base),
+                    },
+                    Err(_) => Ok(base),
+                },
             }
         }
         "INTERSECTION" => {
@@ -359,9 +398,21 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
                 Some(regions) if regions.len() == 1 => {
                     Ok(intersect_convex_region(&base, &regions[0]))
                 }
-                _ => Err(GeometryError::Unsupported(
+                Some(_) => Err(GeometryError::Unsupported(
                     "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
                 )),
+                // A closed convex solid tool intersects the same way.
+                None => {
+                    let region = tessellate_item_depth(step, second, depth + 1)
+                        .ok()
+                        .and_then(|tool| convex_region_of_mesh(&tool));
+                    match region {
+                        Some(region) => Ok(intersect_convex_region(&base, &region)),
+                        None => Err(GeometryError::Unsupported(
+                            "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
+                        )),
+                    }
+                }
             }
         }
         _ => Err(GeometryError::BadCoordinates),
@@ -1006,6 +1057,288 @@ fn intersect_convex_region(mesh: &TriMesh, region: &ConvexRegion) -> TriMesh {
         remainder = inside;
     }
     remainder
+}
+
+/// If `mesh` is a **closed convex** solid with outward winding, return
+/// it as a convex plane region (its deduplicated face planes);
+/// otherwise `None`.
+///
+/// This is what lets an arbitrary solid tool (an extruded convex
+/// profile, a CSG primitive) drive the same plane-splitting Boolean
+/// path as the half-space family: a convex polyhedron IS the
+/// intersection of its face half-spaces. Closedness is required so an
+/// open sheet is never mistaken for a solid; convexity is verified by
+/// checking every vertex against every candidate plane.
+fn convex_region_of_mesh(mesh: &TriMesh) -> Option<ConvexRegion> {
+    if mesh.is_empty() {
+        return None;
+    }
+    // Closedness: every directed edge balanced by its reverse.
+    let mut net: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+    for t in &mesh.triangles {
+        for i in 0..3 {
+            let a = t[i];
+            let b = t[(i + 1) % 3];
+            if a < b {
+                *net.entry((a, b)).or_insert(0) += 1;
+            } else {
+                *net.entry((b, a)).or_insert(0) -= 1;
+            }
+        }
+    }
+    if net.values().any(|&n| n != 0) {
+        return None;
+    }
+    let scale = mesh
+        .positions
+        .iter()
+        .map(|p| p[0].abs().max(p[1].abs()).max(p[2].abs()))
+        .fold(1.0f64, f64::max);
+    let eps = 1e-7 * scale;
+    let mut planes: ConvexRegion = Vec::new();
+    for t in &mesh.triangles {
+        let a = mesh.positions[t[0] as usize];
+        let b = mesh.positions[t[1] as usize];
+        let c = mesh.positions[t[2] as usize];
+        let n = cross_raw(
+            [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+            [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+        );
+        let Some(n) = normalise(n) else {
+            continue; // degenerate sliver: no plane information
+        };
+        // Skip near-duplicates (coplanar face fans).
+        let dup = planes
+            .iter()
+            .any(|p| dot_raw(p.normal, n) > 1.0 - 1e-9 && p.signed_distance(a).abs() <= eps);
+        if !dup {
+            planes.push(Plane {
+                point: a,
+                normal: n,
+            });
+        }
+    }
+    if planes.len() < 4 {
+        return None; // a closed solid needs at least a tetrahedron
+    }
+    // Convexity + outward orientation: every vertex on/behind every
+    // face plane.
+    for plane in &planes {
+        for &p in &mesh.positions {
+            if plane.signed_distance(p) > eps {
+                return None;
+            }
+        }
+    }
+    Some(planes)
+}
+
+// =====================================================================
+// CSG primitives — IfcCsgPrimitive3D family (swept-disk digest §3)
+//
+// Each primitive carries a Position IfcAxis2Placement3D (attribute 0)
+// and is anchored at the placement origin per the digest's table:
+// IfcBlock / IfcRectangularPyramid by a base CORNER growing +x/+y/+z,
+// IfcRightCircularCone standing on its base-circle centre,
+// IfcRightCircularCylinder CENTRED (axis z ∈ [−H/2, +H/2]), IfcSphere
+// centred. Circular sections use CIRCLE_SEGMENTS; the sphere uses
+// CIRCLE_SEGMENTS slices × SPHERE_STACKS latitude bands.
+// =====================================================================
+
+/// Latitude bands of the tessellated `IfcSphere`.
+const SPHERE_STACKS: usize = 24;
+
+fn csg_primitive(step: &StepFile, keyword: &str, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let num = |i: usize| -> Result<f64, GeometryError> {
+        let v = args
+            .get(i)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadCoordinate)?;
+        if v <= 0.0 {
+            return Err(GeometryError::BadProfile);
+        }
+        Ok(v)
+    };
+    let mut mesh = match keyword {
+        "IFCBLOCK" => {
+            // (Position, XLength, YLength, ZLength): corner at origin.
+            let (x, y, z) = (num(1)?, num(2)?, num(3)?);
+            box_mesh([0.0, 0.0, 0.0], [x, y, z])
+        }
+        "IFCRECTANGULARPYRAMID" => {
+            // (Position, XLength, YLength, Height): base corner at the
+            // origin in the xy-plane, apex over the base centre.
+            let (x, y, h) = (num(1)?, num(2)?, num(3)?);
+            let apex = 4u32;
+            TriMesh {
+                positions: vec![
+                    [0.0, 0.0, 0.0],
+                    [x, 0.0, 0.0],
+                    [x, y, 0.0],
+                    [0.0, y, 0.0],
+                    [x / 2.0, y / 2.0, h],
+                ],
+                triangles: vec![
+                    // Base (faces −z).
+                    [0, 2, 1],
+                    [0, 3, 2],
+                    // Sides (outward).
+                    [0, 1, apex],
+                    [1, 2, apex],
+                    [2, 3, apex],
+                    [3, 0, apex],
+                ],
+            }
+        }
+        "IFCRIGHTCIRCULARCONE" => {
+            // (Position, Height, BottomRadius): base-circle centre at
+            // the origin, apex at +z.
+            let (h, r) = (num(1)?, num(2)?);
+            let n = CIRCLE_SEGMENTS as u32;
+            let mut positions: Vec<[f64; 3]> = ellipse_ring(r, r)
+                .into_iter()
+                .map(|[x, y]| [x, y, 0.0])
+                .collect();
+            positions.push([0.0, 0.0, h]); // apex
+            let apex = n;
+            let mut triangles = Vec::with_capacity(2 * CIRCLE_SEGMENTS);
+            for k in 0..n {
+                let k1 = (k + 1) % n;
+                triangles.push([k, k1, apex]); // side, outward
+            }
+            for k in 1..(n - 1) {
+                triangles.push([0, k + 1, k]); // base, faces −z
+            }
+            TriMesh {
+                positions,
+                triangles,
+            }
+        }
+        "IFCRIGHTCIRCULARCYLINDER" => {
+            // (Position, Height, Radius): CENTRED on the origin, axis
+            // along z from −H/2 to +H/2.
+            let (h, r) = (num(1)?, num(2)?);
+            let n = CIRCLE_SEGMENTS as u32;
+            let ring = ellipse_ring(r, r);
+            let mut positions: Vec<[f64; 3]> =
+                ring.iter().map(|&[x, y]| [x, y, -h / 2.0]).collect();
+            positions.extend(ring.iter().map(|&[x, y]| [x, y, h / 2.0]));
+            let mut triangles = Vec::with_capacity(4 * CIRCLE_SEGMENTS);
+            for k in 0..n {
+                let k1 = (k + 1) % n;
+                triangles.push([k, k1, n + k1]); // wall
+                triangles.push([k, n + k1, n + k]);
+            }
+            for k in 1..(n - 1) {
+                triangles.push([0, k + 1, k]); // bottom, faces −z
+                triangles.push([n, n + k, n + k + 1]); // top, faces +z
+            }
+            TriMesh {
+                positions,
+                triangles,
+            }
+        }
+        "IFCSPHERE" => {
+            // (Position, Radius): centred on the origin.
+            let r = num(1)?;
+            sphere_mesh(r)
+        }
+        _ => unreachable!("dispatch covers the primitive keywords"),
+    };
+    // Position : IfcAxis2Placement3D (attribute 0) re-places the
+    // primitive; `$` leaves it in local space.
+    if let Some(pos_id) = args.first().and_then(Value::as_reference) {
+        let xform = axis2_placement_3d(step, pos_id)?;
+        mesh.transform(&xform);
+    }
+    Ok(mesh)
+}
+
+/// An axis-aligned box mesh from `min` to `max`, outward winding.
+fn box_mesh(min: [f64; 3], max: [f64; 3]) -> TriMesh {
+    let p = |x: usize, y: usize, z: usize| {
+        [
+            if x == 0 { min[0] } else { max[0] },
+            if y == 0 { min[1] } else { max[1] },
+            if z == 0 { min[2] } else { max[2] },
+        ]
+    };
+    // Vertex k encodes (x, y, z) bits: k = x + 2y + 4z.
+    let positions = vec![
+        p(0, 0, 0),
+        p(1, 0, 0),
+        p(0, 1, 0),
+        p(1, 1, 0),
+        p(0, 0, 1),
+        p(1, 0, 1),
+        p(0, 1, 1),
+        p(1, 1, 1),
+    ];
+    let quads: [[u32; 4]; 6] = [
+        [0, 2, 3, 1], // z = min, faces −z
+        [4, 5, 7, 6], // z = max, faces +z
+        [0, 1, 5, 4], // y = min, faces −y
+        [2, 6, 7, 3], // y = max, faces +y
+        [0, 4, 6, 2], // x = min, faces −x
+        [1, 3, 7, 5], // x = max, faces +x
+    ];
+    let mut triangles = Vec::with_capacity(12);
+    for q in quads {
+        triangles.push([q[0], q[1], q[2]]);
+        triangles.push([q[0], q[2], q[3]]);
+    }
+    TriMesh {
+        positions,
+        triangles,
+    }
+}
+
+/// A latitude/longitude sphere of radius `r` about the origin:
+/// `SPHERE_STACKS` bands × `CIRCLE_SEGMENTS` slices, pole fans.
+fn sphere_mesh(r: f64) -> TriMesh {
+    use core::f64::consts::PI;
+    let slices = CIRCLE_SEGMENTS;
+    let stacks = SPHERE_STACKS;
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity((stacks - 1) * slices + 2);
+    // Interior latitude rings (excluding the poles).
+    for s in 1..stacks {
+        let phi = -PI / 2.0 + PI * (s as f64) / (stacks as f64);
+        let (rc, z) = (r * phi.cos(), r * phi.sin());
+        for k in 0..slices {
+            let theta = 2.0 * PI * (k as f64) / (slices as f64);
+            positions.push([rc * theta.cos(), rc * theta.sin(), z]);
+        }
+    }
+    let south = positions.len() as u32;
+    positions.push([0.0, 0.0, -r]);
+    let north = positions.len() as u32;
+    positions.push([0.0, 0.0, r]);
+
+    let n = slices as u32;
+    let ring = |s: usize, k: u32| -> u32 { ((s - 1) as u32) * n + (k % n) };
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    // South pole fan (ring 1 winds CCW seen from +z; the fan must face
+    // −z / outward below).
+    for k in 0..n {
+        triangles.push([south, ring(1, k + 1), ring(1, k)]);
+    }
+    // Latitude bands.
+    for s in 1..(stacks - 1) {
+        for k in 0..n {
+            let (a, b) = (ring(s, k), ring(s, k + 1));
+            let (c, d) = (ring(s + 1, k), ring(s + 1, k + 1));
+            triangles.push([a, b, d]);
+            triangles.push([a, d, c]);
+        }
+    }
+    // North pole fan.
+    for k in 0..n {
+        triangles.push([north, ring(stacks - 1, k), ring(stacks - 1, k + 1)]);
+    }
+    TriMesh {
+        positions,
+        triangles,
+    }
 }
 
 /// Tessellate every supported item of an `IfcShapeRepresentation`,
@@ -5845,18 +6178,212 @@ mod tests {
     }
 
     #[test]
-    fn difference_with_non_halfspace_tool_emits_first_operand() {
-        // Mesh–mesh subtraction is a later slice: a solid tool leaves
-        // the base boundary as authored.
+    fn difference_with_nonconvex_tool_emits_first_operand() {
+        // Mesh–mesh subtraction with a NON-convex tool is a later
+        // slice: an L-profile prism tool leaves the base as authored.
         let f = parse(
             "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
              #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);\n\
-             #4=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#3);",
+             #10=IFCCARTESIANPOINT((0.,0.));\n\
+             #11=IFCCARTESIANPOINT((2.,0.));\n\
+             #12=IFCCARTESIANPOINT((2.,1.));\n\
+             #13=IFCCARTESIANPOINT((1.,1.));\n\
+             #14=IFCCARTESIANPOINT((1.,2.));\n\
+             #15=IFCCARTESIANPOINT((0.,2.));\n\
+             #16=IFCPOLYLINE((#10,#11,#12,#13,#14,#15,#10));\n\
+             #17=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#16);\n\
+             #18=IFCEXTRUDEDAREASOLID(#17,$,#2,1.);\n\
+             #4=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#18);",
         );
         let m = tessellate_item(&f, 4).unwrap();
         let plain = tessellate_item(&f, 3).unwrap();
         assert_eq!(m, plain);
+    }
+
+    #[test]
+    fn difference_with_convex_extruded_tool_carves_opening() {
+        // A 10×2×3 wall minus an extruded circular tool (radius 0.5,
+        // through the full height): the opening genuinely carves —
+        // volume 60 − A₄₈(0.5)·3, exactly.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,10.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,3.);\n\
+             #4=IFCCIRCLEPROFILEDEF(.AREA.,$,$,0.5);\n\
+             #5=IFCCARTESIANPOINT((0.,0.,-1.));\n\
+             #6=IFCAXIS2PLACEMENT3D(#5,$,$);\n\
+             #7=IFCEXTRUDEDAREASOLID(#4,#6,#2,5.);\n\
+             #8=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_closed(&m);
+        let want = 60.0 - disk_polygon_area(0.5) * 3.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn intersection_with_convex_tool_keeps_overlap() {
+        // Two unit boxes overlapping by 0.5 in x: INTERSECTION keeps
+        // exactly the 0.5·1·1 overlap.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);\n\
+             #4=IFCCARTESIANPOINT((0.5,0.,0.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCEXTRUDEDAREASOLID(#1,#5,#2,1.);\n\
+             #7=IFCBOOLEANRESULT(.INTERSECTION.,#3,#6);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 0.5).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m
+            .positions
+            .iter()
+            .all(|p| p[0] >= -1e-9 && p[0] <= 0.5 + 1e-9));
+    }
+
+    #[test]
+    fn csg_block_anchored_at_corner() {
+        // IfcBlock grows from its placement origin into +x/+y/+z
+        // (digest §3.1: corner anchoring, NOT centred).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((10.,20.,30.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCBLOCK(#2,2.,3.,4.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 24.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        for (axis, (lo, hi)) in [(0, (10.0, 12.0)), (1, (20.0, 23.0)), (2, (30.0, 34.0))] {
+            let min = m.positions.iter().map(|p| p[axis]).fold(f64::MAX, f64::min);
+            let max = m.positions.iter().map(|p| p[axis]).fold(f64::MIN, f64::max);
+            assert!((min - lo).abs() < 1e-9 && (max - hi).abs() < 1e-9);
+        }
+    }
+
+    #[test]
+    fn csg_pyramid_base_corner_apex_centred() {
+        // IfcRectangularPyramid: base corner at the origin, apex over
+        // the base centre at Height; volume X·Y·H/3.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCRECTANGULARPYRAMID(#2,3.,2.,4.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 8.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m.positions.contains(&[1.5, 1.0, 4.0]));
+    }
+
+    #[test]
+    fn csg_cone_stands_on_base() {
+        // IfcRightCircularCone: base-circle centre at the origin, apex
+        // at z = Height; volume A₄₈(R)·H/3.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCRIGHTCIRCULARCONE(#2,6.,2.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_closed(&m);
+        let want = disk_polygon_area(2.0) * 2.0; // A·H/3, H = 6
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        assert!(m.positions.contains(&[0.0, 0.0, 6.0]));
+        assert!(m.positions.iter().all(|p| p[2] >= -1e-9));
+    }
+
+    #[test]
+    fn csg_cylinder_is_centred_on_axis() {
+        // IfcRightCircularCylinder: CENTRED — z ∈ [−H/2, +H/2]
+        // (digest §3.1 calls out the corner-vs-centre inconsistency).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCRIGHTCIRCULARCYLINDER(#2,4.,1.5);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_closed(&m);
+        let want = disk_polygon_area(1.5) * 4.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        let zmin = m.positions.iter().map(|p| p[2]).fold(f64::MAX, f64::min);
+        let zmax = m.positions.iter().map(|p| p[2]).fold(f64::MIN, f64::max);
+        assert!((zmin + 2.0).abs() < 1e-9 && (zmax - 2.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn csg_sphere_centred_volume() {
+        // IfcSphere: centred; the 24×48 lat-long tessellation carries
+        // ≈ 99% of (4/3)πR³, watertight.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCSPHERE(#2,2.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_closed(&m);
+        let analytic = 4.0 / 3.0 * core::f64::consts::PI * 8.0;
+        let v = m.signed_volume();
+        assert!(v > 0.98 * analytic && v < analytic, "{v} vs {analytic}");
+        // Every vertex on the sphere.
+        for p in &m.positions {
+            let d = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            assert!((d - 2.0).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn csg_solid_evaluates_boolean_tree() {
+        // IfcCsgSolid wraps a CSG tree root: a cylinder notched by a
+        // corner-anchored block (the digest's §3.2 example shape).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCRIGHTCIRCULARCYLINDER(#2,10.,3.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,3.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCBLOCK(#5,20.,20.,20.);\n\
+             #7=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#6);\n\
+             #8=IFCCSGSOLID(#7);",
+        );
+        // The block corner-anchored at (0,0,3) covers the quadrant
+        // x, y ≥ 0 for z ≥ 3: the cylinder (z ∈ [−5, 5]) loses a
+        // quarter of its top 2 units.
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_closed(&m);
+        let a = disk_polygon_area(3.0);
+        let want = a * 10.0 - (a / 4.0) * 2.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
     }
 
     #[test]

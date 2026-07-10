@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (CSG primitives + convex Boolean tools): the parametric
+  `IfcCsgPrimitive3D` family now tessellates with the per-primitive
+  anchoring recorded in the swept-disk digest §3 (the EXPRESS schema
+  does not state it): `IfcBlock` and `IfcRectangularPyramid` anchored
+  by a base **corner** growing +x/+y/+z, `IfcRightCircularCone`
+  standing on its base-circle centre with the apex at +z,
+  `IfcRightCircularCylinder` **centred** (axis z ∈ [−H/2, +H/2]),
+  `IfcSphere` centred (48×24 lat-long). `IfcCsgSolid` evaluates its
+  `TreeRootExpression` (depth-capped).
+  - Boolean DIFFERENCE / INTERSECTION now carve with **any closed
+    convex solid tool**, not just half-spaces: the tool mesh's
+    deduplicated face planes form a convex region (verified closed +
+    convex) driving the same plane-splitting/re-capping path — so an
+    extruded circular/rectangular tool genuinely cuts an opening.
+    Non-convex tools keep the authored-boundary fallback (DIFFERENCE)
+    / `Unsupported` (INTERSECTION).
+  - 8 new exact-volume tests (corner-anchored block with placed bbox,
+    pyramid X·Y·H/3, cone on base, centred cylinder, sphere ≥ 98% of
+    (4/3)πR³ with on-sphere vertices, `IfcCsgSolid` block-notched
+    cylinder, extruded-circle wall opening 60 − A₄₈(0.5)·3, two-box
+    INTERSECTION overlap) + non-convex fallback regression. Phase-2
+    typed entries for the five primitives and `IfcCsgSolid`.
+
 - Phase 3 (swept-disk solids): `tessellate_item` now sweeps
   `IfcSweptDiskSolid` / `IfcSweptDiskSolidPolygonal` (`Directrix`,
   `Radius`, `InnerRadius`, `StartParam`, `EndParam`) into a watertight

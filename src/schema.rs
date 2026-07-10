@@ -661,6 +661,46 @@ pub const SCHEMA: &[EntitySchema] = &[
         ]),
     },
     EntitySchema {
+        keyword: "IFCCSGSOLID",
+        kind: EntityKind::Geometry,
+        // IfcCsgSolid(TreeRootExpression).
+        attrs: chain!(&["TreeRootExpression"]),
+    },
+    EntitySchema {
+        keyword: "IFCBLOCK",
+        kind: EntityKind::Geometry,
+        // IfcCsgPrimitive3D(Position) + IfcBlock(XLength, YLength,
+        // ZLength).
+        attrs: chain!(&["Position", "XLength", "YLength", "ZLength"]),
+    },
+    EntitySchema {
+        keyword: "IFCRECTANGULARPYRAMID",
+        kind: EntityKind::Geometry,
+        // IfcCsgPrimitive3D(Position) + IfcRectangularPyramid(XLength,
+        // YLength, Height).
+        attrs: chain!(&["Position", "XLength", "YLength", "Height"]),
+    },
+    EntitySchema {
+        keyword: "IFCRIGHTCIRCULARCONE",
+        kind: EntityKind::Geometry,
+        // IfcCsgPrimitive3D(Position) + IfcRightCircularCone(Height,
+        // BottomRadius).
+        attrs: chain!(&["Position", "Height", "BottomRadius"]),
+    },
+    EntitySchema {
+        keyword: "IFCRIGHTCIRCULARCYLINDER",
+        kind: EntityKind::Geometry,
+        // IfcCsgPrimitive3D(Position) + IfcRightCircularCylinder(Height,
+        // Radius).
+        attrs: chain!(&["Position", "Height", "Radius"]),
+    },
+    EntitySchema {
+        keyword: "IFCSPHERE",
+        kind: EntityKind::Geometry,
+        // IfcCsgPrimitive3D(Position) + IfcSphere(Radius).
+        attrs: chain!(&["Position", "Radius"]),
+    },
+    EntitySchema {
         keyword: "IFCBOXEDHALFSPACE",
         kind: EntityKind::Geometry,
         // IfcHalfSpaceSolid(2) + IfcBoxedHalfSpace(Enclosure).
