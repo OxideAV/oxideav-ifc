@@ -726,6 +726,79 @@ fn length_unit_metres(step: &StepFile, unit_id: u64) -> Option<f64> {
     }
 }
 
+/// Resolve the model's plane-angle unit to **radians per model angle
+/// unit** from the project's `IfcUnitAssignment` — the same §8.11.3.11
+/// walk as [`length_unit_scale`], selecting the `.PLANEANGLEUNIT.`
+/// entry instead.
+///
+/// Returns `Some(1.0)` for a plain SI radian, the conversion factor
+/// for an `IfcConversionBasedUnit` (a degree-based model yields
+/// ≈ 0.017453…), and `None` when the model declares no resolvable
+/// plane-angle unit (callers should then assume radians — the
+/// EXPRESS default parameterisation). Conic trim parameters
+/// (`IfcParameterValue` on an `IfcTrimmedCurve`) and revolution angles
+/// are expressed in this unit.
+pub fn plane_angle_unit_scale(step: &StepFile) -> Option<f64> {
+    let project = step
+        .instances
+        .values()
+        .find(|i| i.keyword == "IFCPROJECT")?;
+    let assignment_id = project.args.get(8).and_then(Value::as_reference)?;
+    let assignment = step.get(assignment_id)?;
+    if assignment.keyword != "IFCUNITASSIGNMENT" {
+        return None;
+    }
+    let units = assignment.args.first().and_then(Value::as_list)?;
+    for unit in units {
+        let Some(uid) = unit.as_reference() else {
+            continue;
+        };
+        if let Some(scale) = plane_angle_unit_radians(step, uid) {
+            return Some(scale);
+        }
+    }
+    None
+}
+
+/// Resolve one named unit to radians if it is a plane-angle unit.
+fn plane_angle_unit_radians(step: &StepFile, unit_id: u64) -> Option<f64> {
+    let unit = step.get(unit_id)?;
+    match unit.keyword.as_str() {
+        // IfcSIUnit(Dimensions [`*`], UnitType, Prefix, Name).
+        "IFCSIUNIT" => {
+            if unit.args.get(1).and_then(Value::as_enum) != Some("PLANEANGLEUNIT")
+                || unit.args.get(3).and_then(Value::as_enum) != Some("RADIAN")
+            {
+                return None;
+            }
+            Some(match unit.args.get(2).and_then(Value::as_enum) {
+                Some(prefix) => si_prefix_multiplier(prefix)?,
+                None => 1.0,
+            })
+        }
+        // IfcConversionBasedUnit(Dimensions, UnitType, Name,
+        // ConversionFactor : IfcMeasureWithUnit) — e.g. degree.
+        "IFCCONVERSIONBASEDUNIT" | "IFCCONVERSIONBASEDUNITWITHOFFSET" => {
+            if unit.args.get(1).and_then(Value::as_enum) != Some("PLANEANGLEUNIT") {
+                return None;
+            }
+            let mwu_id = unit.args.get(3).and_then(Value::as_reference)?;
+            let mwu = step.get(mwu_id)?;
+            if mwu.keyword != "IFCMEASUREWITHUNIT" {
+                return None;
+            }
+            let value = match mwu.args.first()? {
+                v @ (Value::Real(_) | Value::Integer(_)) => v.as_number()?,
+                Value::Typed { args, .. } => args.first().and_then(Value::as_number)?,
+                _ => return None,
+            };
+            let base_id = mwu.args.get(1).and_then(Value::as_reference)?;
+            Some(value * plane_angle_unit_radians(step, base_id)?)
+        }
+        _ => None,
+    }
+}
+
 /// SI prefix multiplier (ISO 80000 decimal prefixes, as enumerated by
 /// the EXPRESS `IfcSIPrefix` type).
 fn si_prefix_multiplier(prefix: &str) -> Option<f64> {

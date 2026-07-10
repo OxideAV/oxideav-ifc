@@ -99,10 +99,16 @@
 //! operand's boundary as authored; general mesh–mesh INTERSECTION is
 //! surfaced as `Unsupported`.
 //!
+//! Profile boundary curves cover arcs: `IfcTrimmedCurve` over a
+//! circle / ellipse / line basis (Cartesian and parameter trims,
+//! `SenseAgreement`, `MasterRepresentation`, model plane-angle unit
+//! applied to parameter trims), `IfcArcIndex` three-point arc segments
+//! in `IfcIndexedPolyCurve`, full `IfcEllipse` boundaries, and
+//! `IfcCompositeCurve` chains with per-segment `SameSense`.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
-//! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), trimmed /
-//! composite curves and `IfcArcIndex` poly-curve segments, the named
+//! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), the named
 //! parameterised profiles (I/L/T/U/Z/C shapes), advanced/curved breps
 //! (`IfcAdvancedBrep`, `IfcFaceSurface`), and general mesh–mesh
 //! boolean subtraction / intersection.
@@ -1861,11 +1867,13 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .ok_or(GeometryError::BadCoordinates)?;
     let (axis_origin, axis_dir) = axis1_placement(step, axis_id)?;
 
-    // Angle : IfcPlaneAngleMeasure (index 3), radians.
+    // Angle : IfcPlaneAngleMeasure (index 3), in the model's declared
+    // plane-angle unit (radians when the model declares none).
     let angle = args
         .get(3)
         .and_then(Value::as_number)
-        .ok_or(GeometryError::BadCoordinate)?;
+        .ok_or(GeometryError::BadCoordinate)?
+        * crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
     if angle == 0.0 {
         return Err(GeometryError::BadProfile);
     }
@@ -2361,14 +2369,36 @@ fn ellipse_ring(a: f64, b: f64) -> Vec<[f64; 2]> {
 /// Supported curve kinds:
 /// * `IfcPolyline` (`Points : LIST OF IfcCartesianPoint`, attribute
 ///   index 0) — the points as authored.
-/// * `IfcCircle` (`Position : IfcAxis2Placement` index 0, `Radius`
-///   index 1) — a full circle in the profile plane, approximated with
-///   [`CIRCLE_SEGMENTS`] segments about its 2-D `Position` (IFC4 EXPRESS
-///   `IfcCircle` / `IfcConic.Position`).
+/// * `IfcCircle` / `IfcEllipse` — a full conic in the profile plane,
+///   approximated with [`CIRCLE_SEGMENTS`] segments about its 2-D
+///   `Position` (IFC4 EXPRESS `IfcConic.Position`).
+/// * `IfcTrimmedCurve` over a conic or line basis — see
+///   [`trimmed_curve_points_2d`] (arcs digest §2).
+/// * `IfcIndexedPolyCurve` with `IfcLineIndex` and `IfcArcIndex`
+///   (three-point arc) segments (arcs digest §3).
+/// * `IfcCompositeCurve` of `IfcCompositeCurveSegment`s whose parent
+///   curves are any of the above, honouring per-segment `SameSense`.
 ///
-/// Trimmed / composite / indexed curves are surfaced as `Unsupported`
-/// with their keyword so callers can tell why.
+/// Other curve kinds are surfaced as `Unsupported` with their keyword
+/// so callers can tell why.
 fn curve_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryError> {
+    curve_points_2d_depth(step, id, 0)
+}
+
+/// Nesting bound for curve resolution (composite curves may nest other
+/// composite curves; a malformed self-referential graph must not
+/// recurse without end).
+const MAX_CURVE_DEPTH: usize = 32;
+
+/// Depth-tracked core of [`curve_points_2d`].
+fn curve_points_2d_depth(
+    step: &StepFile,
+    id: u64,
+    depth: usize,
+) -> Result<Vec<[f64; 2]>, GeometryError> {
+    if depth >= MAX_CURVE_DEPTH {
+        return Err(GeometryError::BadProfile);
+    }
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
     match inst.keyword.as_str() {
         "IFCPOLYLINE" => {
@@ -2384,63 +2414,74 @@ fn curve_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryEr
             }
             Ok(out)
         }
-        "IFCCIRCLE" => {
-            // IfcConic(Position) + IfcCircle(Radius).
-            let radius = inst
-                .args
-                .get(1)
-                .and_then(Value::as_number)
-                .ok_or(GeometryError::BadProfile)?;
-            if radius <= 0.0 {
-                return Err(GeometryError::BadProfile);
-            }
-            positioned_profile_ring(step, inst.args.first(), ellipse_ring(radius, radius))
+        "IFCCIRCLE" | "IFCELLIPSE" => {
+            // Full conic: IfcConic(Position) + Radius / SemiAxis1+2.
+            let conic = conic_2d(step, &inst.keyword, &inst.args)?;
+            Ok((0..CIRCLE_SEGMENTS)
+                .map(|i| {
+                    let u = 2.0 * core::f64::consts::PI * (i as f64) / (CIRCLE_SEGMENTS as f64);
+                    conic.point_at(u)
+                })
+                .collect())
         }
+        "IFCTRIMMEDCURVE" => trimmed_curve_points_2d(step, &inst.args),
+        "IFCCOMPOSITECURVE" => composite_curve_points_2d(step, &inst.args, depth),
         "IFCINDEXEDPOLYCURVE" => {
             // IfcIndexedPolyCurve(Points : IfcCartesianPointList,
             // Segments : OPTIONAL LIST OF IfcSegmentIndexSelect,
             // SelfIntersect). With `$` Segments the curve is the point
             // list in order (IFC4 EXPRESS `IfcIndexedPolyCurve`); with
             // Segments each `IfcLineIndex` contributes its indexed
-            // points in sequence (the EXPRESS `Consecutive` WHERE rule
-            // makes adjacent segments share their junction point, which
-            // is emitted once). `IfcArcIndex` segments are curved and
-            // remain `Unsupported` in this slice.
+            // points in sequence and each `IfcArcIndex` a three-point
+            // circular arc (arcs digest §3.1: start, on-arc mid,
+            // end — the circumscribed circle of the triangle). The
+            // EXPRESS `Consecutive` WHERE rule makes adjacent segments
+            // share their junction point, which is emitted once.
             let points_id = inst
                 .args
                 .first()
                 .and_then(Value::as_reference)
                 .ok_or(GeometryError::BadProfile)?;
             let pts = cartesian_point_list_2d(step, points_id)?;
+            let resolve = |v: &Value| -> Result<[f64; 2], GeometryError> {
+                let raw = v.as_integer().ok_or(GeometryError::IndexOutOfRange)?;
+                if raw < 1 || raw as usize > pts.len() {
+                    return Err(GeometryError::IndexOutOfRange);
+                }
+                Ok(pts[(raw - 1) as usize])
+            };
             match inst.args.get(1) {
                 None | Some(Value::Unset) => Ok(pts),
                 Some(Value::List(segments)) => {
                     let mut out: Vec<[f64; 2]> = Vec::new();
-                    let mut last_idx: Option<usize> = None;
                     for seg in segments {
                         let (kw, sargs) = seg.as_typed().ok_or(GeometryError::BadProfile)?;
-                        if kw != "IFCLINEINDEX" {
-                            // IFCARCINDEX (three-point arc) or another
-                            // SELECT member: not evaluated here.
-                            return Err(GeometryError::Unsupported(kw.to_string()));
-                        }
                         let idxs = sargs
                             .first()
                             .and_then(Value::as_list)
                             .ok_or(GeometryError::BadProfile)?;
-                        for v in idxs {
-                            let raw = v.as_integer().ok_or(GeometryError::IndexOutOfRange)?;
-                            if raw < 1 || raw as usize > pts.len() {
-                                return Err(GeometryError::IndexOutOfRange);
+                        match kw {
+                            "IFCLINEINDEX" => {
+                                for v in idxs {
+                                    push_point_2d(&mut out, resolve(v)?);
+                                }
                             }
-                            let idx = raw as usize;
-                            // Consecutive segments share their junction
-                            // point — skip the repeat.
-                            if last_idx == Some(idx) {
-                                continue;
+                            "IFCARCINDEX" => {
+                                // LIST [3:3]: start, mid (on the arc),
+                                // end.
+                                if idxs.len() != 3 {
+                                    return Err(GeometryError::BadProfile);
+                                }
+                                let a = resolve(&idxs[0])?;
+                                let b = resolve(&idxs[1])?;
+                                let c = resolve(&idxs[2])?;
+                                for p in three_point_arc(a, b, c)? {
+                                    push_point_2d(&mut out, p);
+                                }
                             }
-                            out.push(pts[idx - 1]);
-                            last_idx = Some(idx);
+                            other => {
+                                return Err(GeometryError::Unsupported(other.to_string()));
+                            }
                         }
                     }
                     Ok(out)
@@ -2450,6 +2491,334 @@ fn curve_points_2d(step: &StepFile, id: u64) -> Result<Vec<[f64; 2]>, GeometryEr
         }
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
+}
+
+/// Append `p` to a 2-D point run, skipping it when it coincides with
+/// the previous point (segment junctions are emitted once).
+fn push_point_2d(out: &mut Vec<[f64; 2]>, p: [f64; 2]) {
+    if let Some(last) = out.last() {
+        let scale = last[0].abs().max(last[1].abs()).max(1.0);
+        if (last[0] - p[0]).abs() <= 1e-9 * scale && (last[1] - p[1]).abs() <= 1e-9 * scale {
+            return;
+        }
+    }
+    out.push(p);
+}
+
+// =====================================================================
+// Arcs and trimmed curves (arcs digest §1–§2)
+//
+// A conic's natural parameter u traces
+//   circle:  C(u) = O + R (cos u · x̂ + sin u · ŷ)
+//   ellipse: C(u) = O + a·cos u · x̂ + b·sin u · ŷ
+// with u = 0 on +x̂ and increasing counter-clockwise. IfcTrimmedCurve
+// bounds a basis conic/line between Trim1 and Trim2, each given as a
+// Cartesian point and/or a parameter value, with MasterRepresentation
+// choosing the authoritative form and SenseAgreement the traversal
+// direction (TRUE = increasing u from Trim1 to Trim2).
+// =====================================================================
+
+/// A 2-D conic (circle when `a == b`): placement frame + semi-axes.
+struct Conic2D {
+    frame: Placement2D,
+    a: f64,
+    b: f64,
+}
+
+impl Conic2D {
+    /// The conic point at natural parameter `u` (radians).
+    fn point_at(&self, u: f64) -> [f64; 2] {
+        self.frame.apply([self.a * u.cos(), self.b * u.sin()])
+    }
+
+    /// The natural parameter of a point on (or near) the conic.
+    fn param_of(&self, p: [f64; 2]) -> f64 {
+        let dx = [p[0] - self.frame.origin[0], p[1] - self.frame.origin[1]];
+        let x = dx[0] * self.frame.x_axis[0] + dx[1] * self.frame.x_axis[1];
+        let y = dx[0] * self.frame.y_axis[0] + dx[1] * self.frame.y_axis[1];
+        (y / self.b).atan2(x / self.a)
+    }
+}
+
+/// Resolve an `IfcCircle` / `IfcEllipse` instance to its [`Conic2D`].
+fn conic_2d(step: &StepFile, keyword: &str, args: &[Value]) -> Result<Conic2D, GeometryError> {
+    let pos_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let frame = axis2_placement_2d(step, pos_id)?;
+    let (a, b) = if keyword == "IFCCIRCLE" {
+        let r = args
+            .get(1)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadProfile)?;
+        (r, r)
+    } else {
+        let a = args
+            .get(1)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadProfile)?;
+        let b = args
+            .get(2)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadProfile)?;
+        (a, b)
+    };
+    if a <= 0.0 || b <= 0.0 {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok(Conic2D { frame, a, b })
+}
+
+/// One parsed `IfcTrimmingSelect` set: at most one Cartesian point and
+/// one parameter value (EXPRESS `TrimValuesConsistent`).
+#[derive(Default)]
+struct TrimSelect {
+    point: Option<[f64; 3]>,
+    param: Option<f64>,
+}
+
+/// Parse one trim SET [1:2] (attribute value: an aggregate of
+/// `IfcCartesianPoint` references and/or `IFCPARAMETERVALUE(x)` typed
+/// parameters).
+fn trim_select(step: &StepFile, arg: Option<&Value>) -> Result<TrimSelect, GeometryError> {
+    let items = arg
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    let mut out = TrimSelect::default();
+    for item in items {
+        match item {
+            Value::Reference(_) => {
+                out.point = Some(cartesian_point(step, Some(item))?);
+            }
+            Value::Typed { keyword, args } if keyword == "IFCPARAMETERVALUE" => {
+                out.param = Some(
+                    args.first()
+                        .and_then(Value::as_number)
+                        .ok_or(GeometryError::BadProfile)?,
+                );
+            }
+            _ => return Err(GeometryError::BadProfile),
+        }
+    }
+    if out.point.is_none() && out.param.is_none() {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok(out)
+}
+
+/// Evaluate an `IfcTrimmedCurve(BasisCurve, Trim1, Trim2,
+/// SenseAgreement, MasterRepresentation)` into a 2-D point run
+/// (arcs digest §2).
+///
+/// * Conic basis (`IfcCircle` / `IfcEllipse`): the trims resolve to
+///   natural-parameter angles — a Cartesian trim through
+///   `Conic2D::param_of`, a parameter trim scaled by the model's
+///   plane-angle unit ([`plane_angle_unit_scale`], radians when the
+///   model declares none). `MasterRepresentation` picks the
+///   authoritative form when a trim carries both (`CARTESIAN` is
+///   preferred for `UNSPECIFIED` too — the parameter form is the
+///   degree/radian interoperability hazard the digest flags).
+///   `SenseAgreement` TRUE runs counter-clockwise (increasing u) from
+///   Trim1 to Trim2, FALSE clockwise; the endpoints never swap.
+/// * Line basis (`IfcLine(Pnt, Dir : IfcVector)`): Cartesian trims are
+///   used directly; parameter trims evaluate `Pnt + u·Magnitude·dir̂`.
+fn trimmed_curve_points_2d(
+    step: &StepFile,
+    args: &[Value],
+) -> Result<Vec<[f64; 2]>, GeometryError> {
+    let basis_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let basis = step
+        .get(basis_id)
+        .ok_or(GeometryError::MissingInstance(basis_id))?;
+    let trim1 = trim_select(step, args.get(1))?;
+    let trim2 = trim_select(step, args.get(2))?;
+    let sense = match args.get(3).and_then(Value::as_enum) {
+        Some("T") => true,
+        Some("F") => false,
+        _ => return Err(GeometryError::BadProfile),
+    };
+    let master = args
+        .get(4)
+        .and_then(Value::as_enum)
+        .unwrap_or("UNSPECIFIED");
+
+    match basis.keyword.as_str() {
+        "IFCCIRCLE" | "IFCELLIPSE" => {
+            let conic = conic_2d(step, &basis.keyword, &basis.args)?;
+            // Angle-unit scale for parameter trims (radians default).
+            let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+            let angle_of = |trim: &TrimSelect| -> Result<f64, GeometryError> {
+                let by_param = trim.param.map(|p| p * angle_scale);
+                let by_point = trim.point.map(|p| conic.param_of([p[0], p[1]]));
+                match master {
+                    "PARAMETER" => by_param.or(by_point),
+                    // CARTESIAN preference is also the UNSPECIFIED
+                    // fallback (digest §2.3).
+                    _ => by_point.or(by_param),
+                }
+                .ok_or(GeometryError::BadProfile)
+            };
+            let u1 = angle_of(&trim1)?;
+            let u2 = angle_of(&trim2)?;
+            let two_pi = 2.0 * core::f64::consts::PI;
+            // Swept angle in the traversal direction, in (0, 2π]
+            // (coincident trims read as a full turn).
+            let mut sweep = if sense {
+                (u2 - u1).rem_euclid(two_pi)
+            } else {
+                (u1 - u2).rem_euclid(two_pi)
+            };
+            if sweep < 1e-12 {
+                sweep = two_pi;
+            }
+            let segments = ((CIRCLE_SEGMENTS as f64 * sweep / two_pi).ceil() as usize).max(1);
+            let dir = if sense { 1.0 } else { -1.0 };
+            Ok((0..=segments)
+                .map(|i| conic.point_at(u1 + dir * sweep * (i as f64) / (segments as f64)))
+                .collect())
+        }
+        "IFCLINE" => {
+            // IfcLine(Pnt : IfcCartesianPoint, Dir : IfcVector);
+            // IfcVector(Orientation : IfcDirection, Magnitude).
+            let pnt = cartesian_point(step, basis.args.first())?;
+            let vec_id = basis
+                .args
+                .get(1)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadProfile)?;
+            let vec = step
+                .get(vec_id)
+                .ok_or(GeometryError::MissingInstance(vec_id))?;
+            if vec.keyword != "IFCVECTOR" {
+                return Err(GeometryError::BadProfile);
+            }
+            let orientation = direction(step, vec.args.first())?
+                .and_then(normalise)
+                .ok_or(GeometryError::BadProfile)?;
+            let magnitude = vec
+                .args
+                .get(1)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadProfile)?;
+            let point_of = |trim: &TrimSelect| -> Result<[f64; 2], GeometryError> {
+                let by_param = trim.param.map(|u| {
+                    [
+                        pnt[0] + u * magnitude * orientation[0],
+                        pnt[1] + u * magnitude * orientation[1],
+                    ]
+                });
+                let by_point = trim.point.map(|p| [p[0], p[1]]);
+                match master {
+                    "PARAMETER" => by_param.or(by_point),
+                    _ => by_point.or(by_param),
+                }
+                .ok_or(GeometryError::BadProfile)
+            };
+            Ok(vec![point_of(&trim1)?, point_of(&trim2)?])
+        }
+        // The EXPRESS NoTrimOfBoundedCurves WHERE rule forbids bounded
+        // bases; anything else (unsupported unbounded basis) surfaces.
+        other => Err(GeometryError::Unsupported(other.to_string())),
+    }
+}
+
+/// Evaluate an `IfcCompositeCurve(Segments, SelfIntersect)` into one
+/// 2-D point run: each `IfcCompositeCurveSegment(Transition, SameSense,
+/// ParentCurve)` contributes its parent's points — reversed when
+/// `SameSense` is FALSE — with shared junction points emitted once.
+fn composite_curve_points_2d(
+    step: &StepFile,
+    args: &[Value],
+    depth: usize,
+) -> Result<Vec<[f64; 2]>, GeometryError> {
+    let segments = args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    let mut out: Vec<[f64; 2]> = Vec::new();
+    for seg in segments {
+        let sid = seg.as_reference().ok_or(GeometryError::BadProfile)?;
+        let sinst = step.get(sid).ok_or(GeometryError::MissingInstance(sid))?;
+        // IfcCompositeCurveSegment (and the Reparametrised subtype,
+        // which appends ParamLength after these): Transition(0),
+        // SameSense(1), ParentCurve(2).
+        if sinst.keyword != "IFCCOMPOSITECURVESEGMENT"
+            && sinst.keyword != "IFCREPARAMETRISEDCOMPOSITECURVESEGMENT"
+        {
+            return Err(GeometryError::Unsupported(sinst.keyword.clone()));
+        }
+        let same_sense = match sinst.args.get(1).and_then(Value::as_enum) {
+            Some("T") => true,
+            Some("F") => false,
+            _ => return Err(GeometryError::BadProfile),
+        };
+        let parent_id = sinst
+            .args
+            .get(2)
+            .and_then(Value::as_reference)
+            .ok_or(GeometryError::BadProfile)?;
+        let mut pts = curve_points_2d_depth(step, parent_id, depth + 1)?;
+        if !same_sense {
+            pts.reverse();
+        }
+        for p in pts {
+            push_point_2d(&mut out, p);
+        }
+    }
+    if out.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok(out)
+}
+
+/// The circular arc through three 2-D points — start, a point ON the
+/// arc, end (arcs digest §3.1). The circle is the circumscribed circle
+/// of the triangle; the traversal direction is whichever of the two
+/// arcs from start to end passes through the middle point. Returns the
+/// tessellated run INCLUDING both endpoints; collinear input is an
+/// error (no finite circle).
+fn three_point_arc(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> Result<Vec<[f64; 2]>, GeometryError> {
+    // Circumcentre via the perpendicular-bisector linear system.
+    let d = 2.0 * (a[0] * (b[1] - c[1]) + b[0] * (c[1] - a[1]) + c[0] * (a[1] - b[1]));
+    let scale = [a, b, c]
+        .iter()
+        .map(|p| p[0].abs().max(p[1].abs()))
+        .fold(1.0f64, f64::max);
+    if d.abs() <= 1e-12 * scale * scale {
+        return Err(GeometryError::BadProfile);
+    }
+    let a2 = a[0] * a[0] + a[1] * a[1];
+    let b2 = b[0] * b[0] + b[1] * b[1];
+    let c2 = c[0] * c[0] + c[1] * c[1];
+    let centre = [
+        (a2 * (b[1] - c[1]) + b2 * (c[1] - a[1]) + c2 * (a[1] - b[1])) / d,
+        (a2 * (c[0] - b[0]) + b2 * (a[0] - c[0]) + c2 * (b[0] - a[0])) / d,
+    ];
+    let radius = ((a[0] - centre[0]).powi(2) + (a[1] - centre[1]).powi(2)).sqrt();
+    let angle_of = |p: [f64; 2]| (p[1] - centre[1]).atan2(p[0] - centre[0]);
+    let (ua, ub, uc) = (angle_of(a), angle_of(b), angle_of(c));
+    let two_pi = 2.0 * core::f64::consts::PI;
+    // Counter-clockwise angular distances from the start.
+    let ccw_b = (ub - ua).rem_euclid(two_pi);
+    let ccw_c = (uc - ua).rem_euclid(two_pi);
+    // The arc passes through the mid point: CCW when the mid comes
+    // before the end going counter-clockwise, else CW.
+    let (sweep, dir) = if ccw_b <= ccw_c {
+        (ccw_c, 1.0)
+    } else {
+        ((ua - uc).rem_euclid(two_pi), -1.0)
+    };
+    let segments = ((CIRCLE_SEGMENTS as f64 * sweep / two_pi).ceil() as usize).max(1);
+    Ok((0..=segments)
+        .map(|i| {
+            let u = ua + dir * sweep * (i as f64) / (segments as f64);
+            [centre[0] + radius * u.cos(), centre[1] + radius * u.sin()]
+        })
+        .collect())
 }
 
 /// Resolve an `IfcCartesianPointList2D` (`CoordList : LIST OF LIST
@@ -4301,9 +4670,13 @@ mod tests {
     }
 
     #[test]
-    fn indexed_polycurve_arc_segment_unsupported() {
-        // IfcArcIndex (a three-point arc segment) is not evaluated yet;
-        // the SELECT keyword is surfaced.
+    fn indexed_polycurve_arc_segment_tessellates() {
+        // IfcArcIndex (1,2,3) through (0,0)–(1,1)–(2,0) is the upper
+        // semicircle of the circle centred (1,0), radius 1 (arcs digest
+        // §3.1: the circumscribed circle through start / on-arc mid /
+        // end). Closed by the implicit chord, the profile is a half
+        // disc; its inscribed 24-segment polygon area is 12·sin(π/24),
+        // so the depth-1 extrusion has exactly that volume.
         let f = parse(
             "#1=IFCCARTESIANPOINTLIST2D(((0.,0.),(1.,1.),(2.,0.)));\n\
              #2=IFCINDEXEDPOLYCURVE(#1,(IFCARCINDEX((1,2,3))),.F.);\n\
@@ -4311,10 +4684,230 @@ mod tests {
              #4=IFCDIRECTION((0.,0.,1.));\n\
              #5=IFCEXTRUDEDAREASOLID(#3,$,#4,1.);",
         );
-        assert_eq!(
-            tessellate_item(&f, 5).unwrap_err(),
-            GeometryError::Unsupported("IFCARCINDEX".to_string())
+        let m = tessellate_item(&f, 5).unwrap();
+        assert_closed(&m);
+        let want = 12.0 * (core::f64::consts::PI / 24.0).sin();
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
         );
+        // Every arc vertex is at distance 1 from the arc centre (1,0).
+        for p in &m.positions {
+            if p[1] > 1e-9 {
+                let d = ((p[0] - 1.0).powi(2) + p[1] * p[1]).sqrt();
+                assert!((d - 1.0).abs() < 1e-9, "arc vertex {p:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn trimmed_circle_quarter_arc_parameter_trims() {
+        // Unit circle trimmed from u = 0 to u = π/2, SenseAgreement .T.
+        // (counter-clockwise): a quarter arc closed by its chord — the
+        // circular segment. 12-segment inscribed polygon area:
+        // 6·sin(π/24) − 1/2 (arc fan minus the chord triangle).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLE(#2,1.);\n\
+             #4=IFCTRIMMEDCURVE(#3,(IFCPARAMETERVALUE(0.)),(IFCPARAMETERVALUE(1.5707963267948966)),.T.,.PARAMETER.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        let want = 6.0 * (core::f64::consts::PI / 24.0).sin() - 0.5;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        // The quarter arc stays in the first quadrant.
+        assert!(m.positions.iter().all(|p| p[0] >= -1e-9 && p[1] >= -1e-9));
+    }
+
+    #[test]
+    fn trimmed_circle_sense_false_takes_long_way() {
+        // Same trims, SenseAgreement .F.: the arc runs CLOCKWISE from
+        // Trim1 to Trim2 — the 3π/2 long way through the lower half
+        // (digest §2.2: endpoints never swap, only the traversal
+        // sense). 36-segment polygon area: 18·sin(π/24) + 1/2.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLE(#2,1.);\n\
+             #4=IFCTRIMMEDCURVE(#3,(IFCPARAMETERVALUE(0.)),(IFCPARAMETERVALUE(1.5707963267948966)),.F.,.PARAMETER.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        let want = 18.0 * (core::f64::consts::PI / 24.0).sin() + 0.5;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        // The long arc dips through the bottom of the circle.
+        assert!(m.positions.iter().any(|p| p[1] < -0.99));
+    }
+
+    #[test]
+    fn trimmed_circle_cartesian_master_wins_over_parameter() {
+        // Each trim carries BOTH a Cartesian point and a parameter
+        // written in degrees (the interoperability hazard of digest
+        // §1); MasterRepresentation .CARTESIAN. must make the points
+        // authoritative, yielding the same quarter segment as the
+        // parameter-trim test.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLE(#2,1.);\n\
+             #10=IFCCARTESIANPOINT((1.,0.));\n\
+             #11=IFCCARTESIANPOINT((0.,1.));\n\
+             #4=IFCTRIMMEDCURVE(#3,(#10,IFCPARAMETERVALUE(0.)),(#11,IFCPARAMETERVALUE(90.)),.T.,.CARTESIAN.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        let want = 6.0 * (core::f64::consts::PI / 24.0).sin() - 0.5;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn trimmed_curve_degree_model_scales_parameters() {
+        // A model declaring a degree plane-angle unit
+        // (IfcConversionBasedUnit over the SI radian): parameter trims
+        // 0 → 90 with .PARAMETER. master must read as a quarter turn.
+        let f = parse(
+            "#100=IFCPROJECT('x',$,$,$,$,$,$,$,#101);\n\
+             #101=IFCUNITASSIGNMENT((#102));\n\
+             #102=IFCCONVERSIONBASEDUNIT(*,.PLANEANGLEUNIT.,'DEGREE',#103);\n\
+             #103=IFCMEASUREWITHUNIT(IFCPLANEANGLEMEASURE(0.017453292519943295),#104);\n\
+             #104=IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.);\n\
+             #1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCCIRCLE(#2,1.);\n\
+             #4=IFCTRIMMEDCURVE(#3,(IFCPARAMETERVALUE(0.)),(IFCPARAMETERVALUE(90.)),.T.,.PARAMETER.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        let want = 6.0 * (core::f64::consts::PI / 24.0).sin() - 0.5;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn trimmed_ellipse_quarter_by_cartesian_trims() {
+        // Ellipse a = 2, b = 1 trimmed from (2,0) to (0,1) counter-
+        // clockwise: the parameter of a Cartesian trim comes from
+        // atan2(y/b, x/a). Segment polygon area: 12·sin(π/24) − 1
+        // (elliptic fan minus the chord triangle of cross = 2).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCELLIPSE(#2,2.,1.);\n\
+             #10=IFCCARTESIANPOINT((2.,0.));\n\
+             #11=IFCCARTESIANPOINT((0.,1.));\n\
+             #4=IFCTRIMMEDCURVE(#3,(#10),(#11),.T.,.CARTESIAN.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        let want = 12.0 * (core::f64::consts::PI / 24.0).sin() - 1.0;
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn ellipse_full_outer_curve_profile() {
+        // A full IfcEllipse (a = 2, b = 1) as the profile outer curve:
+        // the inscribed 48-gon has area 48·sin(π/24) (≈ π·a·b).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT2D(#1,$);\n\
+             #3=IFCELLIPSE(#2,2.,1.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#3);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_closed(&m);
+        let want = 48.0 * (core::f64::consts::PI / 24.0).sin();
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        // Ellipse equation holds on the boundary.
+        for p in &m.positions {
+            let e = (p[0] / 2.0).powi(2) + p[1].powi(2);
+            assert!((e - 1.0).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn composite_curve_stadium_profile() {
+        // A stadium: two straight edges + two semicircular end caps as
+        // an IfcCompositeCurve of four segments. The third segment's
+        // polyline is authored REVERSED with SameSense .F. (digest:
+        // the segment contributes its parent's points in reverse).
+        // Area: 2×2 rectangle + two 24-segment half discs
+        // = 4 + 24·sin(π/24). Junction points are emitted once:
+        // 50 boundary vertices → 100 mesh vertices for the prism.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,-1.));\n\
+             #2=IFCCARTESIANPOINT((2.,-1.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCCARTESIANPOINT((2.,0.));\n\
+             #5=IFCAXIS2PLACEMENT2D(#4,$);\n\
+             #6=IFCCIRCLE(#5,1.);\n\
+             #7=IFCTRIMMEDCURVE(#6,(IFCPARAMETERVALUE(-1.5707963267948966)),(IFCPARAMETERVALUE(1.5707963267948966)),.T.,.PARAMETER.);\n\
+             #8=IFCCARTESIANPOINT((0.,1.));\n\
+             #9=IFCCARTESIANPOINT((2.,1.));\n\
+             #10=IFCPOLYLINE((#8,#9));\n\
+             #11=IFCCARTESIANPOINT((0.,0.));\n\
+             #12=IFCAXIS2PLACEMENT2D(#11,$);\n\
+             #13=IFCCIRCLE(#12,1.);\n\
+             #14=IFCTRIMMEDCURVE(#13,(IFCPARAMETERVALUE(1.5707963267948966)),(IFCPARAMETERVALUE(4.71238898038469)),.T.,.PARAMETER.);\n\
+             #20=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#3);\n\
+             #21=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#7);\n\
+             #22=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.F.,#10);\n\
+             #23=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#14);\n\
+             #24=IFCCOMPOSITECURVE((#20,#21,#22,#23),.F.);\n\
+             #25=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#24);\n\
+             #26=IFCDIRECTION((0.,0.,1.));\n\
+             #27=IFCEXTRUDEDAREASOLID(#25,$,#26,1.);",
+        );
+        let m = tessellate_item(&f, 27).unwrap();
+        assert_closed(&m);
+        let want = 4.0 + 24.0 * (core::f64::consts::PI / 24.0).sin();
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        assert_eq!(m.vertex_count(), 100);
     }
 
     #[test]

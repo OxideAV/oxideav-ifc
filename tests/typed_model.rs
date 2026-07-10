@@ -259,6 +259,46 @@ END-ISO-10303-21;
 }
 
 #[test]
+fn plane_angle_unit_scale_resolves_degree_and_radian() {
+    // A degree model resolves ≈ π/180 radians per unit; a bare SI
+    // radian resolves 1.0.
+    let text = b"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('u.ifc','2026-07-09T00:00:00',('a'),('o'),'p','s','auth');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.);
+#2=IFCMEASUREWITHUNIT(IFCPLANEANGLEMEASURE(0.017453292519943295),#1);
+#3=IFCCONVERSIONBASEDUNIT(*,.PLANEANGLEUNIT.,'DEGREE',#2);
+#4=IFCUNITASSIGNMENT((#3));
+#5=IFCPROJECT('x',$,$,$,$,$,$,$,#4);
+ENDSEC;
+END-ISO-10303-21;
+";
+    let f = parse_step(text).expect("parse");
+    let s = oxideav_ifc::plane_angle_unit_scale(&f).expect("scale");
+    assert!((s - core::f64::consts::PI / 180.0).abs() < 1e-12);
+
+    let text = b"ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('u.ifc','2026-07-09T00:00:00',('a'),('o'),'p','s','auth');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#1=IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.);
+#4=IFCUNITASSIGNMENT((#1));
+#5=IFCPROJECT('x',$,$,$,$,$,$,$,#4);
+ENDSEC;
+END-ISO-10303-21;
+";
+    let f = parse_step(text).expect("parse");
+    assert_eq!(oxideav_ifc::plane_angle_unit_scale(&f), Some(1.0));
+}
+
+#[test]
 fn model_without_units_has_no_length_scale() {
     let text = b"ISO-10303-21;
 HEADER;

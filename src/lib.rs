@@ -104,7 +104,8 @@ pub use parser::{
     parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
 };
 pub use schema::{
-    length_unit_scale, schema_of, EntityKind, EntitySchema, Model, SpatialKind, TypedEntity, SCHEMA,
+    length_unit_scale, plane_angle_unit_scale, schema_of, EntityKind, EntitySchema, Model,
+    SpatialKind, TypedEntity, SCHEMA,
 };
 pub use value::Value;
 

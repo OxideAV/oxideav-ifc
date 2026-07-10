@@ -6,6 +6,38 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (arcs + trimmed curves): profile boundary curves now cover
+  the arc family per the staged arcs/trimmed-curves digest.
+  - `IfcTrimmedCurve` over an `IfcCircle` / `IfcEllipse` / `IfcLine`
+    basis: Cartesian trims are inverted through the conic
+    parameterisation (`u` from `atan2(y/b, x/a)` in the conic frame),
+    parameter trims are scaled by the model's plane-angle unit, and
+    `MasterRepresentation` picks the authoritative form of a dual trim
+    (`CARTESIAN` preferred for `UNSPECIFIED` — the parameter form is
+    the digest's degree/radian interoperability hazard).
+    `SenseAgreement` TRUE runs counter-clockwise (increasing `u`) from
+    Trim1 to Trim2, FALSE clockwise; endpoints never swap. Arc
+    tessellation density is `CIRCLE_SEGMENTS`·(swept/2π), ≥ 1.
+  - `IfcArcIndex` (start / on-arc mid / end) segments of
+    `IfcIndexedPolyCurve` fit the circumscribed circle through the
+    three points, direction disambiguated by the mid point; junction
+    points between segments are emitted once (position-based, shared
+    with `IfcLineIndex` runs).
+  - `IfcCompositeCurve` of `IfcCompositeCurveSegment`s (incl. the
+    reparametrised subtype): each parent curve's points, reversed when
+    `SameSense` is FALSE, junctions deduplicated; nesting bounded by a
+    depth cap. Full `IfcEllipse` outer curves are also accepted.
+  - New public `plane_angle_unit_scale(&StepFile)` — radians per model
+    plane-angle unit, the `.PLANEANGLEUNIT.` analogue of
+    `length_unit_scale` (SI radian prefixes + conversion-based degree
+    chains). `IfcRevolvedAreaSolid.Angle` is now scaled by it too.
+  - 8 new tests with exact inscribed-polygon volume assertions
+    (three-point-arc half disc, quarter/long-way circle segments,
+    Cartesian-master override of degree-polluted dual trims, degree
+    model parameter trims, ellipse quarter segment, full-ellipse
+    profile, four-segment stadium composite with a reversed
+    `SameSense` segment) + a unit test for the degree/radian scale.
+
 - Phase 3 (half-space clipping): `IfcBooleanResult` /
   `IfcBooleanClippingResult` DIFFERENCE with a half-space tool now
   genuinely **carves** the first operand instead of emitting it as
