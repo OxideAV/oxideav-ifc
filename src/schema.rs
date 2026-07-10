@@ -591,6 +591,18 @@ pub const SCHEMA: &[EntitySchema] = &[
         ]),
     },
     EntitySchema {
+        keyword: "IFCBOXEDHALFSPACE",
+        kind: EntityKind::Geometry,
+        // IfcHalfSpaceSolid(2) + IfcBoxedHalfSpace(Enclosure).
+        attrs: chain!(&["BaseSurface", "AgreementFlag", "Enclosure"]),
+    },
+    EntitySchema {
+        keyword: "IFCBOUNDINGBOX",
+        kind: EntityKind::Geometry,
+        // IfcBoundingBox(Corner, XDim, YDim, ZDim).
+        attrs: chain!(&["Corner", "XDim", "YDim", "ZDim"]),
+    },
+    EntitySchema {
         keyword: "IFCPLANE",
         kind: EntityKind::Geometry,
         // IfcElementarySurface(Position); IfcPlane adds nothing.

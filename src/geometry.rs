@@ -88,18 +88,24 @@
 //!
 //! Boolean results (`IfcBooleanResult` / `IfcBooleanClippingResult`)
 //! compose at the surface-mesh level: UNION merges the operand
-//! boundaries; DIFFERENCE emits the first operand's boundary as
-//! authored (half-space carving is pending the
-//! `IfcHalfSpaceSolid.AgreementFlag` side-convention documentation);
-//! INTERSECTION is surfaced as `Unsupported`.
+//! boundaries; DIFFERENCE with a **half-space tool** genuinely carves —
+//! the first operand's closed mesh is split against the half-space's
+//! plane set (`IfcHalfSpaceSolid`, prism-restricted
+//! `IfcPolygonalBoundedHalfSpace`, box-restricted `IfcBoxedHalfSpace`)
+//! and every cut cross-section is re-capped watertight, per the
+//! `AgreementFlag` side convention of the half-space clipping digest;
+//! INTERSECTION with a plain/boxed half-space clips to the solid side.
+//! A non-half-space DIFFERENCE tool still falls back to the first
+//! operand's boundary as authored; general mesh–mesh INTERSECTION is
+//! surfaced as `Unsupported`.
 //!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
 //! rather than silently dropped): the other swept solids
 //! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), trimmed /
 //! composite curves and `IfcArcIndex` poly-curve segments, the named
 //! parameterised profiles (I/L/T/U/Z/C shapes), advanced/curved breps
-//! (`IfcAdvancedBrep`, `IfcFaceSurface`), boolean intersection, and
-//! actual boolean subtraction.
+//! (`IfcAdvancedBrep`, `IfcFaceSurface`), and general mesh–mesh
+//! boolean subtraction / intersection.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -134,6 +140,26 @@ impl TriMesh {
     /// `true` when the mesh carries no triangles.
     pub fn is_empty(&self) -> bool {
         self.triangles.is_empty()
+    }
+
+    /// Signed enclosed volume by the divergence theorem:
+    /// `Σ det(a, b, c) / 6` over the triangles.
+    ///
+    /// Positive for a watertight mesh whose triangles wind
+    /// counter-clockwise seen from outside (outward normals). Only
+    /// meaningful for closed meshes; internal coincident face pairs
+    /// with opposite winding cancel exactly, so a mesh assembled from
+    /// several capped closed pieces still reports the true total.
+    pub fn signed_volume(&self) -> f64 {
+        let mut six_v = 0.0;
+        for t in &self.triangles {
+            let a = self.positions[t[0] as usize];
+            let b = self.positions[t[1] as usize];
+            let c = self.positions[t[2] as usize];
+            six_v += a[0] * (b[1] * c[2] - b[2] * c[1]) - a[1] * (b[0] * c[2] - b[2] * c[0])
+                + a[2] * (b[0] * c[1] - b[1] * c[0]);
+        }
+        six_v / 6.0
     }
 }
 
@@ -237,14 +263,21 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
 // * UNION — the merged operand boundaries (a boundary superset of the
 //   regularised union; overlapping interior surface is kept, not
 //   dissolved).
-// * DIFFERENCE — the first operand's boundary as authored. The
-//   subtracted volume is NOT yet carved out: half-space clipping needs
-//   the IfcHalfSpaceSolid.AgreementFlag side convention, whose
-//   normative description is not in the staged documentation set. The
-//   un-clipped body is emitted (visible rather than dropped, matching
-//   the Brep `Voids` policy) until that lands.
-// * INTERSECTION — no boundary-level approximation is defensible;
-//   surfaced as Unsupported.
+// * DIFFERENCE — when the tool (second operand) is a half-space solid
+//   the subtracted region is genuinely carved: the first operand's
+//   mesh is split against the half-space's plane set and the cut
+//   cross-sections are re-capped (see `subtract_convex_region`). The
+//   half-space side convention is the AgreementFlag rule of the
+//   half-space digest §2: TRUE selects the negative side of the base
+//   plane as the solid (removed) region, FALSE the positive side.
+//   `IfcPolygonalBoundedHalfSpace` restricts the cut to the prism of
+//   its 2-D boundary polygon (digest §3, triangulated into convex
+//   prism pieces); `IfcBoxedHalfSpace` to its `Enclosure` box (§4).
+//   A tool that is not a half-space still falls back to emitting the
+//   first operand's boundary as authored (mesh–mesh CSG is a later
+//   slice).
+// * INTERSECTION — carved for half-space tools (the first operand
+//   clipped to the solid side); otherwise Unsupported.
 //
 // Operands may be any meshable solid, including nested boolean results
 // (clipping chains); recursion shares the mapped-item depth cap.
@@ -285,12 +318,679 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
                 (Err(e), _) | (_, Err(e)) => Err(e),
             }
         }
-        "DIFFERENCE" => tessellate_item_depth(step, first, depth + 1),
-        "INTERSECTION" => Err(GeometryError::Unsupported(
-            "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
-        )),
+        "DIFFERENCE" => {
+            let base = tessellate_item_depth(step, first, depth + 1)?;
+            match half_space_regions(step, second)? {
+                Some(regions) => {
+                    // A − (⋃ regions): subtract each convex piece in turn.
+                    let mut mesh = base;
+                    for region in &regions {
+                        mesh = subtract_convex_region(&mesh, region);
+                    }
+                    Ok(mesh)
+                }
+                // Tool is not a half-space solid: mesh–mesh subtraction
+                // is a later slice — emit the base boundary as authored
+                // (visible rather than dropped).
+                None => Ok(base),
+            }
+        }
+        "INTERSECTION" => {
+            let base = tessellate_item_depth(step, first, depth + 1)?;
+            match half_space_regions(step, second)? {
+                // A ∩ half-space is only defensible for a single convex
+                // region (the plain / boxed half-space); the polygonal
+                // union-of-prisms tool would need piecewise re-merge.
+                Some(regions) if regions.len() == 1 => {
+                    Ok(intersect_convex_region(&base, &regions[0]))
+                }
+                _ => Err(GeometryError::Unsupported(
+                    "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
+                )),
+            }
+        }
         _ => Err(GeometryError::BadCoordinates),
     }
+}
+
+// =====================================================================
+// Half-space solids → convex plane regions
+//
+// Digest: docs/3d/ifc/geometry-halfspace-clipping-digest.md.
+//
+// * IfcHalfSpaceSolid(BaseSurface, AgreementFlag): the solid is the
+//   region on one side of the (unbounded, planar) BaseSurface. With
+//   plane normal N and signed distance d = N·(p − Location):
+//   AgreementFlag TRUE → solid is d ≤ 0 (negative side), FALSE →
+//   d ≥ 0 (positive side).
+// * IfcPolygonalBoundedHalfSpace additionally intersects with the
+//   infinite prism of a closed 2-D boundary polygon swept along ±Z of
+//   its own Position placement. A non-convex polygon is ear-clipped
+//   into triangles; each triangle prism ∩ half-space is one convex
+//   piece and the whole tool is their union.
+// * IfcBoxedHalfSpace intersects with its Enclosure IfcBoundingBox
+//   (axis-aligned in the solid's coordinate space).
+//
+// A convex region is represented by its bounding planes with normals
+// pointing OUT of the region.
+// =====================================================================
+
+/// An oriented plane: a point on it plus a unit normal.
+#[derive(Debug, Clone, Copy)]
+struct Plane {
+    point: [f64; 3],
+    normal: [f64; 3],
+}
+
+impl Plane {
+    /// Signed distance of `p` from the plane (positive on the side the
+    /// normal points toward).
+    fn signed_distance(&self, p: [f64; 3]) -> f64 {
+        dot_raw(
+            self.normal,
+            [
+                p[0] - self.point[0],
+                p[1] - self.point[1],
+                p[2] - self.point[2],
+            ],
+        )
+    }
+}
+
+/// A convex point-set given as the intersection of half-spaces: the
+/// region where every plane's signed distance is ≤ 0 (normals point
+/// outward).
+type ConvexRegion = Vec<Plane>;
+
+/// Resolve a half-space solid instance to the union of convex regions
+/// it removes. Returns `Ok(None)` when the keyword is not a half-space
+/// solid at all (so the caller can fall back), and an error when it is
+/// one but malformed / resting on an unsupported base surface.
+fn half_space_regions(
+    step: &StepFile,
+    id: u64,
+) -> Result<Option<Vec<ConvexRegion>>, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    match inst.keyword.as_str() {
+        "IFCHALFSPACESOLID" => {
+            let plane = half_space_base_plane(step, &inst.args)?;
+            Ok(Some(vec![vec![plane]]))
+        }
+        "IFCBOXEDHALFSPACE" => {
+            // (BaseSurface, AgreementFlag, Enclosure : IfcBoundingBox).
+            let plane = half_space_base_plane(step, &inst.args)?;
+            let box_id = inst
+                .args
+                .get(2)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let mut region = bounding_box_planes(step, box_id)?;
+            region.push(plane);
+            Ok(Some(vec![region]))
+        }
+        "IFCPOLYGONALBOUNDEDHALFSPACE" => {
+            // (BaseSurface, AgreementFlag, Position, PolygonalBoundary).
+            let plane = half_space_base_plane(step, &inst.args)?;
+            let pos_id = inst
+                .args
+                .get(2)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let frame = axis2_placement_3d(step, pos_id)?;
+            let boundary_id = inst
+                .args
+                .get(3)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let mut ring = close_ring(curve_points_2d(step, boundary_id)?);
+            if ring.len() < 3 {
+                return Err(GeometryError::BadProfile);
+            }
+            make_ccw(&mut ring);
+            // Ear-clip the (possibly concave) boundary polygon; each
+            // triangle becomes one convex prism piece ∩ base half-space.
+            let tris = ear_clip(
+                ring.iter()
+                    .enumerate()
+                    .map(|(i, &p)| (i as u32, p))
+                    .collect(),
+            )?;
+            let mut regions = Vec::with_capacity(tris.len());
+            for [a, b, c] in tris {
+                let tri = [ring[a as usize], ring[b as usize], ring[c as usize]];
+                let mut region: ConvexRegion = Vec::with_capacity(4);
+                for i in 0..3 {
+                    let p = tri[i];
+                    let q = tri[(i + 1) % 3];
+                    // Outward 2-D edge normal of a CCW triangle
+                    // (interior on the left of p→q): (dy, −dx).
+                    let n2 = [q[1] - p[1], -(q[0] - p[0])];
+                    let n3 = [
+                        n2[0] * frame.cols[0][0] + n2[1] * frame.cols[1][0],
+                        n2[0] * frame.cols[0][1] + n2[1] * frame.cols[1][1],
+                        n2[0] * frame.cols[0][2] + n2[1] * frame.cols[1][2],
+                    ];
+                    let Some(n3) = normalise(n3) else {
+                        return Err(GeometryError::BadProfile);
+                    };
+                    region.push(Plane {
+                        point: frame.apply([p[0], p[1], 0.0]),
+                        normal: n3,
+                    });
+                }
+                region.push(plane);
+                regions.push(region);
+            }
+            Ok(Some(regions))
+        }
+        _ => Ok(None),
+    }
+}
+
+/// The base plane of a half-space, oriented so its normal points OUT of
+/// the solid (removed) region — i.e. the AgreementFlag applied.
+///
+/// AgreementFlag TRUE → solid is the negative side of the base-surface
+/// normal, so the outward normal of the removed region is +N; FALSE →
+/// solid is the positive side, outward normal −N (digest §2).
+fn half_space_base_plane(step: &StepFile, args: &[Value]) -> Result<Plane, GeometryError> {
+    let surface_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let agreement = match args.get(1).and_then(Value::as_enum) {
+        Some("T") => true,
+        Some("F") => false,
+        _ => return Err(GeometryError::BadCoordinates),
+    };
+    let surf = step
+        .get(surface_id)
+        .ok_or(GeometryError::MissingInstance(surface_id))?;
+    if surf.keyword != "IFCPLANE" {
+        // A non-planar base surface (cylindrical, …) is out of scope.
+        return Err(GeometryError::Unsupported(surf.keyword.clone()));
+    }
+    // IfcPlane(Position : IfcAxis2Placement3D): normal = placement Z.
+    let pos_id = surf
+        .args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let t = axis2_placement_3d(step, pos_id)?;
+    let n = t.cols[2];
+    Ok(Plane {
+        point: t.translation,
+        normal: if agreement { n } else { [-n[0], -n[1], -n[2]] },
+    })
+}
+
+/// The six outward planes of an `IfcBoundingBox(Corner, XDim, YDim,
+/// ZDim)` — axis-aligned from `Corner`, growing in +x/+y/+z.
+fn bounding_box_planes(step: &StepFile, id: u64) -> Result<ConvexRegion, GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCBOUNDINGBOX" {
+        return Err(GeometryError::BadCoordinates);
+    }
+    let corner = cartesian_point(step, inst.args.first())?;
+    let mut dims = [0.0f64; 3];
+    for (i, d) in dims.iter_mut().enumerate() {
+        *d = inst
+            .args
+            .get(1 + i)
+            .and_then(Value::as_number)
+            .ok_or(GeometryError::BadCoordinate)?;
+        if *d <= 0.0 {
+            return Err(GeometryError::BadCoordinate);
+        }
+    }
+    let far = [
+        corner[0] + dims[0],
+        corner[1] + dims[1],
+        corner[2] + dims[2],
+    ];
+    let mut planes = Vec::with_capacity(6);
+    for axis in 0..3 {
+        let mut n = [0.0; 3];
+        n[axis] = -1.0;
+        planes.push(Plane {
+            point: corner,
+            normal: n,
+        });
+        let mut n = [0.0; 3];
+        n[axis] = 1.0;
+        planes.push(Plane {
+            point: far,
+            normal: n,
+        });
+    }
+    Ok(planes)
+}
+
+// =====================================================================
+// Closed-mesh plane splitting with cut re-capping
+//
+// `split_mesh_by_plane` cuts a (closed, consistently wound) triangle
+// mesh along a plane into the positive-side and negative-side
+// sub-meshes, splitting crossing triangles and re-capping each side's
+// cut cross-section so both halves stay watertight. Triangles lying
+// entirely in the plane are dropped from both sides (the caps
+// regenerate the coverage each side actually needs).
+//
+// The cap is recovered topologically: after distribution, any directed
+// edge with no opposite partner whose endpoints both lie on the plane
+// is part of the cut boundary; the reversed boundary edges chain into
+// closed loops which are triangulated hole-aware (a cut through a
+// hollow body yields an annulus). This is plain computational geometry
+// layered under the digest's point-set semantics.
+// =====================================================================
+
+/// One side of a split under construction.
+struct SplitSide {
+    positions: Vec<[f64; 3]>,
+    triangles: Vec<[u32; 3]>,
+    /// Original vertex index → index in `positions`.
+    vertex_map: std::collections::HashMap<u32, u32>,
+    /// Canonical original edge (min, max) → interpolated cut vertex.
+    cut_map: std::collections::HashMap<(u32, u32), u32>,
+    /// Indices in `positions` lying on the split plane.
+    on_plane: std::collections::HashSet<u32>,
+}
+
+impl SplitSide {
+    fn new() -> Self {
+        Self {
+            positions: Vec::new(),
+            triangles: Vec::new(),
+            vertex_map: std::collections::HashMap::new(),
+            cut_map: std::collections::HashMap::new(),
+            on_plane: std::collections::HashSet::new(),
+        }
+    }
+
+    fn intern_vertex(&mut self, orig: u32, pos: [f64; 3], on_plane: bool) -> u32 {
+        if let Some(&idx) = self.vertex_map.get(&orig) {
+            return idx;
+        }
+        let idx = self.positions.len() as u32;
+        self.positions.push(pos);
+        self.vertex_map.insert(orig, idx);
+        if on_plane {
+            self.on_plane.insert(idx);
+        }
+        idx
+    }
+
+    fn intern_cut(&mut self, a: u32, b: u32, pos: [f64; 3]) -> u32 {
+        let key = (a.min(b), a.max(b));
+        if let Some(&idx) = self.cut_map.get(&key) {
+            return idx;
+        }
+        let idx = self.positions.len() as u32;
+        self.positions.push(pos);
+        self.cut_map.insert(key, idx);
+        self.on_plane.insert(idx);
+        idx
+    }
+}
+
+/// A clipped-polygon corner: an original vertex or an edge cut point.
+#[derive(Clone, Copy)]
+enum ClipVertex {
+    Orig(u32),
+    Cut(u32, u32),
+}
+
+/// Split `mesh` along `plane` into the (positive-side, negative-side)
+/// sub-meshes, each re-capped along the cut. See the section comment.
+fn split_mesh_by_plane(mesh: &TriMesh, plane: &Plane) -> (TriMesh, TriMesh) {
+    // Scale-relative snapping tolerance for "on the plane".
+    let scale = mesh
+        .positions
+        .iter()
+        .map(|p| p[0].abs().max(p[1].abs()).max(p[2].abs()))
+        .fold(1.0f64, f64::max);
+    let eps = 1e-9 * scale;
+
+    let dist: Vec<f64> = mesh
+        .positions
+        .iter()
+        .map(|&p| plane.signed_distance(p))
+        .collect();
+    let side_of = |v: u32| -> i8 {
+        let d = dist[v as usize];
+        if d > eps {
+            1
+        } else if d < -eps {
+            -1
+        } else {
+            0
+        }
+    };
+    let cut_point = |a: u32, b: u32| -> [f64; 3] {
+        // Canonical (min, max) evaluation so both windings of a shared
+        // edge produce the bit-identical intersection point.
+        let (a, b) = (a.min(b), a.max(b));
+        let (da, db) = (dist[a as usize], dist[b as usize]);
+        let t = da / (da - db);
+        let pa = mesh.positions[a as usize];
+        let pb = mesh.positions[b as usize];
+        [
+            pa[0] + t * (pb[0] - pa[0]),
+            pa[1] + t * (pb[1] - pa[1]),
+            pa[2] + t * (pb[2] - pa[2]),
+        ]
+    };
+
+    let mut pos_side = SplitSide::new();
+    let mut neg_side = SplitSide::new();
+
+    for tri in &mesh.triangles {
+        let signs = [side_of(tri[0]), side_of(tri[1]), side_of(tri[2])];
+        // Entirely in the plane: drop (each side's cap regenerates the
+        // coverage it needs, with the winding it needs).
+        if signs.iter().all(|&s| s == 0) {
+            continue;
+        }
+        for (side, sign) in [(&mut pos_side, 1i8), (&mut neg_side, -1i8)] {
+            // Sutherland–Hodgman: keep the sub-polygon where
+            // sign·distance ≥ 0 (on-plane vertices belong to both
+            // sides; strict crossings insert a cut vertex).
+            let mut poly: Vec<ClipVertex> = Vec::with_capacity(4);
+            for i in 0..3 {
+                let cur = tri[i];
+                let next = tri[(i + 1) % 3];
+                let (sc, sn) = (signs[i], signs[(i + 1) % 3]);
+                if sc * sign >= 0 {
+                    poly.push(ClipVertex::Orig(cur));
+                }
+                if sc * sn < 0 {
+                    poly.push(ClipVertex::Cut(cur, next));
+                }
+            }
+            if poly.len() < 3 {
+                continue;
+            }
+            // Degenerate slivers (e.g. an edge lying in the plane with
+            // the third vertex on the other side) resolve to < 3
+            // distinct corners; the length check above covers them
+            // because on-plane originals are emitted for both sides but
+            // cuts only for strict sign changes.
+            let ids: Vec<u32> = poly
+                .iter()
+                .map(|cv| match *cv {
+                    ClipVertex::Orig(v) => {
+                        side.intern_vertex(v, mesh.positions[v as usize], side_of(v) == 0)
+                    }
+                    ClipVertex::Cut(a, b) => side.intern_cut(a, b, cut_point(a, b)),
+                })
+                .collect();
+            for w in ids[1..].windows(2) {
+                side.triangles.push([ids[0], w[0], w[1]]);
+            }
+        }
+    }
+
+    // Each side's cap faces the removed material: −N for the
+    // positive-side mesh, +N for the negative-side mesh.
+    let n = plane.normal;
+    cap_cut_boundary(&mut pos_side, [-n[0], -n[1], -n[2]]);
+    cap_cut_boundary(&mut neg_side, n);
+
+    (
+        TriMesh {
+            positions: pos_side.positions,
+            triangles: pos_side.triangles,
+        },
+        TriMesh {
+            positions: neg_side.positions,
+            triangles: neg_side.triangles,
+        },
+    )
+}
+
+/// Close the cut cross-section of one split side: boundary edges whose
+/// endpoints lie on the split plane are chained into loops, reversed
+/// (a cap must traverse each boundary edge opposite to the surface
+/// triangles that own it) and triangulated hole-aware. `cap_normal`
+/// is the direction the finished cap must face (toward the removed
+/// material).
+///
+/// At a vertex shared by several boundary loops (a pinch point) the
+/// walk takes the most counter-clockwise available continuation in
+/// the cap plane ("leftmost turn"), which decomposes the boundary
+/// multigraph into non-crossing material-on-the-left loops — the cut
+/// boundary of a consistently wound surface is a 1-cycle (in-degree
+/// equals out-degree at every vertex), so every walk closes.
+///
+/// Best-effort by design: a walk that does not close (the input mesh
+/// was not watertight along the cut) is skipped rather than failing
+/// the whole split.
+fn cap_cut_boundary(side: &mut SplitSide, cap_normal: [f64; 3]) {
+    use std::collections::HashMap;
+    // Net traversal count per directed edge.
+    let mut net: HashMap<(u32, u32), i32> = HashMap::new();
+    for t in &side.triangles {
+        for i in 0..3 {
+            let a = t[i];
+            let b = t[(i + 1) % 3];
+            if a < b {
+                *net.entry((a, b)).or_insert(0) += 1;
+            } else {
+                *net.entry((b, a)).or_insert(0) -= 1;
+            }
+        }
+    }
+    // Boundary edges on the plane, REVERSED for the cap winding.
+    let mut adj: HashMap<u32, Vec<u32>> = HashMap::new();
+    let mut edge_count = 0usize;
+    for (&(a, b), &n) in &net {
+        if n == 0 || !side.on_plane.contains(&a) || !side.on_plane.contains(&b) {
+            continue;
+        }
+        // n > 0: surface traverses a→b (n times); cap runs b→a.
+        let (from, to, count) = if n > 0 { (b, a, n) } else { (a, b, -n) };
+        for _ in 0..count {
+            adj.entry(from).or_default().push(to);
+            edge_count += 1;
+        }
+    }
+    if adj.is_empty() {
+        return;
+    }
+    // 2-D projection basis in the cap plane, oriented so that
+    // counter-clockwise in (u, v) is counter-clockwise about the cap
+    // normal.
+    let Some(n) = normalise(cap_normal) else {
+        return;
+    };
+    let seed = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let d = dot_raw(seed, n);
+    let u = normalise([seed[0] - d * n[0], seed[1] - d * n[1], seed[2] - d * n[2]])
+        .unwrap_or([1.0, 0.0, 0.0]);
+    let v = cross_raw(n, u);
+    let project = |i: u32| -> [f64; 2] {
+        let p = side.positions[i as usize];
+        [dot_raw(p, u), dot_raw(p, v)]
+    };
+    // Deterministic ordering (HashMap iteration order must not
+    // influence the output): walk from the lowest vertex index first
+    // and keep each adjacency list sorted.
+    let mut starts: Vec<u32> = adj.keys().copied().collect();
+    starts.sort_unstable();
+    for list in adj.values_mut() {
+        list.sort_unstable();
+    }
+    // Chain directed edges into closed loops, taking the leftmost
+    // (most counter-clockwise) turn at every multi-way vertex.
+    let mut loops: Vec<Vec<u32>> = Vec::new();
+    for start in starts {
+        // Multiple loops can start at the same vertex; drain them.
+        while let Some(first_choices) = adj.get_mut(&start) {
+            if first_choices.is_empty() {
+                break;
+            }
+            let first = first_choices.remove(0);
+            let mut ring = vec![start];
+            let mut prev = start;
+            let mut cur = first;
+            let mut closed = cur == start;
+            let mut steps = 0usize;
+            while !closed {
+                ring.push(cur);
+                steps += 1;
+                if steps > edge_count + 1 {
+                    break; // defensive: malformed multigraph
+                }
+                let Some(candidates) = adj.get_mut(&cur) else {
+                    break; // open chain: abandon this walk
+                };
+                if candidates.is_empty() {
+                    break;
+                }
+                // Leftmost turn: maximise the CCW angle from the
+                // incoming direction to each candidate direction.
+                let p_prev = project(prev);
+                let p_cur = project(cur);
+                let d_in = [p_cur[0] - p_prev[0], p_cur[1] - p_prev[1]];
+                let mut best_i = 0usize;
+                let mut best_angle = f64::NEG_INFINITY;
+                for (i, &cand) in candidates.iter().enumerate() {
+                    let p_cand = project(cand);
+                    let d_out = [p_cand[0] - p_cur[0], p_cand[1] - p_cur[1]];
+                    let cross = d_in[0] * d_out[1] - d_in[1] * d_out[0];
+                    let dot = d_in[0] * d_out[0] + d_in[1] * d_out[1];
+                    let angle = cross.atan2(dot);
+                    if angle > best_angle {
+                        best_angle = angle;
+                        best_i = i;
+                    }
+                }
+                let next = candidates.remove(best_i);
+                prev = cur;
+                cur = next;
+                closed = cur == start;
+            }
+            if closed && ring.len() >= 3 {
+                loops.push(ring);
+            }
+        }
+    }
+    if loops.is_empty() {
+        return;
+    }
+    // Group loops into outer boundaries and their holes via each loop's
+    // Newell normal (outers wind with the cap, holes against it).
+    let as_pairs = |ring: &[u32]| -> Vec<(u32, [f64; 3])> {
+        ring.iter()
+            .map(|&i| (i, side.positions[i as usize]))
+            .collect()
+    };
+    let mut outers: Vec<Vec<(u32, [f64; 3])>> = Vec::new();
+    let mut holes: Vec<Vec<(u32, [f64; 3])>> = Vec::new();
+    for ring in &loops {
+        let pts: Vec<[f64; 3]> = ring.iter().map(|&i| side.positions[i as usize]).collect();
+        let nn = newell_normal(&pts);
+        if dot_raw(nn, n) >= 0.0 {
+            outers.push(as_pairs(ring));
+        } else {
+            holes.push(as_pairs(ring));
+        }
+    }
+    // Assign each hole to the outer whose projected polygon contains
+    // its first vertex (single-outer caps take the fast path).
+    for outer in &outers {
+        let owned: Vec<Vec<(u32, [f64; 3])>> = if outers.len() == 1 {
+            std::mem::take(&mut holes)
+        } else {
+            let mut owned = Vec::new();
+            let mut rest = Vec::new();
+            for hole in holes.drain(..) {
+                if hole
+                    .first()
+                    .is_some_and(|&(_, p)| point_in_loop_3d(p, outer, n))
+                {
+                    owned.push(hole);
+                } else {
+                    rest.push(hole);
+                }
+            }
+            holes = rest;
+            owned
+        };
+        // Best-effort: a degenerate cap loop is skipped, not fatal.
+        let _ = triangulate_face_3d(outer, &owned, &mut side.triangles);
+    }
+}
+
+/// `true` when `p` (a point in the loop's plane) lies inside the closed
+/// 3-D loop, tested by even–odd ray casting in a 2-D projection ⟂ to
+/// `normal`.
+fn point_in_loop_3d(p: [f64; 3], ring: &[(u32, [f64; 3])], normal: [f64; 3]) -> bool {
+    let Some(n) = normalise(normal) else {
+        return false;
+    };
+    let seed = if n[0].abs() < 0.9 {
+        [1.0, 0.0, 0.0]
+    } else {
+        [0.0, 1.0, 0.0]
+    };
+    let d = dot_raw(seed, n);
+    let u = normalise([seed[0] - d * n[0], seed[1] - d * n[1], seed[2] - d * n[2]])
+        .unwrap_or([1.0, 0.0, 0.0]);
+    let v = cross_raw(n, u);
+    let project = |q: [f64; 3]| [dot_raw(q, u), dot_raw(q, v)];
+    let pt = project(p);
+    let mut inside = false;
+    for i in 0..ring.len() {
+        let a = project(ring[i].1);
+        let b = project(ring[(i + 1) % ring.len()].1);
+        if (a[1] > pt[1]) != (b[1] > pt[1]) {
+            let x = a[0] + (pt[1] - a[1]) / (b[1] - a[1]) * (b[0] - a[0]);
+            if x > pt[0] {
+                inside = !inside;
+            }
+        }
+    }
+    inside
+}
+
+/// `mesh − region` for one convex plane region: successively split by
+/// each outward plane, keeping every positive-side piece (it is outside
+/// the region) and carrying the negative-side remainder forward; the
+/// final remainder (`mesh ∩ region`) is discarded. Every piece is
+/// re-capped by the split, so the result is a union of closed pieces
+/// whose internal shared walls are coincident opposite-winding pairs
+/// (exactly cancelling in `signed_volume`).
+fn subtract_convex_region(mesh: &TriMesh, region: &ConvexRegion) -> TriMesh {
+    let mut result = TriMesh::default();
+    let mut remainder = mesh.clone();
+    for plane in region {
+        if remainder.is_empty() {
+            break;
+        }
+        let (outside, inside) = split_mesh_by_plane(&remainder, plane);
+        append_mesh(&mut result, outside);
+        remainder = inside;
+    }
+    result
+}
+
+/// `mesh ∩ region` for one convex plane region: successively keep the
+/// negative (inside) side of every outward plane, re-capped.
+fn intersect_convex_region(mesh: &TriMesh, region: &ConvexRegion) -> TriMesh {
+    let mut remainder = mesh.clone();
+    for plane in region {
+        if remainder.is_empty() {
+            break;
+        }
+        let (_, inside) = split_mesh_by_plane(&remainder, plane);
+        remainder = inside;
+    }
+    remainder
 }
 
 /// Tessellate every supported item of an `IfcShapeRepresentation`,
@@ -3663,11 +4363,32 @@ mod tests {
         assert_eq!(m.triangles[1], [3, 4, 5]);
     }
 
+    /// Assert the mesh is watertight: every directed edge is balanced
+    /// by its reverse (net traversal zero per undirected edge).
+    fn assert_closed(m: &TriMesh) {
+        let mut net: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+        for t in &m.triangles {
+            for i in 0..3 {
+                let a = t[i];
+                let b = t[(i + 1) % 3];
+                if a < b {
+                    *net.entry((a, b)).or_insert(0) += 1;
+                } else {
+                    *net.entry((b, a)).or_insert(0) -= 1;
+                }
+            }
+        }
+        for (edge, n) in net {
+            assert_eq!(n, 0, "unbalanced edge {edge:?}");
+        }
+    }
+
     #[test]
-    fn boolean_clipping_result_emits_first_operand() {
-        // A wall body (extruded box) clipped by a plane half-space: the
-        // subtraction is not yet carved, so the result is the box as
-        // authored (visible rather than dropped).
+    fn boolean_clipping_carves_half_space_above() {
+        // A 2×4×3 wall body clipped by the plane z = 2 with
+        // AgreementFlag .F.: the solid (removed) half-space is the
+        // POSITIVE side of the plane normal (digest §2), so the top
+        // metre is carved off, leaving 2·4·2 = 16 volume in z ∈ [0,2].
         let f = parse(
             "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
@@ -3679,16 +4400,74 @@ mod tests {
              #8=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#7);",
         );
         let m = tessellate_item(&f, 8).unwrap();
-        let plain = tessellate_item(&f, 3).unwrap();
-        assert_eq!(m, plain);
-        assert_eq!(m.vertex_count(), 8);
-        assert_eq!(m.triangle_count(), 12);
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 16.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m.positions.iter().all(|p| p[2] <= 2.0 + 1e-9));
+        assert!(m.positions.iter().any(|p| p[2] == 0.0));
     }
 
     #[test]
-    fn boolean_clipping_chains_nest() {
+    fn boolean_clipping_agreement_true_keeps_positive_side() {
+        // Same wall, AgreementFlag .T.: the removed half-space is the
+        // NEGATIVE side (below z = 2), keeping the 2·4·1 = 8 top slab.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,3.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,2.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCHALFSPACESOLID(#6,.T.);\n\
+             #8=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 8.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m.positions.iter().all(|p| p[2] >= 2.0 - 1e-9));
+    }
+
+    #[test]
+    fn boolean_clipping_tilted_plane_exact_volume() {
+        // Unit cube (x, y ∈ [−0.5, 0.5], z ∈ [0, 1]) clipped by the
+        // tilted plane x + z = 0.5 (normal (1,0,1)/√2 through
+        // (0,0,0.5)), AgreementFlag .T. (remove the negative side):
+        // the kept wedge {x + z ≥ 0.5} is exactly half the cube.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.5));\n\
+             #5=IFCDIRECTION((1.,0.,1.));\n\
+             #6=IFCDIRECTION((0.,1.,0.));\n\
+             #7=IFCAXIS2PLACEMENT3D(#4,#5,#6);\n\
+             #8=IFCPLANE(#7);\n\
+             #9=IFCHALFSPACESOLID(#8,.T.);\n\
+             #10=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#9);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 0.5).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        // Every kept vertex satisfies x + z ≥ 0.5.
+        assert!(m.positions.iter().all(|p| p[0] + p[2] >= 0.5 - 1e-9));
+    }
+
+    #[test]
+    fn boolean_clipping_chains_carve_in_sequence() {
         // Clipping results chain (the first operand of a clipping may
-        // itself be a clipping): two levels resolve to the base solid.
+        // itself be a clipping): the first clip removes below z = 0.5;
+        // the second (same tool) is then a no-op on the remaining slab.
         let f = parse(
             "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
@@ -3701,8 +4480,171 @@ mod tests {
              #9=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#8,#7);",
         );
         let m = tessellate_item(&f, 9).unwrap();
-        assert_eq!(m.vertex_count(), 8);
-        assert_eq!(m.triangle_count(), 12);
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 0.5).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m.positions.iter().all(|p| p[2] >= 0.5 - 1e-9));
+    }
+
+    #[test]
+    fn polygonal_bounded_halfspace_cuts_only_footprint() {
+        // 4×4×2 slab (x, y ∈ [−2, 2], z ∈ [0, 2]); the polygonal
+        // boundary restricts the z ≥ 1 removal (plane z = 1, flag .F.)
+        // to the x ∈ [0, 2] half → a 2×4×1 notch: 32 − 8 = 24.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,1.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCCARTESIANPOINT((0.,-2.));\n\
+             #13=IFCCARTESIANPOINT((2.,-2.));\n\
+             #14=IFCCARTESIANPOINT((2.,2.));\n\
+             #15=IFCCARTESIANPOINT((0.,2.));\n\
+             #16=IFCPOLYLINE((#12,#13,#14,#15,#12));\n\
+             #17=IFCPOLYGONALBOUNDEDHALFSPACE(#6,.F.,#11,#16);\n\
+             #18=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#17);",
+        );
+        let m = tessellate_item(&f, 18).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 24.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        // The x < 0 half keeps its full height; the notch bottom stays.
+        assert!(m.positions.iter().any(|p| p[0] < 0.0 && p[2] == 2.0));
+        assert!(m.positions.iter().all(|p| p[0] <= 1e-9
+            || p[2] <= 1.0 + 1e-9
+            || p[0] >= 2.0 - 1e-9
+            || p[1] <= -2.0 + 1e-9
+            || p[1] >= 2.0 - 1e-9));
+    }
+
+    #[test]
+    fn polygonal_bounded_halfspace_concave_boundary() {
+        // Concave L-shaped boundary (area 3) over a 4×4×2 slab, plane
+        // z = 1 flag .F.: removed volume = 3·1 → 32 − 3 = 29. The L is
+        // ear-clipped into convex prism pieces whose internal shared
+        // walls must cancel exactly.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,1.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #10=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #11=IFCAXIS2PLACEMENT3D(#10,$,$);\n\
+             #12=IFCCARTESIANPOINT((0.,0.));\n\
+             #13=IFCCARTESIANPOINT((2.,0.));\n\
+             #14=IFCCARTESIANPOINT((2.,1.));\n\
+             #15=IFCCARTESIANPOINT((1.,1.));\n\
+             #16=IFCCARTESIANPOINT((1.,2.));\n\
+             #17=IFCCARTESIANPOINT((0.,2.));\n\
+             #18=IFCPOLYLINE((#12,#13,#14,#15,#16,#17,#12));\n\
+             #19=IFCPOLYGONALBOUNDEDHALFSPACE(#6,.F.,#11,#18);\n\
+             #20=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#19);",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 29.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn boxed_halfspace_cut_limited_to_enclosure() {
+        // 2×2×2 cube (x, y ∈ [−1, 1], z ∈ [0, 2]); plane z = 1 flag
+        // .F. would shave the whole top half, but the Enclosure box
+        // (corner (−1,−1,0), dims 1×2×3) limits it to x ∈ [−1, 0]:
+        // removed 1·2·1 = 2 → volume 6.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,1.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCCARTESIANPOINT((-1.,-1.,0.));\n\
+             #8=IFCBOUNDINGBOX(#7,1.,2.,3.);\n\
+             #9=IFCBOXEDHALFSPACE(#6,.F.,#8);\n\
+             #10=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#9);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 6.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        // Full height survives on the x > 0 side.
+        assert!(m.positions.iter().any(|p| p[0] > 0.0 && p[2] == 2.0));
+    }
+
+    #[test]
+    fn boolean_intersection_with_halfspace_clips_to_solid_side() {
+        // INTERSECTION with a half-space keeps the solid side: the
+        // 2×4×3 wall ∩ {z ≤ 2} (flag .T.) is the 16-volume bottom.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,3.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,2.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCHALFSPACESOLID(#6,.T.);\n\
+             #8=IFCBOOLEANRESULT(.INTERSECTION.,#3,#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 16.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m.positions.iter().all(|p| p[2] <= 2.0 + 1e-9));
+    }
+
+    #[test]
+    fn halfspace_clip_missing_whole_body_yields_empty_mesh() {
+        // A clip plane below the whole body with flag .F. (remove
+        // everything above): the entire solid is carved away.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,-5.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCHALFSPACESOLID(#6,.F.);\n\
+             #8=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#7);",
+        );
+        let m = tessellate_item(&f, 8).unwrap();
+        assert!(m.is_empty());
+    }
+
+    #[test]
+    fn difference_with_non_halfspace_tool_emits_first_operand() {
+        // Mesh–mesh subtraction is a later slice: a solid tool leaves
+        // the base boundary as authored.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);\n\
+             #4=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#3);",
+        );
+        let m = tessellate_item(&f, 4).unwrap();
+        let plain = tessellate_item(&f, 3).unwrap();
+        assert_eq!(m, plain);
     }
 
     #[test]

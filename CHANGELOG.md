@@ -6,6 +6,38 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (half-space clipping): `IfcBooleanResult` /
+  `IfcBooleanClippingResult` DIFFERENCE with a half-space tool now
+  genuinely **carves** the first operand instead of emitting it as
+  authored, per the staged half-space clipping digest.
+  - The `IfcHalfSpaceSolid.AgreementFlag` side convention: TRUE → the
+    solid (removed) region is the negative side of the `IfcPlane` base
+    surface's normal, FALSE → the positive side.
+  - `IfcPolygonalBoundedHalfSpace` restricts the cut to the infinite
+    prism of its closed 2-D `PolygonalBoundary` in its `Position` frame
+    (a concave boundary is ear-clipped into convex prism pieces
+    subtracted in sequence); `IfcBoxedHalfSpace` restricts it to its
+    `Enclosure` `IfcBoundingBox`.
+  - Mechanism: the operand's closed mesh is split by each region plane
+    (Sutherland–Hodgman per triangle with shared-edge-canonical cut
+    points) and every cut cross-section is **re-capped watertight** —
+    boundary edges on the cut plane are chained into loops (leftmost-
+    turn successor at pinch vertices, deterministic), grouped into
+    outer/hole rings by winding, and triangulated hole-aware, so a cut
+    through a hollow body caps as an annulus. The result is a union of
+    closed pieces whose internal shared walls cancel exactly in the new
+    public `TriMesh::signed_volume()` (divergence-theorem volume).
+  - INTERSECTION with a plain / boxed half-space clips the operand to
+    the solid side; a non-half-space DIFFERENCE tool still falls back
+    to the unmodified first operand (mesh–mesh CSG is a later slice).
+  - 9 new geometry tests with exact volume + watertightness (balanced
+    directed edges) assertions: agreement-flag both ways, tilted-plane
+    half-cube, clipping chains, polygonal-bounded (rectangular and
+    concave-L footprints), boxed enclosure limit, half-space
+    intersection, full-body clip → empty mesh, non-half-space tool
+    fallback. Phase-2 typed entries for `IfcBoxedHalfSpace` and
+    `IfcBoundingBox`.
+
 - Phase 2 (unit resolution): new public `length_unit_scale(&StepFile)`
   — metres per model length unit, walked from
   `IfcProject.UnitsInContext` → `IfcUnitAssignment.Units` (§8.11.3.11:
