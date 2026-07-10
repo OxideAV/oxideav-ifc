@@ -115,6 +115,13 @@
 //! at path corners, end caps on open paths and seamless wrap on closed
 //! ones — pipes, rods and rebar mesh watertight.
 //!
+//! **`IfcSectionedSolidHorizontal`** lofts a series of profiles placed
+//! at distance-along stations of a 3-D directrix (the IFC 4.3
+//! infrastructure solid): sections are kept **level** (profile +y →
+//! global +z, +x → the horizontal lateral direction), lateral /
+//! vertical station offsets apply, and sub-stations are interpolated
+//! at every directrix vertex so the loft follows the curve.
+//!
 //! The **CSG primitives** (`IfcBlock`, `IfcRectangularPyramid`,
 //! `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcSphere`)
 //! mesh with their per-primitive anchoring (block/pyramid by base
@@ -266,6 +273,8 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         "IFCREVOLVEDAREASOLID" => revolved_area_solid(step, &inst.args),
         // Swept disk solid: a disk / annulus swept along a 3-D directrix.
         "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => swept_disk_solid(step, &inst.args),
+        // Sectioned solid: profiles lofted at stations along a directrix.
+        "IFCSECTIONEDSOLIDHORIZONTAL" => sectioned_solid_horizontal(step, &inst.args),
         // Parametric CSG primitives (swept-disk digest §3) and the CSG
         // tree root wrapper.
         "IFCBLOCK"
@@ -2611,6 +2620,315 @@ fn swept_disk_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geometry
         positions,
         triangles,
     })
+}
+
+// =====================================================================
+// IfcSectionedSolidHorizontal (Directrix, CrossSections,
+// CrossSectionPositions) — swept-disk digest §2.
+//
+// Profiles are placed at stations along a 3-D directrix and lofted.
+// Each station is an IfcAxis2PlacementLinear whose Location is an
+// IfcPointByDistanceExpression (distance-along + optional lateral /
+// vertical offsets; the NoLongitudinalOffsets WHERE rule forbids a
+// longitudinal one). The "Horizontal" convention keeps every
+// cross-section LEVEL: the profile's local +y maps to global +z and
+// its local +x to the horizontal lateral direction ẑ × tangent —
+// sections stay upright instead of tilting with the directrix.
+// =====================================================================
+
+fn sectioned_solid_horizontal(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let directrix_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let sections = args
+        .get(1)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let stations = args
+        .get(2)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+    // CorrespondingSectionPositions: profiles and positions pair up.
+    if sections.len() != stations.len() || sections.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    let path = curve_points_3d(step, directrix_id, 0)?;
+    if path.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    // Cumulative chord lengths for distance-along lookup.
+    let mut cumulative: Vec<f64> = Vec::with_capacity(path.len());
+    let mut total = 0.0;
+    cumulative.push(0.0);
+    for w in path.windows(2) {
+        let d = [w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]];
+        total += dot_raw(d, d).sqrt();
+        cumulative.push(total);
+    }
+    // (point, unit tangent) at a distance along the tessellated path,
+    // clamped to the ends.
+    let point_at = |dist: f64| -> Result<([f64; 3], [f64; 3]), GeometryError> {
+        let dist = dist.clamp(0.0, total);
+        let seg = match cumulative.iter().rposition(|&c| c <= dist) {
+            Some(i) if i + 1 < path.len() => i,
+            _ => path.len() - 2,
+        };
+        let (a, b) = (path[seg], path[seg + 1]);
+        let len = (cumulative[seg + 1] - cumulative[seg]).max(1e-300);
+        let t = (dist - cumulative[seg]) / len;
+        let p = [
+            a[0] + t * (b[0] - a[0]),
+            a[1] + t * (b[1] - a[1]),
+            a[2] + t * (b[2] - a[2]),
+        ];
+        let tangent =
+            normalise([b[0] - a[0], b[1] - a[1], b[2] - a[2]]).ok_or(GeometryError::BadProfile)?;
+        Ok((p, tangent))
+    };
+
+    // Resolve the authored stations: distance-along, offsets, and the
+    // 2-D profile rings.
+    struct Station {
+        dist: f64,
+        off_lat: f64,
+        off_vert: f64,
+        rings: Vec<Vec<[f64; 2]>>,
+    }
+    let mut authored: Vec<Station> = Vec::with_capacity(sections.len());
+    let mut first_area: Option<ProfileArea> = None;
+    let mut last_area: Option<ProfileArea> = None;
+    for (si, (sec, sta)) in sections.iter().zip(stations).enumerate() {
+        let profile_id = sec.as_reference().ok_or(GeometryError::BadProfile)?;
+        let area = profile_area(step, profile_id)?;
+        let sta_id = sta.as_reference().ok_or(GeometryError::BadCoordinates)?;
+        let (dist, off_lat, off_vert) = linear_placement_station(step, sta_id)?;
+        let rings: Vec<Vec<[f64; 2]>> = area.rings().cloned().collect();
+        // The loft needs identical ring structure station to station
+        // (the SectionsSameType WHERE rule keeps profiles congruent).
+        if let Some(prev) = authored.last() {
+            if prev.rings.len() != rings.len()
+                || prev
+                    .rings
+                    .iter()
+                    .zip(&rings)
+                    .any(|(a, b)| a.len() != b.len())
+            {
+                return Err(GeometryError::BadProfile);
+            }
+            if dist <= prev.dist {
+                return Err(GeometryError::BadProfile);
+            }
+        }
+        authored.push(Station {
+            dist,
+            off_lat,
+            off_vert,
+            rings,
+        });
+        if si == 0 {
+            first_area = Some(area);
+        } else {
+            last_area = Some(area);
+        }
+    }
+
+    // Expand: between consecutive authored stations, insert a
+    // sub-station at every directrix vertex strictly between their
+    // distances, blending the profile rings and offsets linearly — the
+    // loft follows the directrix rather than jumping station to
+    // station in a straight line.
+    let mut expanded: Vec<Station> = Vec::new();
+    for w in 0..(authored.len() - 1) {
+        let (lo, hi) = (authored[w].dist, authored[w + 1].dist);
+        let blend = |t: f64| -> Station {
+            let a = &authored[w];
+            let b = &authored[w + 1];
+            Station {
+                dist: lo + t * (hi - lo),
+                off_lat: a.off_lat + t * (b.off_lat - a.off_lat),
+                off_vert: a.off_vert + t * (b.off_vert - a.off_vert),
+                rings: a
+                    .rings
+                    .iter()
+                    .zip(&b.rings)
+                    .map(|(ra, rb)| {
+                        ra.iter()
+                            .zip(rb)
+                            .map(|(pa, pb)| {
+                                [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])]
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            }
+        };
+        expanded.push(blend(0.0));
+        for &c in &cumulative {
+            if c > lo + 1e-12 && c < hi - 1e-12 {
+                expanded.push(blend((c - lo) / (hi - lo)));
+            }
+        }
+    }
+    {
+        let last = authored.last().expect("≥ 2 stations checked above");
+        expanded.push(Station {
+            dist: last.dist,
+            off_lat: last.off_lat,
+            off_vert: last.off_vert,
+            rings: last.rings.clone(),
+        });
+    }
+
+    // Realise each expanded station's rings in 3-D with its level
+    // frame.
+    let mut station_rings: Vec<Vec<Vec<[f64; 3]>>> = Vec::with_capacity(expanded.len());
+    for st in &expanded {
+        let (p, tangent) = point_at(st.dist)?;
+        // Level frame: lateral = ẑ × tangent (horizontal), up = ẑ.
+        let lateral =
+            normalise(cross_raw([0.0, 0.0, 1.0], tangent)).ok_or(GeometryError::BadProfile)?; // vertical directrix: no level frame
+        let centre = [
+            p[0] + st.off_lat * lateral[0],
+            p[1] + st.off_lat * lateral[1],
+            p[2] + st.off_lat * lateral[2] + st.off_vert,
+        ];
+        station_rings.push(
+            st.rings
+                .iter()
+                .map(|ring| {
+                    ring.iter()
+                        .map(|&[x, y]| {
+                            [
+                                centre[0] + x * lateral[0],
+                                centre[1] + x * lateral[1],
+                                centre[2] + x * lateral[2] + y,
+                            ]
+                        })
+                        .collect()
+                })
+                .collect(),
+        );
+    }
+
+    // Vertex layout: per station, the concatenated rings (outer first,
+    // then holes) — the same order as ProfileArea::rings, so a profile
+    // cap triangulation indexes directly.
+    let per_station: usize = station_rings[0].iter().map(Vec::len).sum();
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(per_station * station_rings.len());
+    for rings in &station_rings {
+        for ring in rings {
+            positions.extend_from_slice(ring);
+        }
+    }
+    let ring_lens: Vec<usize> = station_rings[0].iter().map(Vec::len).collect();
+
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    // Walls between consecutive stations, ring by ring (hole walls
+    // wound inward). Rings are CCW about the +tangent-ish loft axis
+    // (lateral × up = tangent's horizontal direction).
+    for s in 0..(station_rings.len() - 1) {
+        let a0 = (s * per_station) as u32;
+        let b0 = ((s + 1) * per_station) as u32;
+        let mut offset = 0u32;
+        for (ri, &k) in ring_lens.iter().enumerate() {
+            for i in 0..k {
+                let i1 = ((i + 1) % k) as u32;
+                let i = i as u32;
+                let (a, b) = (a0 + offset, b0 + offset);
+                if ri == 0 {
+                    triangles.push([a + i, a + i1, b + i1]);
+                    triangles.push([a + i, b + i1, b + i]);
+                } else {
+                    triangles.push([a + i, b + i1, a + i1]);
+                    triangles.push([a + i, b + i, b + i1]);
+                }
+            }
+            offset += k as u32;
+        }
+    }
+    // End caps: the first station's profile triangulation reversed
+    // (faces backward), the last station's forward.
+    let first_cap = triangulate_profile(&first_area.ok_or(GeometryError::BadProfile)?)?;
+    for &[a, b, c] in &first_cap {
+        triangles.push([a, c, b]);
+    }
+    let last_cap = triangulate_profile(&last_area.ok_or(GeometryError::BadProfile)?)?;
+    let base = ((station_rings.len() - 1) * per_station) as u32;
+    for &[a, b, c] in &last_cap {
+        triangles.push([base + a, base + b, base + c]);
+    }
+
+    Ok(TriMesh {
+        positions,
+        triangles,
+    })
+}
+
+/// Resolve an `IfcAxis2PlacementLinear` station to `(distance-along,
+/// lateral offset, vertical offset)`.
+///
+/// The placement's `Location` must be an `IfcPointByDistanceExpression`
+/// (`DistanceAlong`, `OffsetLateral`, `OffsetVertical`,
+/// `OffsetLongitudinal`, `BasisCurve`); a longitudinal offset violates
+/// the `NoLongitudinalOffsets` WHERE rule. Explicit `Axis` /
+/// `RefDirection` overrides (tilted sections) are outside this slice.
+fn linear_placement_station(step: &StepFile, id: u64) -> Result<(f64, f64, f64), GeometryError> {
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if inst.keyword != "IFCAXIS2PLACEMENTLINEAR" {
+        return Err(GeometryError::Unsupported(inst.keyword.clone()));
+    }
+    // (Location, Axis, RefDirection): explicit axes are a tilt override
+    // this slice does not evaluate.
+    if inst.args.get(1).is_some_and(|v| !v.is_unset())
+        || inst.args.get(2).is_some_and(|v| !v.is_unset())
+    {
+        return Err(GeometryError::Unsupported(
+            "IFCAXIS2PLACEMENTLINEAR(Axis/RefDirection)".to_string(),
+        ));
+    }
+    let loc_id = inst
+        .args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let loc = step
+        .get(loc_id)
+        .ok_or(GeometryError::MissingInstance(loc_id))?;
+    if loc.keyword != "IFCPOINTBYDISTANCEEXPRESSION" {
+        return Err(GeometryError::Unsupported(loc.keyword.clone()));
+    }
+    // DistanceAlong : IfcCurveMeasureSelect — a length measure (typed
+    // or bare real); a parameter value needs the basis curve's own
+    // parameterisation and is unsupported here.
+    let dist = match loc.args.first() {
+        Some(v @ (Value::Real(_) | Value::Integer(_))) => v.as_number(),
+        Some(Value::Typed { keyword, args })
+            if keyword == "IFCNONNEGATIVELENGTHMEASURE" || keyword == "IFCLENGTHMEASURE" =>
+        {
+            args.first().and_then(Value::as_number)
+        }
+        Some(Value::Typed { keyword, .. }) if keyword == "IFCPARAMETERVALUE" => {
+            return Err(GeometryError::Unsupported(
+                "IFCPOINTBYDISTANCEEXPRESSION(IFCPARAMETERVALUE)".to_string(),
+            ));
+        }
+        _ => None,
+    }
+    .ok_or(GeometryError::BadCoordinate)?;
+    let opt_num = |i: usize| -> Result<f64, GeometryError> {
+        match loc.args.get(i) {
+            None | Some(Value::Unset) => Ok(0.0),
+            Some(v) => v.as_number().ok_or(GeometryError::BadCoordinate),
+        }
+    };
+    let off_lat = opt_num(1)?;
+    let off_vert = opt_num(2)?;
+    // OffsetLongitudinal (index 3) must be absent per the WHERE rule.
+    if loc.args.get(3).is_some_and(|v| !v.is_unset()) {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok((dist, off_lat, off_vert))
 }
 
 /// Evaluate a swept-disk directrix into a 3-D point run. `start` /
@@ -6736,6 +7054,125 @@ mod tests {
             "{} != {want}",
             m.signed_volume()
         );
+    }
+
+    #[test]
+    fn sectioned_solid_constant_section_box() {
+        // Two identical 2×1 rectangles at stations 0 and 10 along a
+        // straight x-axis directrix: a 10×2×1 box. Level convention:
+        // profile x → lateral (ẑ × x̂ = ŷ), profile y → global z.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,1.);\n\
+             #10=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(0.),$,$,$,#3);\n\
+             #11=IFCAXIS2PLACEMENTLINEAR(#10,$,$);\n\
+             #12=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(10.),$,$,$,#3);\n\
+             #13=IFCAXIS2PLACEMENTLINEAR(#12,$,$);\n\
+             #20=IFCSECTIONEDSOLIDHORIZONTAL(#3,(#4,#4),(#11,#13));",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 20.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        // Level sections: the profile height lands on global z.
+        assert!(m
+            .positions
+            .iter()
+            .all(|p| p[2].abs() <= 0.5 + 1e-9 && p[1].abs() <= 1.0 + 1e-9));
+    }
+
+    #[test]
+    fn sectioned_solid_tapered_sections() {
+        // A 2×1 rectangle tapering to 4×1 over 10 units: the ruled
+        // loft's volume is ∫ width(t)·1 dt = (2+4)/2 · 10 = 30.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,1.);\n\
+             #5=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,1.);\n\
+             #10=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(0.),$,$,$,#3);\n\
+             #11=IFCAXIS2PLACEMENTLINEAR(#10,$,$);\n\
+             #12=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(10.),$,$,$,#3);\n\
+             #13=IFCAXIS2PLACEMENTLINEAR(#12,$,$);\n\
+             #20=IFCSECTIONEDSOLIDHORIZONTAL(#3,(#4,#5),(#11,#13));",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 30.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn sectioned_solid_follows_curved_directrix_level() {
+        // A constant 2×1 section along a quarter-circle directrix
+        // (R = 10 in the XY plane): sub-stations are inserted at every
+        // directrix vertex, so the solid follows the curve; sections
+        // stay LEVEL (all z within the profile height) and the volume
+        // is area × path length within tessellation tolerance.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCCIRCLE(#2,10.);\n\
+             #4=IFCTRIMMEDCURVE(#3,(IFCPARAMETERVALUE(0.)),(IFCPARAMETERVALUE(1.5707963267948966)),.T.,.PARAMETER.);\n\
+             #5=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,1.);\n\
+             #10=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(0.),$,$,$,#4);\n\
+             #11=IFCAXIS2PLACEMENTLINEAR(#10,$,$);\n\
+             #12=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(15.707963267948966),$,$,$,#4);\n\
+             #13=IFCAXIS2PLACEMENTLINEAR(#12,$,$);\n\
+             #20=IFCSECTIONEDSOLIDHORIZONTAL(#4,(#5,#5),(#11,#13));",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_closed(&m);
+        // Polyline arc length of the 12-segment quarter circle.
+        let chord = 2.0 * 10.0 * (core::f64::consts::PI / 48.0).sin();
+        let path_len = 12.0 * chord;
+        let v = m.signed_volume();
+        assert!(
+            v > 0.0 && (v - 2.0 * path_len).abs() < 0.01 * 2.0 * path_len,
+            "{v} vs {}",
+            2.0 * path_len
+        );
+        // Level sections: profile height stays on global z.
+        assert!(m.positions.iter().all(|p| p[2].abs() <= 0.5 + 1e-9));
+        // The solid actually follows the curve into the y > 5 region.
+        assert!(m.positions.iter().any(|p| p[1] > 5.0));
+    }
+
+    #[test]
+    fn sectioned_solid_lateral_vertical_offsets() {
+        // OffsetLateral / OffsetVertical displace a station's section
+        // from the directrix: both ends shifted +1 lateral (ŷ) and
+        // +2 vertical → the whole box rides offset but keeps volume.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,1.);\n\
+             #10=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(0.),1.,2.,$,#3);\n\
+             #11=IFCAXIS2PLACEMENTLINEAR(#10,$,$);\n\
+             #12=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(10.),1.,2.,$,#3);\n\
+             #13=IFCAXIS2PLACEMENTLINEAR(#12,$,$);\n\
+             #20=IFCSECTIONEDSOLIDHORIZONTAL(#3,(#4,#4),(#11,#13));",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 20.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        let ymin = m.positions.iter().map(|p| p[1]).fold(f64::MAX, f64::min);
+        let zmin = m.positions.iter().map(|p| p[2]).fold(f64::MAX, f64::min);
+        assert!((ymin - 0.0).abs() < 1e-9 && (zmin - 1.5).abs() < 1e-9);
     }
 
     #[test]

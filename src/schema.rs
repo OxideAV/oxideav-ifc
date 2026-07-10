@@ -661,6 +661,34 @@ pub const SCHEMA: &[EntitySchema] = &[
         ]),
     },
     EntitySchema {
+        keyword: "IFCSECTIONEDSOLIDHORIZONTAL",
+        kind: EntityKind::Geometry,
+        // IfcSectionedSolid(Directrix, CrossSections) +
+        // IfcSectionedSolidHorizontal(CrossSectionPositions).
+        attrs: chain!(&["Directrix", "CrossSections", "CrossSectionPositions"]),
+    },
+    EntitySchema {
+        keyword: "IFCAXIS2PLACEMENTLINEAR",
+        kind: EntityKind::Geometry,
+        // IfcPlacement(Location) + IfcAxis2PlacementLinear(Axis,
+        // RefDirection).
+        attrs: chain!(&["Location", "Axis", "RefDirection"]),
+    },
+    EntitySchema {
+        keyword: "IFCPOINTBYDISTANCEEXPRESSION",
+        kind: EntityKind::Geometry,
+        // IfcPoint adds nothing; IfcPointByDistanceExpression(
+        // DistanceAlong, OffsetLateral, OffsetVertical,
+        // OffsetLongitudinal, BasisCurve).
+        attrs: chain!(&[
+            "DistanceAlong",
+            "OffsetLateral",
+            "OffsetVertical",
+            "OffsetLongitudinal",
+            "BasisCurve"
+        ]),
+    },
+    EntitySchema {
         keyword: "IFCCSGSOLID",
         kind: EntityKind::Geometry,
         // IfcCsgSolid(TreeRootExpression).

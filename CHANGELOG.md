@@ -6,6 +6,32 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (sectioned solids): `IfcSectionedSolidHorizontal`
+  (`Directrix`, `CrossSections`, `CrossSectionPositions`) — the IFC 4.3
+  infrastructure/alignment solid — now tessellates per the swept-disk
+  digest §2.
+  - Each `IfcAxis2PlacementLinear` station resolves its
+    `IfcPointByDistanceExpression` (length-measure `DistanceAlong` +
+    optional `OffsetLateral`/`OffsetVertical`; a longitudinal offset
+    violates `NoLongitudinalOffsets` and is rejected; `IfcParameterValue`
+    distances and explicit `Axis`/`RefDirection` tilt overrides surface
+    `Unsupported`).
+  - The **Horizontal** convention keeps every section LEVEL: profile +y
+    maps to global +z and +x to the horizontal lateral direction
+    (ẑ × tangent). Sub-stations are interpolated (profile rings and
+    offsets blended linearly) at every directrix vertex between
+    authored stations, so the loft follows a curved directrix instead
+    of jumping station-to-station; profiles may change shape
+    station-to-station (ring structure must stay congruent). End caps
+    are the hole-aware profile triangulations.
+  - 4 new tests: constant-section box (exact 20), tapered 2×1→4×1
+    ruled loft (exact 30 = mean-area × length), quarter-circle
+    directrix with level-section assertions (volume = area ×
+    tessellated path length within 1%), and lateral+vertical station
+    offsets (displaced bbox, volume preserved). Phase-2 typed entries
+    for `IfcSectionedSolidHorizontal`, `IfcAxis2PlacementLinear`,
+    `IfcPointByDistanceExpression`.
+
 - Phase 3 (face orientation): the Brep face walk now applies
   `IfcFaceBound.Orientation` per the staged face-orientation digest —
   a bound flagged FALSE contributes its `IfcPolyLoop` in **reverse**
