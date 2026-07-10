@@ -51,8 +51,10 @@
 //! table is de-duplicated by `IfcCartesianPoint` id so a point
 //! referenced by several loops contributes one mesh vertex (§8.8.3.18:
 //! "each Cartesian point shall be referenced by at least three poly
-//! loops"). Per-bound `Orientation` flags are not applied — loops are
-//! meshed as authored.
+//! loops"). Per-bound `Orientation` flags ARE applied — a FALSE bound
+//! contributes its loop reversed, so a closed shell's effective
+//! windings yield consistently outward normals (face-orientation
+//! digest §2).
 //!
 //! Beyond the face-set / Brep families this module also sweeps the
 //! linear **swept area solid**:
@@ -4344,8 +4346,17 @@ fn connected_face_set(
 /// behaviour); a concave loop or a face with inner bounds is projected
 /// onto its own plane (Newell normal) and triangulated hole-aware
 /// through the shared [`triangulate_profile`] machinery, so face holes
-/// are left open instead of being covered. Per-bound `Orientation`
-/// flags are not applied — the loops are meshed as authored.
+/// are left open instead of being covered.
+///
+/// Per-bound `Orientation` flags ARE applied (face-orientation digest
+/// §2.1): a bound whose `Orientation` is FALSE contributes its loop in
+/// **reverse** of the stored vertex order, so the effective winding —
+/// and hence the Newell normal / triangle orientation — matches the
+/// face sense. For an `IfcFaceSurface`, `SameSense` relates the face
+/// normal to the underlying *surface* normal (§2.3); the bound winding
+/// is already expressed relative to the face, so the planar
+/// tessellation applies `Orientation` only and `SameSense` does not
+/// flip the loop-derived triangles.
 fn face(
     step: &StepFile,
     face_id: u64,
@@ -4394,24 +4405,40 @@ fn face(
     let outer_bid = bound_ids.remove(outer_pos);
 
     // IfcFaceBound(Bound : IfcLoop, Orientation : IfcBoolean): Bound is
-    // attribute index 0.
-    let bound_loop = |bid: u64| -> Result<u64, GeometryError> {
-        step.get(bid)
-            .ok_or(GeometryError::MissingInstance(bid))?
+    // attribute index 0, Orientation index 1. Orientation FALSE means
+    // the loop's effective direction is the REVERSE of its stored
+    // vertex order (digest §2.1); a missing/derived flag reads TRUE.
+    let bound_parts = |bid: u64| -> Result<(u64, bool), GeometryError> {
+        let inst = step.get(bid).ok_or(GeometryError::MissingInstance(bid))?;
+        let loop_id = inst
             .args
             .first()
             .and_then(Value::as_reference)
-            .ok_or(GeometryError::BadCoordinates)
+            .ok_or(GeometryError::BadCoordinates)?;
+        let same_order = !matches!(inst.args.get(1).and_then(Value::as_enum), Some("F"));
+        Ok((loop_id, same_order))
     };
 
     // Intern the outer loop (encounter order — this keeps the pooled
-    // vertex numbering identical to the historical fan path).
-    let outer = interned_loop(step, bound_loop(outer_bid)?, pool)?;
+    // vertex numbering identical to the historical fan path), applying
+    // the effective direction.
+    let (outer_loop_id, outer_same) = bound_parts(outer_bid)?;
+    let mut outer = interned_loop(step, outer_loop_id, pool)?;
+    if !outer_same {
+        outer.reverse();
+    }
 
-    // Inner bounds → hole loops.
+    // Inner bounds → hole loops (same orientation handling; the
+    // hole-aware triangulator additionally normalises hole winding
+    // against the outer loop's plane).
     let mut holes: Vec<Vec<(u32, [f64; 3])>> = Vec::with_capacity(bound_ids.len());
     for bid in bound_ids {
-        holes.push(interned_loop(step, bound_loop(bid)?, pool)?);
+        let (loop_id, same) = bound_parts(bid)?;
+        let mut hole = interned_loop(step, loop_id, pool)?;
+        if !same {
+            hole.reverse();
+        }
+        holes.push(hole);
     }
 
     triangulate_face_3d(&outer, &holes, triangles)
@@ -5015,6 +5042,127 @@ mod tests {
         assert_eq!(m.triangle_count(), 2);
         assert_eq!(m.triangles[0], [0, 1, 2]);
         assert_eq!(m.triangles[1], [0, 2, 3]);
+    }
+
+    #[test]
+    fn face_bound_orientation_false_reverses_loop() {
+        // Two identical faces sharing one stored loop, one bound .T.
+        // and one .F. (the digest §2.1 shared-loop reuse case): the .F.
+        // face must triangulate with the reverse winding.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #10=IFCPOLYLOOP((#1,#2,#3));\n\
+             #20=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #21=IFCFACEOUTERBOUND(#10,.F.);\n\
+             #30=IFCFACE((#20));\n\
+             #31=IFCFACE((#21));\n\
+             #40=IFCOPENSHELL((#30,#31));\n\
+             #41=IFCSHELLBASEDSURFACEMODEL((#40));",
+        );
+        let m = tessellate_item(&f, 41).unwrap();
+        assert_eq!(m.triangle_count(), 2);
+        // Stored order for the .T. bound; reversed for the .F. bound.
+        assert_eq!(m.triangles[0], [0, 1, 2]);
+        assert_eq!(m.triangles[1], [2, 1, 0]);
+    }
+
+    #[test]
+    fn closed_shell_mixed_orientations_yield_outward_normals() {
+        // A unit-ish tetrahedron authored with consistently OUTWARD
+        // effective windings, two of them stored reversed and flagged
+        // .F.: the shell must enclose volume 1/6 POSITIVELY (digest
+        // §2.2/§4: outer bounds CCW seen from outside after applying
+        // Orientation).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #4=IFCCARTESIANPOINT((0.,0.,1.));\n\
+             /* outward loops: bottom (1,3,2), sides (1,2,4),(2,3,4),(3,1,4) */\n\
+             #10=IFCPOLYLOOP((#1,#3,#2));\n\
+             #11=IFCPOLYLOOP((#1,#2,#4));\n\
+             /* stored REVERSED, flagged .F. → effective (2,3,4)/(3,1,4) */\n\
+             #12=IFCPOLYLOOP((#4,#3,#2));\n\
+             #13=IFCPOLYLOOP((#4,#1,#3));\n\
+             #20=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #21=IFCFACEOUTERBOUND(#11,.T.);\n\
+             #22=IFCFACEOUTERBOUND(#12,.F.);\n\
+             #23=IFCFACEOUTERBOUND(#13,.F.);\n\
+             #30=IFCFACE((#20));\n\
+             #31=IFCFACE((#21));\n\
+             #32=IFCFACE((#22));\n\
+             #33=IFCFACE((#23));\n\
+             #40=IFCCLOSEDSHELL((#30,#31,#32,#33));\n\
+             #41=IFCFACETEDBREP(#40);",
+        );
+        let m = tessellate_item(&f, 41).unwrap();
+        assert_closed(&m);
+        assert_eq!(m.vertex_count(), 4);
+        assert!(
+            (m.signed_volume() - 1.0 / 6.0).abs() < 1e-12,
+            "{}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn face_surface_same_sense_keeps_loop_winding() {
+        // IfcFaceSurface.SameSense relates the face normal to the
+        // SURFACE normal (digest §2.3); the bound winding is already
+        // face-relative, so the planar tessellation is unchanged by
+        // SameSense — only Orientation flips the loop.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #10=IFCPOLYLOOP((#1,#2,#3));\n\
+             #20=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #30=IFCFACESURFACE((#20),#6,.F.);\n\
+             #40=IFCOPENSHELL((#30));\n\
+             #41=IFCSHELLBASEDSURFACEMODEL((#40));",
+        );
+        let m = tessellate_item(&f, 41).unwrap();
+        assert_eq!(m.triangles, vec![[0, 1, 2]]);
+    }
+
+    #[test]
+    fn inner_bound_orientation_false_still_opens_hole() {
+        // A holed face whose inner bound is stored CCW but flagged .F.
+        // (effective CW, the digest §2.2 hole convention): the hole
+        // stays open and the meshed area is outer − hole.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #2=IFCCARTESIANPOINT((4.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((4.,4.,0.));\n\
+             #4=IFCCARTESIANPOINT((0.,4.,0.));\n\
+             #5=IFCCARTESIANPOINT((1.,1.,0.));\n\
+             #6=IFCCARTESIANPOINT((3.,1.,0.));\n\
+             #7=IFCCARTESIANPOINT((3.,3.,0.));\n\
+             #8=IFCCARTESIANPOINT((1.,3.,0.));\n\
+             #10=IFCPOLYLOOP((#1,#2,#3,#4));\n\
+             #11=IFCPOLYLOOP((#5,#6,#7,#8));\n\
+             #20=IFCFACEOUTERBOUND(#10,.T.);\n\
+             #21=IFCFACEBOUND(#11,.F.);\n\
+             #30=IFCFACE((#20,#21));\n\
+             #40=IFCOPENSHELL((#30));\n\
+             #41=IFCSHELLBASEDSURFACEMODEL((#40));",
+        );
+        let m = tessellate_item(&f, 41).unwrap();
+        let area: f64 = m
+            .triangles
+            .iter()
+            .map(|t| {
+                let a = m.positions[t[0] as usize];
+                let b = m.positions[t[1] as usize];
+                let c = m.positions[t[2] as usize];
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0])).abs()
+            })
+            .sum();
+        assert!((area - 12.0).abs() < 1e-9, "{area}");
     }
 
     /// Sum of the 3-D areas of every triangle in the mesh.

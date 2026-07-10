@@ -6,6 +6,21 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (face orientation): the Brep face walk now applies
+  `IfcFaceBound.Orientation` per the staged face-orientation digest —
+  a bound flagged FALSE contributes its `IfcPolyLoop` in **reverse**
+  of the stored vertex order (the shared-loop reuse case), so the
+  effective winding, Newell normal and triangle orientation match the
+  face sense and a well-formed `IfcClosedShell` tessellates with
+  consistently outward normals (positive `signed_volume`).
+  `IfcFaceSurface.SameSense` is documented as relating the face normal
+  to the *surface* normal (digest §2.3) — the bound winding is already
+  face-relative, so the planar tessellation applies `Orientation` only.
+  4 new tests: shared loop under .T./.F. bounds (reversed triangle),
+  mixed-orientation tetrahedron closing to +1/6 volume, `SameSense`
+  no-flip on a planar `IfcFaceSurface`, and a .F.-flagged inner bound
+  still opening its hole (area 16 − 4).
+
 - Phase 3 (CSG primitives + convex Boolean tools): the parametric
   `IfcCsgPrimitive3D` family now tessellates with the per-primitive
   anchoring recorded in the swept-disk digest §3 (the EXPRESS schema
