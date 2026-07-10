@@ -136,7 +136,7 @@ impl StepFile {
     /// instance references an id that does not exist in the file.
     pub fn dangling_references(&self) -> Vec<(u64, u64)> {
         let mut out = Vec::new();
-        for (&id, _) in self.instances.iter() {
+        for &id in self.instances.keys() {
             for target in self.references_of(id) {
                 if !self.instances.contains_key(&target) {
                     out.push((id, target));
