@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (incl. face holes), face/shell surface models, swept solids over a wide profile family (arbitrary ± voids, rectangle ± hollow, circle ± hollow, ellipse, composite; polyline / circle / indexed-poly-curve boundaries), boolean composition, mapped-item instancing, `IfcLocalPlacement` world-positioning, and surface-style materials | ✅ this release; advanced (curved) breps, boolean carving/intersection, arc segments + named profiles later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids over the full profile family with arc boundaries (trimmed conics, three-point arcs, composite curves), swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, and surface-style materials | ✅ this release; advanced (curved) breps, non-convex mesh–mesh booleans, named profiles (I/L/T/U/Z/C) later |
 
 ## Phase 1 surface
 
@@ -140,6 +140,8 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   flat indexed mesh in the representation item's local coordinate space.
   Triangles are **zero-based** (the one-based STEP `CoordIndex` plus any
   optional `PnIndex` indirection are resolved during extraction).
+  `TriMesh::signed_volume()` reports the enclosed volume by the
+  divergence theorem (positive for outward-wound watertight meshes).
 * `tessellate_item(step, id)` — one `IfcTriangulatedFaceSet`
   (`Coordinates`, `Normals`, `Closed`, `CoordIndex`, `PnIndex`) or
   `IfcPolygonalFaceSet` (`Coordinates`, `Closed`, `Faces`, `PnIndex`,
@@ -164,9 +166,13 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   single-bound faces keep the fan fast path. The shared vertex table is
   de-duplicated by `IfcCartesianPoint` id, so a point referenced by
   several loops (the §8.8.3.18 invariant guarantees at least three)
-  becomes one mesh vertex. Per-bound `Orientation` flags are not
-  applied; advanced (curved) breps and `IfcFaceSurface` faces remain
-  `Unsupported`.
+  becomes one mesh vertex. Per-bound `Orientation` flags are applied —
+  a FALSE bound contributes its loop **reversed**, so a well-formed
+  `IfcClosedShell` tessellates with consistently outward normals
+  (positive `signed_volume`); planar `IfcFaceSurface` faces are
+  accepted (`SameSense` relates the face to the *surface* normal and
+  does not flip the loop-derived winding). Advanced (curved) breps
+  remain `Unsupported`.
 * `tessellate_item` also sweeps the **extruded area solid**
   `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
   `Depth`) into a closed prism — hole-aware caps (ear-clipped, so
@@ -177,7 +183,7 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `Position`, `Axis`, `Angle`) about its `IfcAxis1Placement` line by
   `Angle` radians (Rodrigues' rotation, 48 segments per full turn; a
   full 2π wraps closed, a partial sweep gets hole-aware end caps).
-* The shared **profile family** behind both sweeps
+* The shared **profile family** behind the sweeps
   (`profile_area`/`profile_areas`): `IfcArbitraryClosedProfileDef` and
   `IfcArbitraryProfileDefWithVoids` (inner curves become hole rings),
   `IfcRectangleProfileDef` / `IfcRectangleHollowProfileDef`
@@ -185,19 +191,49 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `IfcCircleProfileDef` / `IfcCircleHollowProfileDef` (48-segment
   circles / annuli), `IfcEllipseProfileDef`, and
   `IfcCompositeProfileDef` (each component swept independently and
-  merged). Boundary curves may be an `IfcPolyline` (duplicated closing
-  point dropped), a full `IfcCircle`, or an `IfcIndexedPolyCurve` over
-  an `IfcCartesianPointList2D` (`$` segments or `IfcLineIndex` runs
-  with shared junctions; `IfcArcIndex` remains `Unsupported`). All
-  rings are normalised counter-clockwise; parameterised profiles apply
-  their optional 2-D `Position`.
-* `tessellate_item` composes **boolean results** (`IfcBooleanResult` /
-  `IfcBooleanClippingResult`, §8.8.3.5) at the surface-mesh level:
-  `UNION` merges the operand boundaries, `DIFFERENCE` emits the first
-  operand as authored (half-space carving pends the
-  `IfcHalfSpaceSolid.AgreementFlag` side-convention documentation), and
-  `INTERSECTION` surfaces as `Unsupported`. Operands recurse (clipping
-  chains nest) under a shared depth cap.
+  merged). All rings are normalised counter-clockwise; parameterised
+  profiles apply their optional 2-D `Position`.
+* Boundary **curves** cover the arc family: `IfcPolyline` (duplicated
+  closing point dropped), full `IfcCircle` / `IfcEllipse`,
+  `IfcTrimmedCurve` over a circle / ellipse / line basis (Cartesian
+  trims inverted through the conic parameterisation, parameter trims
+  scaled by the model **plane-angle unit** — `plane_angle_unit_scale`;
+  `MasterRepresentation` picks the authoritative dual-trim form,
+  `SenseAgreement` the traversal direction), `IfcIndexedPolyCurve`
+  with `IfcLineIndex` runs and three-point `IfcArcIndex` arcs
+  (circumscribed circle, mid-point disambiguated), and
+  `IfcCompositeCurve` chains with per-segment `SameSense` reversal.
+* **`IfcSweptDiskSolid`** / `…Polygonal` sweeps a disk or annulus along
+  a 3-D directrix (polyline, indexed poly-curve incl. 3-D arcs,
+  trimmed / full circle, composite): parallel-transported ring frames
+  with **exact elliptical mitre junctions** (a mitred polyline tube is
+  exactly area × length), `StartParam`/`EndParam` on conic directrices,
+  closed-path wrap, disk / annulus end caps, reversed inner walls.
+* **`IfcSectionedSolidHorizontal`** (IFC 4.3 alignment solid) lofts
+  profiles at `IfcAxis2PlacementLinear` distance-along stations
+  (lateral / vertical offsets honoured, longitudinal rejected per the
+  WHERE rule): sections stay **level** (profile +y → global +z) and
+  sub-stations interpolate the rings at every directrix vertex so the
+  loft follows curved alignments.
+* The **CSG primitives** `IfcBlock` / `IfcRectangularPyramid` /
+  `IfcRightCircularCone` / `IfcRightCircularCylinder` / `IfcSphere`
+  mesh with their per-primitive anchoring (corner vs base vs centred),
+  and `IfcCsgSolid` evaluates its `TreeRootExpression`.
+* `tessellate_item` evaluates **boolean results** (`IfcBooleanResult` /
+  `IfcBooleanClippingResult`, §8.8.3.5) with real carving:
+  - `DIFFERENCE` with an `IfcHalfSpaceSolid` (the `AgreementFlag` side
+    convention), `IfcPolygonalBoundedHalfSpace` (footprint prism;
+    concave boundaries ear-clipped into convex pieces) or
+    `IfcBoxedHalfSpace` (`Enclosure` box) splits the operand's closed
+    mesh plane-by-plane and **re-caps every cut watertight**
+    (deterministic loop chaining, hole-aware annulus caps).
+  - Any tool that tessellates to a closed **convex** mesh (extruded
+    convex profiles, CSG primitives) carves the same way — wall
+    openings genuinely cut. Non-convex tools fall back to the authored
+    first-operand boundary.
+  - `INTERSECTION` clips to the solid side for half-space / convex
+    tools; `UNION` merges the operand boundaries. Operands recurse
+    (clipping chains nest) under a shared depth cap.
 * `tessellate_item` also evaluates the **mapped item**
   `IfcMappedItem` (`MappingSource`, `MappingTarget`) — the inserted
   instance of a reusable source representation. `MappingSource` is an
@@ -252,14 +288,16 @@ and window prisms.
 `length_unit_scale(&StepFile)` resolves metres-per-model-unit from the
 project's `IfcUnitAssignment` (`IfcSIUnit` prefixes and
 `IfcConversionBasedUnit` factors — the wall fixture is millimetres, the
-column fixture inches); the decoder itself keeps raw model units.
+column fixture inches); `plane_angle_unit_scale(&StepFile)` resolves
+radians-per-model-angle-unit the same way (degree models scale their
+conic trim parameters and revolution angles). The decoder itself keeps
+raw model units.
 
 Still later in Phase 3: the remaining swept solids
-(`IfcSurfaceCurveSweptAreaSolid` / the tapered subtypes /
-`IfcSweptDiskSolid`), `IfcArcIndex` poly-curve segments + named
+(`IfcSurfaceCurveSweptAreaSolid` / the tapered subtypes), named
 parameterised profiles (I/L/T/U/Z/C), advanced (curved) breps
-(`IfcAdvancedBrep` / `IfcFaceSurface`), boolean half-space carving +
-intersection, and EXPRESS WHERE-rule validation.
+(`IfcAdvancedBrep` / curved `IfcFaceSurface`), non-convex mesh–mesh
+booleans, and EXPRESS WHERE-rule validation.
 
 ## Cargo features
 
