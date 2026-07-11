@@ -956,8 +956,12 @@ mod tests {
             Some(true)
         );
         assert!(psets.iter().any(|p| p.name == Some("Pset_TypeOnly")));
-        // An untyped object inherits nothing.
-        assert_eq!(m.property_set_ids(30), Vec::<u64>::new());
+        // The type object queried directly answers with its own
+        // HasPropertySets (no shadowing applies there).
+        assert_eq!(m.property_set_ids(30), vec![40, 42]);
+        assert!(m.is_type_object(30));
+        assert!(!m.is_type_object(10));
+        assert_eq!(m.type_objects().count(), 1);
     }
 
     #[test]

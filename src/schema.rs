@@ -80,6 +80,9 @@ pub enum EntityKind {
     /// `IfcRelFillsElement` — an element (door / window) filling an
     /// opening.
     RelFills,
+    /// An `IfcTypeObject` subtype — the type-level definition an
+    /// occurrence inherits property sets (and materials) from.
+    TypeObject,
     /// A placement entity (`IfcLocalPlacement`).
     Placement,
     /// A representation / context entity referenced by a product.
@@ -949,7 +952,7 @@ pub const SCHEMA: &[EntitySchema] = &[
     // HasPropertySets follow IfcRoot directly) ----
     EntitySchema {
         keyword: "IFCWALLTYPE",
-        kind: EntityKind::Other,
+        kind: EntityKind::TypeObject,
         // IfcRoot + IfcTypeObject(2) + IfcTypeProduct(2) +
         // IfcElementType(1) + IfcWallType(PredefinedType).
         attrs: chain!(
@@ -962,7 +965,7 @@ pub const SCHEMA: &[EntitySchema] = &[
     },
     EntitySchema {
         keyword: "IFCWINDOWTYPE",
-        kind: EntityKind::Other,
+        kind: EntityKind::TypeObject,
         // … + IfcWindowType(PredefinedType, PartitioningType,
         // ParameterTakesPrecedence, UserDefinedPartitioningType).
         attrs: chain!(
@@ -980,7 +983,7 @@ pub const SCHEMA: &[EntitySchema] = &[
     },
     EntitySchema {
         keyword: "IFCSANITARYTERMINALTYPE",
-        kind: EntityKind::Other,
+        kind: EntityKind::TypeObject,
         // IfcFlowTerminalType / IfcDistributionFlowElementType add no
         // serialised attributes over IfcElementType.
         attrs: chain!(
@@ -989,6 +992,193 @@ pub const SCHEMA: &[EntitySchema] = &[
             TYPE_PRODUCT_TAIL,
             ELEMENT_TYPE_TAIL,
             &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCCOLUMNTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCBEAMTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCSLABTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCBUILDINGELEMENTPROXYTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCCOVERINGTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCMEMBERTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCPLATETYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCRAILINGTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCROOFTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCSTAIRTYPE",
+        kind: EntityKind::TypeObject,
+        // IfcElementType chain + own PredefinedType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCDOORTYPE",
+        kind: EntityKind::TypeObject,
+        // … + IfcDoorType(PredefinedType, OperationType,
+        // ParameterTakesPrecedence, UserDefinedOperationType).
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &[
+                "PredefinedType",
+                "OperationType",
+                "ParameterTakesPrecedence",
+                "UserDefinedOperationType"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCFURNITURETYPE",
+        kind: EntityKind::TypeObject,
+        // IfcFurnishingElementType adds nothing over IfcElementType;
+        // IfcFurnitureType(AssemblyPlace, PredefinedType).
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["AssemblyPlace", "PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCDOORSTYLE",
+        kind: EntityKind::TypeObject,
+        // IfcDoorStyle is a direct IfcTypeProduct subtype (no
+        // IfcElementType): + (OperationType, ConstructionType,
+        // ParameterTakesPrecedence, Sizeable).
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            &[
+                "OperationType",
+                "ConstructionType",
+                "ParameterTakesPrecedence",
+                "Sizeable"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCWINDOWSTYLE",
+        kind: EntityKind::TypeObject,
+        // IfcWindowStyle is a direct IfcTypeProduct subtype: +
+        // (ConstructionType, OperationType, ParameterTakesPrecedence,
+        // Sizeable).
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            &[
+                "ConstructionType",
+                "OperationType",
+                "ParameterTakesPrecedence",
+                "Sizeable"
+            ]
         ),
     },
     // ---- Openings (voids / fills) ----
@@ -1986,6 +2176,23 @@ impl<'a> Model<'a> {
     /// HasPropertySets directly follow the IfcRoot attributes).
     pub fn property_set_ids(&self, id: u64) -> Vec<u64> {
         let mut out: Vec<u64> = self.defined_property_sets(id).to_vec();
+        // A type object queried directly answers with its own
+        // HasPropertySets (occurrences cannot be assigned to it — the
+        // NoRelatedTypeObject WHERE rule bars direct assignment).
+        if self.is_type_object(id) {
+            if let Some(inst) = self.step.get(id) {
+                if let Some(Value::List(sets)) = inst.args.get(5) {
+                    for set in sets {
+                        if let Some(sid) = set.as_reference() {
+                            if !out.contains(&sid) {
+                                out.push(sid);
+                            }
+                        }
+                    }
+                }
+            }
+            return out;
+        }
         let Some(type_id) = self.type_of(id) else {
             return out;
         };
@@ -2017,6 +2224,32 @@ impl<'a> Model<'a> {
             }
         }
         out
+    }
+
+    /// Whether `id` is a type object: typed as
+    /// [`EntityKind::TypeObject`], or the target of any
+    /// `IfcRelDefinesByType` (covering type subtypes outside the typed
+    /// slice).
+    pub fn is_type_object(&self, id: u64) -> bool {
+        if self
+            .step
+            .get(id)
+            .and_then(TypedEntity::new)
+            .is_some_and(|view| view.kind() == EntityKind::TypeObject)
+        {
+            return true;
+        }
+        self.typed_by.values().any(|t| *t == id)
+    }
+
+    /// Every type object in the typed slice
+    /// ([`EntityKind::TypeObject`]), as typed views, in ascending id
+    /// order.
+    pub fn type_objects(&self) -> impl Iterator<Item = TypedEntity<'a>> + '_ {
+        self.step.instances.values().filter_map(|inst| {
+            let view = TypedEntity::new(inst)?;
+            matches!(view.kind(), EntityKind::TypeObject).then_some(view)
+        })
     }
 
     /// Every physical product (`EntityKind::Product`) in the model, as
@@ -2176,6 +2409,20 @@ mod tests {
             ("IFCMATERIALPROFILESETUSAGETAPERING", 5),
             ("IFCMATERIALCONSTITUENT", 5),
             ("IFCMATERIALCONSTITUENTSET", 3),
+            ("IFCCOLUMNTYPE", 10),
+            ("IFCBEAMTYPE", 10),
+            ("IFCSLABTYPE", 10),
+            ("IFCBUILDINGELEMENTPROXYTYPE", 10),
+            ("IFCCOVERINGTYPE", 10),
+            ("IFCMEMBERTYPE", 10),
+            ("IFCPLATETYPE", 10),
+            ("IFCRAILINGTYPE", 10),
+            ("IFCROOFTYPE", 10),
+            ("IFCSTAIRTYPE", 10),
+            ("IFCDOORTYPE", 13),       // + Door4
+            ("IFCFURNITURETYPE", 11),  // + AssemblyPlace,PredefinedType
+            ("IFCDOORSTYLE", 12),      // TypeProduct(8) + 4
+            ("IFCWINDOWSTYLE", 12),    // TypeProduct(8) + 4
             ("IFCRELVOIDSELEMENT", 6), // Root4 + 2
             ("IFCRELFILLSELEMENT", 6), // Root4 + 2
             ("IFCPROJECTEDCRS", 7),    // CRS(4) + 3

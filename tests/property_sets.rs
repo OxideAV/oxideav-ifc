@@ -97,6 +97,12 @@ fn wall_fixture_window_pset_and_type_link() {
 
     // The wall has no type object.
     assert_eq!(m.type_of(45), None);
+
+    // The window type is recognised as a type object; its
+    // HasPropertySets is unset, so it owns no sets either.
+    assert!(m.is_type_object(107));
+    assert!(!m.is_type_object(102));
+    assert_eq!(m.property_set_ids(107), Vec::<u64>::new());
 }
 
 #[test]

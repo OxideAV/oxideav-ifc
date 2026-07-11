@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (type-object slice): new `EntityKind::TypeObject`
+  classifying the common element types — 14 new schema entries
+  (column / beam / slab / proxy / covering / member / plate / railing
+  / roof / stair / furniture types, `IfcDoorType`'s 4-attribute tail,
+  and the direct-`IfcTypeProduct` `IfcDoorStyle` / `IfcWindowStyle`
+  12-attribute chains) alongside the re-classified wall / window /
+  sanitary-terminal types. `Model::is_type_object(id)` (typed kind or
+  `RelatingType` target), `Model::type_objects()` enumeration, and
+  `property_set_ids` on a **type object** now answers with its own
+  `HasPropertySets` (occurrence shadowing does not apply there — the
+  `NoRelatedTypeObject` WHERE rule bars direct assignment).
+
 - Phase 4 (opening semantics): `Model` folds `IfcRelVoidsElement` and
   `IfcRelFillsElement` into the void/fill graph — `openings_of(wall)`,
   `voided_element_of(opening)`, `fillers_of(opening)`,
