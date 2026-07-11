@@ -4,6 +4,48 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-07-11
+
+### Other
+
+- Phase-4 external references + groups/systems/zones bullets
+- Phase 4 groups/systems/zones: IfcRelAssignsToGroup + IfcRelServicesBuildings
+- Phase 4 external references: classification + document associations
+- Phase 4 docs: README semantic-data-layer section + crate-doc refresh
+- Phase 4 decoder semantic materials: IfcRelAssociatesMaterial fallback
+- Phase 4 type-object slice: EntityKind::TypeObject + 14 common element types
+- Phase 4 opening semantics: IfcRelVoidsElement / IfcRelFillsElement graph
+- Phase 4 georeferencing: IfcMapConversion/IfcProjectedCRS + site lat/long
+- Phase 4 material associations: IfcRelAssociatesMaterial fold + IfcMaterialSelect surface
+- Phase 4 unit engine: area/volume/mass/time scales + SI-scaled quantities
+- Phase 4 property/quantity sets: IfcRelDefinesByProperties/ByType folds + typed props surface
+- Phase-3 refresh — boolean carving, arc curves, swept-disk / sectioned solids, CSG primitives, face orientation
+- Phase 3 sectioned solids: IfcSectionedSolidHorizontal level-section lofting
+- Phase 3 face orientation: apply IfcFaceBound.Orientation to Brep loops
+- Phase 3 CSG primitives + convex Boolean tools
+- Phase 3 swept-disk solids: IfcSweptDiskSolid(Polygonal) tubes along 3-D directrix curves
+- iterate instance keys directly (clippy 1.97 for_kv_map)
+- Phase 3 arcs + trimmed curves: IfcTrimmedCurve conic/line trims, IfcArcIndex, IfcCompositeCurve, plane-angle units
+- Phase 3 half-space clipping: carve IfcBooleanResult DIFFERENCE with plane/polygonal/boxed half-space tools
+- Phase-3 profile family / boolean composition / styling / units refresh
+- Phase 2 unit resolution: length_unit_scale (SI + conversion-based)
+- Phase 3 polygonal-face voids + product-named scene nodes
+- Phase 3 Brep face holes: inner bounds open + concave faces ear-clipped
+- Phase 3 presentation styling: surface-style materials + indexed colour maps
+- Phase 3 boolean composition: IfcBooleanResult / IfcBooleanClippingResult
+- Phase 3 curve/profile widening: IfcIndexedPolyCurve + IfcCompositeProfileDef
+- Phase 3 profile holes: hollow/voided profiles + ear-clipped hole-aware caps
+- Phase 3 parameterised profiles: circle / ellipse / IfcCircle outer curve
+- add CI / crates.io / docs.rs / MIT-license badges
+- Phase 3 revolved-area-solid slice + Phase 2 revolved typing
+- Phase 3 mapped-item slice + Phase 2 mapped-item typing
+- Phase-3 extruded swept solids — IfcExtrudedAreaSolid → closed prism
+- Phase 3 faceted-Brep tessellation (IfcFacetedBrep + surface models)
+- Phase 2 typed geometry-primitive slice (point/direction/axis-placement/polyline/shape-representation)
+- Phase 3 placement slice: IfcLocalPlacement world-positioning
+- Phase 3 tessellation slice: IfcTriangulatedFaceSet / IfcPolygonalFaceSet → Scene3D
+- Phase 2: EXPRESS schema typing over the STEP/P21 parser
+
 ### Added
 
 - Phase 4 (groups / systems / zones): `Model` folds
