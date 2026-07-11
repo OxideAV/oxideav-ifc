@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (external references): new [`external`] module — the
+  remaining `IfcRelAssociates` family.
+  - `Model::classifications_of(id)` / `Model::documents_of(id)` fold
+    `IfcRelAssociatesClassification` / `IfcRelAssociatesDocument`
+    (objects may carry several; the occurrence's associations merge
+    with its type object's, occurrence-first, de-duplicated).
+  - `classification_assignment` resolves the `IfcClassificationSelect`
+    — the `IfcClassification` system root (source / edition / name /
+    location) or an `IfcClassificationReference` code with its
+    `ReferencedSource` chain walked to the root system
+    (`ClassificationReference::system()`, depth-capped,
+    self-reference dropped); `code()` gives the headline
+    Uniclass/OmniClass-style identifier.
+  - `document_assignment` resolves the `IfcDocumentSelect` — bare
+    `IfcDocumentInformation` metadata (identification / name /
+    location / revision / MIME format / confidentiality / status) or
+    an `IfcDocumentReference` with its referenced document resolved.
+  - Schema entries for the 4 entities + 2 relationships (incl. the
+    17-attribute `IfcDocumentInformation` chain); 4 unit tests
+    (two-level Uniclass-style chain to the system root,
+    self-referential chain termination, occurrence+type merge,
+    document reference + bare information).
+
 - Phase 4 (decoder semantic materials): primitives left unstyled by
   the presentation chain now fall back to the owning product's
   **semantic** material association — `Model::material_of`

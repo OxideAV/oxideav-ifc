@@ -83,6 +83,11 @@ pub enum EntityKind {
     /// An `IfcTypeObject` subtype — the type-level definition an
     /// occurrence inherits property sets (and materials) from.
     TypeObject,
+    /// `IfcRelAssociatesClassification` — classification-entry
+    /// assignment to objects.
+    RelAssociatesClassification,
+    /// `IfcRelAssociatesDocument` — document assignment to objects.
+    RelAssociatesDocument,
     /// A placement entity (`IfcLocalPlacement`).
     Placement,
     /// A representation / context entity referenced by a product.
@@ -1341,6 +1346,87 @@ pub const SCHEMA: &[EntitySchema] = &[
         // MaterialConstituents).
         attrs: chain!(&["Name", "Description", "MaterialConstituents"]),
     },
+    // ---- External references (classifications / documents) ----
+    EntitySchema {
+        keyword: "IFCRELASSOCIATESCLASSIFICATION",
+        kind: EntityKind::RelAssociatesClassification,
+        // IfcRoot + IfcRelAssociates(RelatedObjects) +
+        // IfcRelAssociatesClassification(RelatingClassification).
+        attrs: chain!(ROOT, &["RelatedObjects", "RelatingClassification"]),
+    },
+    EntitySchema {
+        keyword: "IFCRELASSOCIATESDOCUMENT",
+        kind: EntityKind::RelAssociatesDocument,
+        attrs: chain!(ROOT, &["RelatedObjects", "RelatingDocument"]),
+    },
+    EntitySchema {
+        keyword: "IFCCLASSIFICATION",
+        kind: EntityKind::Other,
+        // IfcExternalInformation adds nothing; IfcClassification(
+        // Source, Edition, EditionDate, Name, Description, Location,
+        // ReferenceTokens).
+        attrs: chain!(&[
+            "Source",
+            "Edition",
+            "EditionDate",
+            "Name",
+            "Description",
+            "Location",
+            "ReferenceTokens"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCCLASSIFICATIONREFERENCE",
+        kind: EntityKind::Other,
+        // IfcExternalReference(Location, Identification, Name) +
+        // IfcClassificationReference(ReferencedSource, Description,
+        // Sort).
+        attrs: chain!(&[
+            "Location",
+            "Identification",
+            "Name",
+            "ReferencedSource",
+            "Description",
+            "Sort"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCDOCUMENTREFERENCE",
+        kind: EntityKind::Other,
+        // IfcExternalReference(3) + IfcDocumentReference(Description,
+        // ReferencedDocument).
+        attrs: chain!(&[
+            "Location",
+            "Identification",
+            "Name",
+            "Description",
+            "ReferencedDocument"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCDOCUMENTINFORMATION",
+        kind: EntityKind::Other,
+        // IfcExternalInformation adds nothing; the 17 own attributes.
+        attrs: chain!(&[
+            "Identification",
+            "Name",
+            "Description",
+            "Location",
+            "Purpose",
+            "IntendedUse",
+            "Scope",
+            "Revision",
+            "DocumentOwner",
+            "Editors",
+            "CreationTime",
+            "LastRevisionTime",
+            "ElectronicFormat",
+            "ValidFrom",
+            "ValidUntil",
+            "Confidentiality",
+            "Status"
+        ]),
+    },
     // ---- Georeferencing ----
     EntitySchema {
         keyword: "IFCPROJECTEDCRS",
@@ -1905,6 +1991,12 @@ pub struct Model<'a> {
     fills: BTreeMap<u64, Vec<u64>>,
     /// `filler element -> opening` back edges (first edge wins).
     filler_of: BTreeMap<u64, u64>,
+    /// `object -> IfcClassificationSelect` edges from
+    /// `IfcRelAssociatesClassification` (an object may carry several).
+    classifications: BTreeMap<u64, Vec<u64>>,
+    /// `object -> IfcDocumentSelect` edges from
+    /// `IfcRelAssociatesDocument`.
+    documents: BTreeMap<u64, Vec<u64>>,
 }
 
 impl<'a> Model<'a> {
@@ -1927,6 +2019,8 @@ impl<'a> Model<'a> {
         let mut voided: BTreeMap<u64, u64> = BTreeMap::new();
         let mut fills: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut filler_of: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut classifications: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut documents: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
 
         for inst in step.instances.values() {
             let Some(view) = TypedEntity::new(inst) else {
@@ -2025,6 +2119,31 @@ impl<'a> Model<'a> {
                         filler_of.entry(filler).or_insert(opening);
                     }
                 }
+                EntityKind::RelAssociatesClassification => {
+                    if let (Some(objects), Some(target)) = (
+                        view.attr("RelatedObjects"),
+                        view.attr("RelatingClassification")
+                            .and_then(Value::as_reference),
+                    ) {
+                        let mut object_ids = Vec::new();
+                        push_refs(objects, &mut object_ids);
+                        for object in object_ids {
+                            classifications.entry(object).or_default().push(target);
+                        }
+                    }
+                }
+                EntityKind::RelAssociatesDocument => {
+                    if let (Some(objects), Some(target)) = (
+                        view.attr("RelatedObjects"),
+                        view.attr("RelatingDocument").and_then(Value::as_reference),
+                    ) {
+                        let mut object_ids = Vec::new();
+                        push_refs(objects, &mut object_ids);
+                        for object in object_ids {
+                            documents.entry(object).or_default().push(target);
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -2041,6 +2160,8 @@ impl<'a> Model<'a> {
             voided,
             fills,
             filler_of,
+            classifications,
+            documents,
         }
     }
 
@@ -2161,6 +2282,39 @@ impl<'a> Model<'a> {
             .iter()
             .flat_map(|opening| self.fillers_of(*opening).iter().copied())
             .collect()
+    }
+
+    /// Merge the direct association targets for `id` with its type
+    /// object's (occurrence first, duplicates dropped).
+    fn merged_assoc(&self, table: &BTreeMap<u64, Vec<u64>>, id: u64) -> Vec<u64> {
+        let mut out: Vec<u64> = table.get(&id).cloned().unwrap_or_default();
+        if let Some(type_id) = self.type_of(id) {
+            if let Some(from_type) = table.get(&type_id) {
+                for target in from_type {
+                    if !out.contains(target) {
+                        out.push(*target);
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// The `IfcClassificationSelect` `#id`s associated with the object
+    /// `id` (`IfcRelAssociatesClassification`) — its own associations
+    /// first, then the ones inherited from its type object,
+    /// de-duplicated. Resolve each with
+    /// [`classification_assignment`](crate::external::classification_assignment).
+    pub fn classifications_of(&self, id: u64) -> Vec<u64> {
+        self.merged_assoc(&self.classifications, id)
+    }
+
+    /// The `IfcDocumentSelect` `#id`s associated with the object `id`
+    /// (`IfcRelAssociatesDocument`), occurrence-first with the type's
+    /// merged in. Resolve each with
+    /// [`document_assignment`](crate::external::document_assignment).
+    pub fn documents_of(&self, id: u64) -> Vec<u64> {
+        self.merged_assoc(&self.documents, id)
     }
 
     /// Every property-set / quantity-set definition `#id` that applies
@@ -2425,8 +2579,14 @@ mod tests {
             ("IFCWINDOWSTYLE", 12),    // TypeProduct(8) + 4
             ("IFCRELVOIDSELEMENT", 6), // Root4 + 2
             ("IFCRELFILLSELEMENT", 6), // Root4 + 2
-            ("IFCPROJECTEDCRS", 7),    // CRS(4) + 3
-            ("IFCMAPCONVERSION", 8),   // Operation(2) + 6
+            ("IFCRELASSOCIATESCLASSIFICATION", 6),
+            ("IFCRELASSOCIATESDOCUMENT", 6),
+            ("IFCCLASSIFICATION", 7),
+            ("IFCCLASSIFICATIONREFERENCE", 6), // ExternalReference(3) + 3
+            ("IFCDOCUMENTREFERENCE", 5),       // ExternalReference(3) + 2
+            ("IFCDOCUMENTINFORMATION", 17),
+            ("IFCPROJECTEDCRS", 7),  // CRS(4) + 3
+            ("IFCMAPCONVERSION", 8), // Operation(2) + 6
         ];
         for (kw, want) in lens {
             assert_eq!(

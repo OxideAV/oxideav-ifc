@@ -106,6 +106,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod error;
+pub mod external;
 pub mod geo;
 pub mod geometry;
 pub mod header;
@@ -120,6 +121,9 @@ pub mod value;
 pub mod decoder;
 
 pub use error::{Error, Result};
+pub use external::{
+    classification_assignment, document_assignment, ClassificationAssignment, DocumentAssignment,
+};
 pub use geo::{map_conversion, site_geolocation, MapConversion, ProjectedCrs, SiteGeolocation};
 pub use geometry::{
     mesh_from_product_shape, mesh_from_shape_representation, meshed_items_from_product_shape,
