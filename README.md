@@ -22,7 +22,7 @@ extension.
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
 | **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids over the full profile family with arc boundaries (trimmed conics, three-point arcs, composite curves), swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, and surface-style materials | ✅ this release; advanced (curved) breps, non-convex mesh–mesh booleans, named profiles (I/L/T/U/Z/C) later |
-| **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), void/fill opening graph, georeferencing (`IfcMapConversion` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time) | ✅ this release |
+| **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time) | ✅ this release |
 
 ## Phase 1 surface
 
@@ -364,6 +364,18 @@ let name = model.material_assignment(wall_id).and_then(|m| m.name().map(String::
   furniture / proxy / sanitary-terminal types);
   `Model::type_objects()` enumerates, `is_type_object(id)` also
   recognises `RelatingType` targets outside the slice.
+* **External references** (`oxideav_ifc::external`):
+  `classifications_of(id)` / `documents_of(id)` fold the remaining
+  `IfcRelAssociates` family (multi-valued, occurrence + type merged);
+  `classification_assignment` walks an `IfcClassificationReference`'s
+  `ReferencedSource` chain to its system root (`code()` gives the
+  Uniclass/OmniClass-style identifier), `document_assignment` resolves
+  `IfcDocumentInformation` / `IfcDocumentReference` metadata.
+* **Groups / systems / zones**: `group_members(group)` /
+  `groups_of(object)` over `IfcRelAssignsToGroup`(`ByFactor`),
+  `serviced_buildings(system)` over `IfcRelServicesBuildings`, and the
+  `groups()` enumeration (`IfcGroup` / `IfcSystem` / `IfcZone` /
+  distribution + building systems).
 * **Georeferencing** (`oxideav_ifc::geo`): `map_conversion(step)` —
   the `IfcMapConversion` bound to the geometric representation
   context, with its `IfcProjectedCRS` target (EPSG name, datums,
