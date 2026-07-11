@@ -1131,6 +1131,40 @@ pub const SCHEMA: &[EntitySchema] = &[
         // MaterialConstituents).
         attrs: chain!(&["Name", "Description", "MaterialConstituents"]),
     },
+    // ---- Georeferencing ----
+    EntitySchema {
+        keyword: "IFCPROJECTEDCRS",
+        kind: EntityKind::Other,
+        // IfcCoordinateReferenceSystem(Name, Description,
+        // GeodeticDatum, VerticalDatum) + IfcProjectedCRS(
+        // MapProjection, MapZone, MapUnit).
+        attrs: chain!(&[
+            "Name",
+            "Description",
+            "GeodeticDatum",
+            "VerticalDatum",
+            "MapProjection",
+            "MapZone",
+            "MapUnit"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMAPCONVERSION",
+        kind: EntityKind::Other,
+        // IfcCoordinateOperation(SourceCRS, TargetCRS) +
+        // IfcMapConversion(Eastings, Northings, OrthogonalHeight,
+        // XAxisAbscissa, XAxisOrdinate, Scale).
+        attrs: chain!(&[
+            "SourceCRS",
+            "TargetCRS",
+            "Eastings",
+            "Northings",
+            "OrthogonalHeight",
+            "XAxisAbscissa",
+            "XAxisOrdinate",
+            "Scale"
+        ]),
+    },
     // ---- Units ----
     EntitySchema {
         keyword: "IFCUNITASSIGNMENT",

@@ -6,6 +6,29 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (georeferencing): new [`geo`] module.
+  - `map_conversion(step)` — the model's `IfcMapConversion` binding
+    (the one whose `SourceCRS` is the
+    `IfcGeometricRepresentationContext`), with the `IfcProjectedCRS`
+    target resolved (EPSG name, datums, projection/zone, `MapUnit`
+    resolvable through `named_unit_scale`). `MapConversion::to_map`
+    applies the planar similarity the attributes describe — rotation
+    by the normalised (`XAxisAbscissa`, `XAxisOrdinate`) x-axis
+    direction, `Scale` on the planar components, translation to
+    (`Eastings`, `Northings`, `OrthogonalHeight`); heights translate
+    **unscaled** (the staged schema text states no height-scaling
+    rule). CRS-to-CRS conversions resolve by id but are not the model
+    binding.
+  - `site_geolocation(step)` — the first `IfcSite` with
+    `RefLatitude`/`RefLongitude`, converted from
+    `IfcCompoundPlaneAngleMeasure` (degrees, minutes, seconds[,
+    millionths] with consistent sign) to decimal degrees via the
+    public `compound_angle_degrees`; `RefElevation` carried along.
+  - Schema entries for `IfcMapConversion` / `IfcProjectedCRS`; 5 unit
+    tests (3-4-5 rotation + origin/step mapping, identity + planar
+    scale defaults, non-model-binding filter, compound-angle
+    conversions incl. negative measures, ungeoreferenced model).
+
 - Phase 4 (material associations): new [`material`] module resolving
   the full `IfcMaterialSelect` family.
   - `Model` folds `IfcRelAssociatesMaterial` (object →

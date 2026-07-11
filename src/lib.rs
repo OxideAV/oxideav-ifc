@@ -84,6 +84,7 @@
 #![warn(missing_debug_implementations)]
 
 pub mod error;
+pub mod geo;
 pub mod geometry;
 pub mod header;
 mod lexer;
@@ -97,6 +98,7 @@ pub mod value;
 pub mod decoder;
 
 pub use error::{Error, Result};
+pub use geo::{map_conversion, site_geolocation, MapConversion, ProjectedCrs, SiteGeolocation};
 pub use geometry::{
     mesh_from_product_shape, mesh_from_shape_representation, meshed_items_from_product_shape,
     placement_transform, tessellate_item, GeometryError, Transform, TriMesh,
