@@ -75,6 +75,11 @@ pub enum EntityKind {
     /// `IfcRelAssociatesMaterial` — material assignment to objects
     /// (occurrences and type objects).
     RelAssociatesMaterial,
+    /// `IfcRelVoidsElement` — an opening carved out of an element.
+    RelVoids,
+    /// `IfcRelFillsElement` — an element (door / window) filling an
+    /// opening.
+    RelFills,
     /// A placement entity (`IfcLocalPlacement`).
     Placement,
     /// A representation / context entity referenced by a product.
@@ -986,6 +991,21 @@ pub const SCHEMA: &[EntitySchema] = &[
             &["PredefinedType"]
         ),
     },
+    // ---- Openings (voids / fills) ----
+    EntitySchema {
+        keyword: "IFCRELVOIDSELEMENT",
+        kind: EntityKind::RelVoids,
+        // IfcRoot + IfcRelDecomposes(none) + IfcRelVoidsElement(
+        // RelatingBuildingElement, RelatedOpeningElement).
+        attrs: chain!(ROOT, &["RelatingBuildingElement", "RelatedOpeningElement"]),
+    },
+    EntitySchema {
+        keyword: "IFCRELFILLSELEMENT",
+        kind: EntityKind::RelFills,
+        // IfcRoot + IfcRelConnects(none) + IfcRelFillsElement(
+        // RelatingOpeningElement, RelatedBuildingElement).
+        attrs: chain!(ROOT, &["RelatingOpeningElement", "RelatedBuildingElement"]),
+    },
     // ---- Material associations ----
     EntitySchema {
         keyword: "IFCRELASSOCIATESMATERIAL",
@@ -1686,6 +1706,15 @@ pub struct Model<'a> {
     /// `object -> IfcMaterialSelect` edges from
     /// `IfcRelAssociatesMaterial` (first edge wins).
     materials: BTreeMap<u64, u64>,
+    /// `element -> opening elements` edges from `IfcRelVoidsElement`.
+    voids: BTreeMap<u64, Vec<u64>>,
+    /// `opening -> voided element` back edges (one relationship per
+    /// opening — `HasFillings`' dual; first edge wins).
+    voided: BTreeMap<u64, u64>,
+    /// `opening -> filler elements` edges from `IfcRelFillsElement`.
+    fills: BTreeMap<u64, Vec<u64>>,
+    /// `filler element -> opening` back edges (first edge wins).
+    filler_of: BTreeMap<u64, u64>,
 }
 
 impl<'a> Model<'a> {
@@ -1704,6 +1733,10 @@ impl<'a> Model<'a> {
         let mut defines: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut typed_by: BTreeMap<u64, u64> = BTreeMap::new();
         let mut materials: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut voids: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut voided: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut fills: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut filler_of: BTreeMap<u64, u64> = BTreeMap::new();
 
         for inst in step.instances.values() {
             let Some(view) = TypedEntity::new(inst) else {
@@ -1780,6 +1813,28 @@ impl<'a> Model<'a> {
                         }
                     }
                 }
+                EntityKind::RelVoids => {
+                    if let (Some(element), Some(opening)) = (
+                        view.attr("RelatingBuildingElement")
+                            .and_then(Value::as_reference),
+                        view.attr("RelatedOpeningElement")
+                            .and_then(Value::as_reference),
+                    ) {
+                        voids.entry(element).or_default().push(opening);
+                        voided.entry(opening).or_insert(element);
+                    }
+                }
+                EntityKind::RelFills => {
+                    if let (Some(opening), Some(filler)) = (
+                        view.attr("RelatingOpeningElement")
+                            .and_then(Value::as_reference),
+                        view.attr("RelatedBuildingElement")
+                            .and_then(Value::as_reference),
+                    ) {
+                        fills.entry(opening).or_default().push(filler);
+                        filler_of.entry(filler).or_insert(opening);
+                    }
+                }
                 _ => {}
             }
         }
@@ -1792,6 +1847,10 @@ impl<'a> Model<'a> {
             defines,
             typed_by,
             materials,
+            voids,
+            voided,
+            fills,
+            filler_of,
         }
     }
 
@@ -1874,6 +1933,44 @@ impl<'a> Model<'a> {
     /// the object `id`, following [`Model::material_of`].
     pub fn material_assignment(&self, id: u64) -> Option<crate::material::MaterialAssignment<'a>> {
         crate::material::material_assignment(self.step, self.material_of(id)?)
+    }
+
+    /// The opening elements voiding the element `id`
+    /// (`IfcRelVoidsElement`, the `HasOpenings` inverse). Empty when
+    /// nothing is carved out.
+    pub fn openings_of(&self, id: u64) -> &[u64] {
+        self.voids.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The element the opening `id` is carved out of
+    /// (`IfcRelVoidsElement.RelatingBuildingElement`, the
+    /// `VoidsElements` inverse).
+    pub fn voided_element_of(&self, id: u64) -> Option<u64> {
+        self.voided.get(&id).copied()
+    }
+
+    /// The elements filling the opening `id` (`IfcRelFillsElement`,
+    /// the `HasFillings` inverse — doors / windows). Empty when the
+    /// opening stays open.
+    pub fn fillers_of(&self, id: u64) -> &[u64] {
+        self.fills.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The opening the element `id` fills
+    /// (`IfcRelFillsElement.RelatingOpeningElement`, the
+    /// `FillsVoids` inverse).
+    pub fn filled_opening_of(&self, id: u64) -> Option<u64> {
+        self.filler_of.get(&id).copied()
+    }
+
+    /// Every element hosted in the element `id` through an opening —
+    /// the openings' fillers flattened (the windows and doors of a
+    /// wall), in opening order.
+    pub fn hosted_fillers(&self, id: u64) -> Vec<u64> {
+        self.openings_of(id)
+            .iter()
+            .flat_map(|opening| self.fillers_of(*opening).iter().copied())
+            .collect()
     }
 
     /// Every property-set / quantity-set definition `#id` that applies
@@ -2067,6 +2164,22 @@ mod tests {
             ("IFCWALLTYPE", 10),               // Root4 + Type2 + Product2 + Elem1 + 1
             ("IFCWINDOWTYPE", 13),             // Root4 + Type2 + Product2 + Elem1 + 4
             ("IFCSANITARYTERMINALTYPE", 10),
+            ("IFCRELASSOCIATESMATERIAL", 6), // Root4 + 2
+            ("IFCMATERIAL", 3),              // Name,Desc,Category
+            ("IFCMATERIALLAYER", 7),
+            ("IFCMATERIALLAYERWITHOFFSETS", 9),
+            ("IFCMATERIALLAYERSET", 3),
+            ("IFCMATERIALLAYERSETUSAGE", 5),
+            ("IFCMATERIALPROFILE", 6),
+            ("IFCMATERIALPROFILESET", 4),
+            ("IFCMATERIALPROFILESETUSAGE", 3),
+            ("IFCMATERIALPROFILESETUSAGETAPERING", 5),
+            ("IFCMATERIALCONSTITUENT", 5),
+            ("IFCMATERIALCONSTITUENTSET", 3),
+            ("IFCRELVOIDSELEMENT", 6), // Root4 + 2
+            ("IFCRELFILLSELEMENT", 6), // Root4 + 2
+            ("IFCPROJECTEDCRS", 7),    // CRS(4) + 3
+            ("IFCMAPCONVERSION", 8),   // Operation(2) + 6
         ];
         for (kw, want) in lens {
             assert_eq!(
@@ -2395,6 +2508,32 @@ mod tests {
         assert_eq!(w.object_placement(), None);
         assert_eq!(w.predefined_type(), None);
         assert_eq!(w.attrs().count(), 5);
+    }
+
+    #[test]
+    fn voids_and_fills_fold_with_multiple_fillers() {
+        // One wall, two openings; the second opening is double-filled
+        // (door + side light). Back edges keep the first relationship.
+        let f = parse(
+            "#10=IFCWALL('w',$,'Wall',$,$,$,$,$,$);\n\
+             #20=IFCOPENINGELEMENT('o1',$,'Op1',$,$,$,$,$,.OPENING.);\n\
+             #21=IFCOPENINGELEMENT('o2',$,'Op2',$,$,$,$,$,.OPENING.);\n\
+             #30=IFCDOOR('d',$,'Door',$,$,$,$,$,$,$,$,$,$);\n\
+             #31=IFCWINDOW('g',$,'Light',$,$,$,$,$,$,$,$,$,$);\n\
+             #40=IFCRELVOIDSELEMENT('v1',$,$,$,#10,#20);\n\
+             #41=IFCRELVOIDSELEMENT('v2',$,$,$,#10,#21);\n\
+             #50=IFCRELFILLSELEMENT('f1',$,$,$,#21,#30);\n\
+             #51=IFCRELFILLSELEMENT('f2',$,$,$,#21,#31);",
+        );
+        let m = Model::from_step(&f);
+        assert_eq!(m.openings_of(10), &[20, 21]);
+        assert_eq!(m.voided_element_of(20), Some(10));
+        assert_eq!(m.voided_element_of(21), Some(10));
+        assert!(m.fillers_of(20).is_empty());
+        assert_eq!(m.fillers_of(21), &[30, 31]);
+        assert_eq!(m.filled_opening_of(30), Some(21));
+        assert_eq!(m.filled_opening_of(31), Some(21));
+        assert_eq!(m.hosted_fillers(10), vec![30, 31]);
     }
 
     #[test]

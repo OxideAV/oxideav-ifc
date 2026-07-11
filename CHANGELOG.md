@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (opening semantics): `Model` folds `IfcRelVoidsElement` and
+  `IfcRelFillsElement` into the void/fill graph — `openings_of(wall)`,
+  `voided_element_of(opening)`, `fillers_of(opening)`,
+  `filled_opening_of(window)`, and the flattened
+  `hosted_fillers(wall)` (a wall's windows/doors through its
+  openings). Both directions indexed; back edges keep the first
+  relationship. 2 new tests (wall-fixture wall→opening→window chain
+  both ways; synthetic double-filled second opening).
+
 - Phase 4 (georeferencing): new [`geo`] module.
   - `map_conversion(step)` — the model's `IfcMapConversion` binding
     (the one whose `SourceCRS` is the

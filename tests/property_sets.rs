@@ -115,6 +115,27 @@ fn basin_fixture_type_link_resolves() {
 }
 
 #[test]
+fn wall_fixture_void_and_fill_graph() {
+    let f = parse_step(WALL).expect("parse");
+    let m = Model::from_step(&f);
+
+    // #85 = IFCRELVOIDSELEMENT(..., #45, #80): the wall is voided by
+    // the opening; #112 = IFCRELFILLSELEMENT(..., #80, #102): the
+    // window fills it.
+    assert_eq!(m.openings_of(45), &[80]);
+    assert_eq!(m.voided_element_of(80), Some(45));
+    assert_eq!(m.fillers_of(80), &[102]);
+    assert_eq!(m.filled_opening_of(102), Some(80));
+    // Wall → openings → fillers: the wall hosts exactly the window.
+    assert_eq!(m.hosted_fillers(45), vec![102]);
+    // The window hosts nothing and is voided by nothing.
+    assert!(m.openings_of(102).is_empty());
+    assert_eq!(m.voided_element_of(102), None);
+    assert!(m.fillers_of(45).is_empty());
+    assert_eq!(m.filled_opening_of(45), None);
+}
+
+#[test]
 fn basin_fixture_material_falls_back_to_type() {
     let f = parse_step(BASIN).expect("parse");
     let m = Model::from_step(&f);
