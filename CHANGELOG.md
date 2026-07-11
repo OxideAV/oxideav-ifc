@@ -6,6 +6,17 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (groups / systems / zones): `Model` folds
+  `IfcRelAssignsToGroup` (+ the `ByFactor` subtype) and
+  `IfcRelServicesBuildings` — `group_members(group)` /
+  `groups_of(object)` both directions, `serviced_buildings(system)`,
+  and the `groups()` enumeration over the new `EntityKind::Group`
+  slice (`IfcGroup` / `IfcSystem` / `IfcZone` / and the
+  `IfcDistributionSystem` / `IfcBuildingSystem` subtypes — whose
+  `LongName`/`PredefinedType` orders are **reversed** relative to each
+  other, transcribed as declared). Groups are typed but stay out of
+  `products()` / `spatial_elements()`. 1 new test.
+
 - Phase 4 (external references): new [`external`] module — the
   remaining `IfcRelAssociates` family.
   - `Model::classifications_of(id)` / `Model::documents_of(id)` fold

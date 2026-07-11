@@ -88,6 +88,13 @@ pub enum EntityKind {
     RelAssociatesClassification,
     /// `IfcRelAssociatesDocument` — document assignment to objects.
     RelAssociatesDocument,
+    /// `IfcRelAssignsToGroup` (incl. the `ByFactor` subtype) —
+    /// membership of objects in a group / system / zone.
+    RelAssignsToGroup,
+    /// `IfcRelServicesBuildings` — a system serving spatial elements.
+    RelServicesBuildings,
+    /// An `IfcGroup` subtype: group / system / zone.
+    Group,
     /// A placement entity (`IfcLocalPlacement`).
     Placement,
     /// A representation / context entity referenced by a product.
@@ -1427,6 +1434,69 @@ pub const SCHEMA: &[EntitySchema] = &[
             "Status"
         ]),
     },
+    // ---- Groups / systems / zones ----
+    EntitySchema {
+        keyword: "IFCRELASSIGNSTOGROUP",
+        kind: EntityKind::RelAssignsToGroup,
+        // IfcRoot + IfcRelAssigns(RelatedObjects, RelatedObjectsType)
+        // + IfcRelAssignsToGroup(RelatingGroup).
+        attrs: chain!(
+            ROOT,
+            &["RelatedObjects", "RelatedObjectsType", "RelatingGroup"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCRELASSIGNSTOGROUPBYFACTOR",
+        kind: EntityKind::RelAssignsToGroup,
+        // IfcRelAssignsToGroup(7) + Factor.
+        attrs: chain!(
+            ROOT,
+            &[
+                "RelatedObjects",
+                "RelatedObjectsType",
+                "RelatingGroup",
+                "Factor"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCRELSERVICESBUILDINGS",
+        kind: EntityKind::RelServicesBuildings,
+        // IfcRoot + IfcRelConnects(none) + (RelatingSystem,
+        // RelatedBuildings).
+        attrs: chain!(ROOT, &["RelatingSystem", "RelatedBuildings"]),
+    },
+    EntitySchema {
+        keyword: "IFCGROUP",
+        kind: EntityKind::Group,
+        // IfcRoot + IfcObject(ObjectType); IfcGroup adds nothing.
+        attrs: chain!(ROOT, OBJECT_TAIL),
+    },
+    EntitySchema {
+        keyword: "IFCSYSTEM",
+        kind: EntityKind::Group,
+        // IfcSystem adds nothing over IfcGroup.
+        attrs: chain!(ROOT, OBJECT_TAIL),
+    },
+    EntitySchema {
+        keyword: "IFCZONE",
+        kind: EntityKind::Group,
+        // IfcZone(LongName).
+        attrs: chain!(ROOT, OBJECT_TAIL, &["LongName"]),
+    },
+    EntitySchema {
+        keyword: "IFCDISTRIBUTIONSYSTEM",
+        kind: EntityKind::Group,
+        // IfcDistributionSystem(LongName, PredefinedType).
+        attrs: chain!(ROOT, OBJECT_TAIL, &["LongName", "PredefinedType"]),
+    },
+    EntitySchema {
+        keyword: "IFCBUILDINGSYSTEM",
+        kind: EntityKind::Group,
+        // IfcBuildingSystem(PredefinedType, LongName) — note the
+        // reversed order relative to IfcDistributionSystem.
+        attrs: chain!(ROOT, OBJECT_TAIL, &["PredefinedType", "LongName"]),
+    },
     // ---- Georeferencing ----
     EntitySchema {
         keyword: "IFCPROJECTEDCRS",
@@ -1997,6 +2067,13 @@ pub struct Model<'a> {
     /// `object -> IfcDocumentSelect` edges from
     /// `IfcRelAssociatesDocument`.
     documents: BTreeMap<u64, Vec<u64>>,
+    /// `group -> member objects` edges from `IfcRelAssignsToGroup`.
+    group_members: BTreeMap<u64, Vec<u64>>,
+    /// `member -> groups` back edges.
+    member_groups: BTreeMap<u64, Vec<u64>>,
+    /// `system -> serviced spatial elements` edges from
+    /// `IfcRelServicesBuildings`.
+    services: BTreeMap<u64, Vec<u64>>,
 }
 
 impl<'a> Model<'a> {
@@ -2021,6 +2098,9 @@ impl<'a> Model<'a> {
         let mut filler_of: BTreeMap<u64, u64> = BTreeMap::new();
         let mut classifications: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut documents: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut group_members: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut member_groups: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut services: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
 
         for inst in step.instances.values() {
             let Some(view) = TypedEntity::new(inst) else {
@@ -2144,6 +2224,28 @@ impl<'a> Model<'a> {
                         }
                     }
                 }
+                EntityKind::RelAssignsToGroup => {
+                    if let (Some(objects), Some(group)) = (
+                        view.attr("RelatedObjects"),
+                        view.attr("RelatingGroup").and_then(Value::as_reference),
+                    ) {
+                        let mut object_ids = Vec::new();
+                        push_refs(objects, &mut object_ids);
+                        for object in &object_ids {
+                            member_groups.entry(*object).or_default().push(group);
+                        }
+                        group_members.entry(group).or_default().extend(object_ids);
+                    }
+                }
+                EntityKind::RelServicesBuildings => {
+                    if let (Some(system), Some(buildings)) = (
+                        view.attr("RelatingSystem").and_then(Value::as_reference),
+                        view.attr("RelatedBuildings"),
+                    ) {
+                        let serviced = services.entry(system).or_default();
+                        push_refs(buildings, serviced);
+                    }
+                }
                 _ => {}
             }
         }
@@ -2162,6 +2264,9 @@ impl<'a> Model<'a> {
             filler_of,
             classifications,
             documents,
+            group_members,
+            member_groups,
+            services,
         }
     }
 
@@ -2315,6 +2420,41 @@ impl<'a> Model<'a> {
     /// [`document_assignment`](crate::external::document_assignment).
     pub fn documents_of(&self, id: u64) -> Vec<u64> {
         self.merged_assoc(&self.documents, id)
+    }
+
+    /// The member objects assigned to the group / system / zone `id`
+    /// (`IfcRelAssignsToGroup`, the `IsGroupedBy` inverse). Empty when
+    /// the group has no members.
+    pub fn group_members(&self, id: u64) -> &[u64] {
+        self.group_members
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The groups / systems / zones the object `id` is assigned to
+    /// (`IfcRelAssignsToGroup.RelatingGroup`, the `HasAssignments`
+    /// side). Empty when unassigned.
+    pub fn groups_of(&self, id: u64) -> &[u64] {
+        self.member_groups
+            .get(&id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
+    /// The spatial elements a system services
+    /// (`IfcRelServicesBuildings`). Empty for non-systems.
+    pub fn serviced_buildings(&self, id: u64) -> &[u64] {
+        self.services.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// Every group / system / zone in the typed slice
+    /// ([`EntityKind::Group`]), as typed views, in ascending id order.
+    pub fn groups(&self) -> impl Iterator<Item = TypedEntity<'a>> + '_ {
+        self.step.instances.values().filter_map(|inst| {
+            let view = TypedEntity::new(inst)?;
+            matches!(view.kind(), EntityKind::Group).then_some(view)
+        })
     }
 
     /// Every property-set / quantity-set definition `#id` that applies
@@ -2573,12 +2713,20 @@ mod tests {
             ("IFCRAILINGTYPE", 10),
             ("IFCROOFTYPE", 10),
             ("IFCSTAIRTYPE", 10),
-            ("IFCDOORTYPE", 13),       // + Door4
-            ("IFCFURNITURETYPE", 11),  // + AssemblyPlace,PredefinedType
-            ("IFCDOORSTYLE", 12),      // TypeProduct(8) + 4
-            ("IFCWINDOWSTYLE", 12),    // TypeProduct(8) + 4
-            ("IFCRELVOIDSELEMENT", 6), // Root4 + 2
-            ("IFCRELFILLSELEMENT", 6), // Root4 + 2
+            ("IFCDOORTYPE", 13),                 // + Door4
+            ("IFCFURNITURETYPE", 11),            // + AssemblyPlace,PredefinedType
+            ("IFCDOORSTYLE", 12),                // TypeProduct(8) + 4
+            ("IFCWINDOWSTYLE", 12),              // TypeProduct(8) + 4
+            ("IFCRELVOIDSELEMENT", 6),           // Root4 + 2
+            ("IFCRELFILLSELEMENT", 6),           // Root4 + 2
+            ("IFCRELASSIGNSTOGROUP", 7),         // Root4 + Assigns2 + 1
+            ("IFCRELASSIGNSTOGROUPBYFACTOR", 8), // + Factor
+            ("IFCRELSERVICESBUILDINGS", 6),
+            ("IFCGROUP", 5), // Root4 + ObjectType
+            ("IFCSYSTEM", 5),
+            ("IFCZONE", 6),               // + LongName
+            ("IFCDISTRIBUTIONSYSTEM", 7), // + LongName,PredefinedType
+            ("IFCBUILDINGSYSTEM", 7),     // + PredefinedType,LongName
             ("IFCRELASSOCIATESCLASSIFICATION", 6),
             ("IFCRELASSOCIATESDOCUMENT", 6),
             ("IFCCLASSIFICATION", 7),
@@ -2941,6 +3089,43 @@ mod tests {
         assert_eq!(m.filled_opening_of(30), Some(21));
         assert_eq!(m.filled_opening_of(31), Some(21));
         assert_eq!(m.hosted_fillers(10), vec![30, 31]);
+    }
+
+    #[test]
+    fn groups_systems_and_zones_fold() {
+        // A distribution system groups two terminals and services the
+        // building; a zone groups a space. Both directions indexed.
+        let f = parse(
+            "#1=IFCBUILDING('b',$,'Bldg',$,$,$,$,$,.ELEMENT.,$,$,$);\n\
+             #2=IFCSPACE('sp',$,'Space',$,$,$,$,$,.ELEMENT.,$,$);\n\
+             #10=IFCDISTRIBUTIONSYSTEM('ds',$,'Cold water',$,$,'CW',.DOMESTICCOLDWATER.);\n\
+             #11=IFCZONE('z',$,'Zone 1',$,$,'Z1');\n\
+             #20=IFCWALL('w1',$,'T1',$,$,$,$,$,$);\n\
+             #21=IFCWALL('w2',$,'T2',$,$,$,$,$,$);\n\
+             #30=IFCRELASSIGNSTOGROUP('g1',$,$,$,(#20,#21),$,#10);\n\
+             #31=IFCRELASSIGNSTOGROUP('g2',$,$,$,(#2),$,#11);\n\
+             #32=IFCRELSERVICESBUILDINGS('sv',$,$,$,#10,(#1));",
+        );
+        let m = Model::from_step(&f);
+        assert_eq!(m.group_members(10), &[20, 21]);
+        assert_eq!(m.group_members(11), &[2]);
+        assert_eq!(m.groups_of(20), &[10]);
+        assert_eq!(m.groups_of(2), &[11]);
+        assert_eq!(m.serviced_buildings(10), &[1]);
+        assert!(m.serviced_buildings(11).is_empty());
+        // Enumeration + typed attributes.
+        assert_eq!(m.groups().count(), 2);
+        let ds = m.typed(10).unwrap();
+        assert_eq!(ds.kind(), EntityKind::Group);
+        assert_eq!(ds.attr("LongName").unwrap().as_str(), Some("CW"));
+        assert_eq!(
+            ds.attr("PredefinedType").unwrap().as_enum(),
+            Some("DOMESTICCOLDWATER")
+        );
+        let zone = m.typed(11).unwrap();
+        assert_eq!(zone.attr("LongName").unwrap().as_str(), Some("Z1"));
+        // Groups stay out of the product/spatial enumerations.
+        assert_eq!(m.products().count(), 2); // the walls
     }
 
     #[test]
