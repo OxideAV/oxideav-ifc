@@ -93,6 +93,11 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
     let mut last_unsupported: Option<String> = None;
     // Styled-item materials are deduplicated per IfcSurfaceStyle id.
     let mut material_cache: HashMap<u64, MaterialId> = HashMap::new();
+    // Semantic (IfcRelAssociatesMaterial) fallback materials are
+    // deduplicated per IfcMaterialSelect id.
+    let mut semantic_cache: HashMap<u64, MaterialId> = HashMap::new();
+    // The typed model folds the material / type relationships.
+    let model = crate::schema::Model::from_step(step);
 
     // Walk every IfcProductDefinitionShape: it is the `Representation`
     // target of any geometric product, so this catches tessellated
@@ -126,6 +131,25 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
                 }
                 if mesh.primitives.is_empty() {
                     continue;
+                }
+                // Primitives left unstyled fall back to the product's
+                // semantic material association (IfcRelAssociatesMaterial,
+                // occurrence-overrides-type): a named, colourless
+                // Material so the substance ("Ceramic") reaches the
+                // scene graph.
+                if mesh.primitives.iter().any(|p| p.material.is_none()) {
+                    if let Some((select_id, name)) = semantic_material_name(step, &model, inst.id) {
+                        let mat_id = *semantic_cache.entry(select_id).or_insert_with(|| {
+                            let mut mat = Material::new();
+                            mat.name = Some(name);
+                            scene.add_material(mat)
+                        });
+                        for prim in mesh.primitives.iter_mut() {
+                            if prim.material.is_none() {
+                                prim.material = Some(mat_id);
+                            }
+                        }
+                    }
                 }
                 let mesh_id = scene.add_mesh(mesh);
                 let node = Node::new()
@@ -289,6 +313,36 @@ fn indexed_colour_map_of(step: &StepFile, item_id: u64) -> Option<ColourMap> {
         return Some((opacity, colours, indices));
     }
     None
+}
+
+/// The semantic material of the product owning a shape:
+/// `(IfcMaterialSelect id, headline name)` from the
+/// `IfcRelAssociatesMaterial` fold — a directly associated material
+/// wins, else the material of the product's type object
+/// ([`Model::material_of`](crate::schema::Model::material_of)).
+/// `None` when the owner has no association or the assignment carries
+/// no name.
+fn semantic_material_name(
+    step: &StepFile,
+    model: &crate::schema::Model<'_>,
+    shape_id: u64,
+) -> Option<(u64, String)> {
+    let owner = shape_owner(step, shape_id)?;
+    let select_id = model.material_of(owner)?;
+    let assignment = crate::material::material_assignment(step, select_id)?;
+    Some((select_id, assignment.name()?.to_string()))
+}
+
+/// The product owning a shape: the rooted instance (string `GlobalId`
+/// first argument) referencing `#shape_id` — the same scan
+/// [`shape_node_name`] labels nodes with.
+fn shape_owner(step: &StepFile, shape_id: u64) -> Option<u64> {
+    step.instances.values().find_map(|inst| {
+        (inst.keyword.starts_with("IFC")
+            && inst.args.iter().any(|a| a.as_reference() == Some(shape_id))
+            && inst.args.first().and_then(Value::as_str).is_some())
+        .then_some(inst.id)
+    })
 }
 
 /// Resolve the world transform for an `IfcProductDefinitionShape` by

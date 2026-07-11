@@ -6,6 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (decoder semantic materials): primitives left unstyled by
+  the presentation chain now fall back to the owning product's
+  **semantic** material association — `Model::material_of`
+  (occurrence-overrides-type) resolved through the new material
+  module, emitted as a named colourless `Material` deduplicated per
+  `IfcMaterialSelect`. The basin fixture's terminal now decodes with
+  its type-associated `"Ceramic"` material on the tessellated body;
+  surface-styled primitives keep their styled material untouched.
+  1 new registry test.
+
 - Phase 4 (type-object slice): new `EntityKind::TypeObject`
   classifying the common element types — 14 new schema entries
   (column / beam / slab / proxy / covering / member / plate / railing

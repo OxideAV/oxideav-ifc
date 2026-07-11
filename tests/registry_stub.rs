@@ -19,6 +19,9 @@ const TESS: &[u8] = include_bytes!("fixtures/ifc4-tessellated-item.ifc");
 const COLUMN: &[u8] = include_bytes!("fixtures/ifc4-column-straight-rectangle-tessellation.ifc");
 // A cube face set with an IfcIndexedColourMap assigning per-face colours.
 const COLORS: &[u8] = include_bytes!("fixtures/ifc4-tessellation-with-individual-colors.ifc");
+// A dense triangulated basin whose sanitary-terminal type carries an
+// IfcRelAssociatesMaterial ('Ceramic') and no surface styles.
+const BASIN: &[u8] = include_bytes!("fixtures/ifc4-basin-tessellation.ifc");
 
 #[test]
 fn registry_lookup_by_extension_and_format() {
@@ -200,6 +203,24 @@ fn decode_names_nodes_after_owning_product() {
         named.iter().any(|n| n.to_lowercase().contains("column")),
         "expected a product-named node, got {named:?}"
     );
+}
+
+#[test]
+fn decode_semantic_material_falls_back_to_association() {
+    // The basin has no IfcStyledItem; the unstyled primitive falls
+    // back to the semantic material associated with the terminal's
+    // type: a named, colourless Material 'Ceramic'.
+    let mut decoder = make_decoder();
+    let scene = decoder.decode(BASIN).expect("basin fixture decodes");
+    assert_eq!(scene.materials.len(), 1);
+    assert_eq!(scene.materials[0].name.as_deref(), Some("Ceramic"));
+    let with_material: usize = scene
+        .meshes
+        .iter()
+        .flat_map(|m| m.primitives.iter())
+        .filter(|p| p.material == Some(oxideav_mesh3d::MaterialId(0)))
+        .count();
+    assert!(with_material >= 1, "basin primitive carries the material");
 }
 
 #[test]
