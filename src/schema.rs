@@ -66,6 +66,12 @@ pub enum EntityKind {
     RelAggregates,
     /// `IfcRelContainedInSpatialStructure` — element containment.
     RelContained,
+    /// `IfcRelDefinesByProperties` — property-set / quantity-set
+    /// assignment to occurrence objects.
+    RelDefinesByProperties,
+    /// `IfcRelDefinesByType` — type-object assignment to occurrences
+    /// (the occurrence inherits the type's `HasPropertySets`).
+    RelDefinesByType,
     /// A placement entity (`IfcLocalPlacement`).
     Placement,
     /// A representation / context entity referenced by a product.
@@ -142,6 +148,19 @@ const CONTEXT_TAIL: &[&str] = &[
     "RepresentationContexts",
     "UnitsInContext",
 ];
+// IfcTypeObject(ApplicableOccurrence, HasPropertySets) →
+//   IfcTypeProduct(RepresentationMaps, Tag) → IfcElementType(ElementType)
+const TYPE_OBJECT_TAIL: &[&str] = &["ApplicableOccurrence", "HasPropertySets"];
+const TYPE_PRODUCT_TAIL: &[&str] = &["RepresentationMaps", "Tag"];
+const ELEMENT_TYPE_TAIL: &[&str] = &["ElementType"];
+// IfcProperty(Name, Description) — the shared property header; note
+// IfcPropertyAbstraction adds no serialised attributes.
+const PROPERTY_HEAD: &[&str] = &["Name", "Description"];
+// IfcPhysicalQuantity(Name, Description) — the shared quantity header.
+const QUANTITY_HEAD: &[&str] = &["Name", "Description"];
+// IfcPhysicalSimpleQuantity(Unit) — every simple quantity carries an
+// optional per-quantity named-unit override before its value slot.
+const SIMPLE_QUANTITY_UNIT: &[&str] = &["Unit"];
 
 /// Master schema table for the core IFC 4 entity slice.
 ///
@@ -746,6 +765,224 @@ pub const SCHEMA: &[EntitySchema] = &[
         // IfcElementarySurface(Position); IfcPlane adds nothing.
         attrs: chain!(&["Position"]),
     },
+    // ---- Property / quantity definition relationships ----
+    EntitySchema {
+        keyword: "IFCRELDEFINESBYPROPERTIES",
+        kind: EntityKind::RelDefinesByProperties,
+        // IfcRoot + IfcRelDefines(none) + RelatedObjects,
+        // RelatingPropertyDefinition (an IfcPropertySetDefinitionSelect:
+        // one definition or a set of definitions).
+        attrs: chain!(ROOT, &["RelatedObjects", "RelatingPropertyDefinition"]),
+    },
+    EntitySchema {
+        keyword: "IFCRELDEFINESBYTYPE",
+        kind: EntityKind::RelDefinesByType,
+        // IfcRoot + IfcRelDefines(none) + RelatedObjects, RelatingType.
+        attrs: chain!(ROOT, &["RelatedObjects", "RelatingType"]),
+    },
+    // ---- Property sets ----
+    EntitySchema {
+        keyword: "IFCPROPERTYSET",
+        kind: EntityKind::Other,
+        // IfcRoot + IfcPropertyDefinition(none) +
+        // IfcPropertySetDefinition(none) + IfcPropertySet(HasProperties).
+        attrs: chain!(ROOT, &["HasProperties"]),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYSINGLEVALUE",
+        kind: EntityKind::Other,
+        // IfcProperty(Name, Description) + IfcSimpleProperty(none) +
+        // IfcPropertySingleValue(NominalValue, Unit).
+        attrs: chain!(PROPERTY_HEAD, &["NominalValue", "Unit"]),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYENUMERATEDVALUE",
+        kind: EntityKind::Other,
+        // IfcProperty(2) + IfcPropertyEnumeratedValue(EnumerationValues,
+        // EnumerationReference).
+        attrs: chain!(
+            PROPERTY_HEAD,
+            &["EnumerationValues", "EnumerationReference"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYENUMERATION",
+        kind: EntityKind::Other,
+        // IfcPropertyAbstraction(none) + IfcPropertyEnumeration(Name,
+        // EnumerationValues, Unit).
+        attrs: chain!(&["Name", "EnumerationValues", "Unit"]),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYBOUNDEDVALUE",
+        kind: EntityKind::Other,
+        // IfcProperty(2) + IfcPropertyBoundedValue(UpperBoundValue,
+        // LowerBoundValue, Unit, SetPointValue).
+        attrs: chain!(
+            PROPERTY_HEAD,
+            &[
+                "UpperBoundValue",
+                "LowerBoundValue",
+                "Unit",
+                "SetPointValue"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYLISTVALUE",
+        kind: EntityKind::Other,
+        // IfcProperty(2) + IfcPropertyListValue(ListValues, Unit).
+        attrs: chain!(PROPERTY_HEAD, &["ListValues", "Unit"]),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYTABLEVALUE",
+        kind: EntityKind::Other,
+        // IfcProperty(2) + IfcPropertyTableValue(DefiningValues,
+        // DefinedValues, Expression, DefiningUnit, DefinedUnit,
+        // CurveInterpolation).
+        attrs: chain!(
+            PROPERTY_HEAD,
+            &[
+                "DefiningValues",
+                "DefinedValues",
+                "Expression",
+                "DefiningUnit",
+                "DefinedUnit",
+                "CurveInterpolation"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCPROPERTYREFERENCEVALUE",
+        kind: EntityKind::Other,
+        // IfcProperty(2) + IfcPropertyReferenceValue(UsageName,
+        // PropertyReference).
+        attrs: chain!(PROPERTY_HEAD, &["UsageName", "PropertyReference"]),
+    },
+    EntitySchema {
+        keyword: "IFCCOMPLEXPROPERTY",
+        kind: EntityKind::Other,
+        // IfcProperty(2) + IfcComplexProperty(UsageName, HasProperties).
+        attrs: chain!(PROPERTY_HEAD, &["UsageName", "HasProperties"]),
+    },
+    // ---- Quantity sets ----
+    EntitySchema {
+        keyword: "IFCELEMENTQUANTITY",
+        kind: EntityKind::Other,
+        // IfcRoot + IfcQuantitySet(none) +
+        // IfcElementQuantity(MethodOfMeasurement, Quantities).
+        attrs: chain!(ROOT, &["MethodOfMeasurement", "Quantities"]),
+    },
+    EntitySchema {
+        keyword: "IFCQUANTITYLENGTH",
+        kind: EntityKind::Other,
+        attrs: chain!(
+            QUANTITY_HEAD,
+            SIMPLE_QUANTITY_UNIT,
+            &["LengthValue", "Formula"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCQUANTITYAREA",
+        kind: EntityKind::Other,
+        attrs: chain!(
+            QUANTITY_HEAD,
+            SIMPLE_QUANTITY_UNIT,
+            &["AreaValue", "Formula"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCQUANTITYVOLUME",
+        kind: EntityKind::Other,
+        attrs: chain!(
+            QUANTITY_HEAD,
+            SIMPLE_QUANTITY_UNIT,
+            &["VolumeValue", "Formula"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCQUANTITYCOUNT",
+        kind: EntityKind::Other,
+        attrs: chain!(
+            QUANTITY_HEAD,
+            SIMPLE_QUANTITY_UNIT,
+            &["CountValue", "Formula"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCQUANTITYWEIGHT",
+        kind: EntityKind::Other,
+        attrs: chain!(
+            QUANTITY_HEAD,
+            SIMPLE_QUANTITY_UNIT,
+            &["WeightValue", "Formula"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCQUANTITYTIME",
+        kind: EntityKind::Other,
+        attrs: chain!(
+            QUANTITY_HEAD,
+            SIMPLE_QUANTITY_UNIT,
+            &["TimeValue", "Formula"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCPHYSICALCOMPLEXQUANTITY",
+        kind: EntityKind::Other,
+        // IfcPhysicalQuantity(2) + IfcPhysicalComplexQuantity(
+        // HasQuantities, Discrimination, Quality, Usage).
+        attrs: chain!(
+            QUANTITY_HEAD,
+            &["HasQuantities", "Discrimination", "Quality", "Usage"]
+        ),
+    },
+    // ---- Type objects (fixture slice; HasPropertySets is index 5 for
+    // every IfcTypeObject subtype since ApplicableOccurrence /
+    // HasPropertySets follow IfcRoot directly) ----
+    EntitySchema {
+        keyword: "IFCWALLTYPE",
+        kind: EntityKind::Other,
+        // IfcRoot + IfcTypeObject(2) + IfcTypeProduct(2) +
+        // IfcElementType(1) + IfcWallType(PredefinedType).
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCWINDOWTYPE",
+        kind: EntityKind::Other,
+        // … + IfcWindowType(PredefinedType, PartitioningType,
+        // ParameterTakesPrecedence, UserDefinedPartitioningType).
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &[
+                "PredefinedType",
+                "PartitioningType",
+                "ParameterTakesPrecedence",
+                "UserDefinedPartitioningType"
+            ]
+        ),
+    },
+    EntitySchema {
+        keyword: "IFCSANITARYTERMINALTYPE",
+        kind: EntityKind::Other,
+        // IfcFlowTerminalType / IfcDistributionFlowElementType add no
+        // serialised attributes over IfcElementType.
+        attrs: chain!(
+            ROOT,
+            TYPE_OBJECT_TAIL,
+            TYPE_PRODUCT_TAIL,
+            ELEMENT_TYPE_TAIL,
+            &["PredefinedType"]
+        ),
+    },
     // ---- Units ----
     EntitySchema {
         keyword: "IFCUNITASSIGNMENT",
@@ -1184,6 +1421,12 @@ pub struct Model<'a> {
     /// `spatial-structure -> contained products` edges from
     /// `IfcRelContainedInSpatialStructure`.
     contains: BTreeMap<u64, Vec<u64>>,
+    /// `object -> property-set definitions` edges from
+    /// `IfcRelDefinesByProperties` (property sets and quantity sets).
+    defines: BTreeMap<u64, Vec<u64>>,
+    /// `occurrence -> type object` edges from `IfcRelDefinesByType`
+    /// (the EXPRESS `Types` inverse is `SET [0:1]` — first edge wins).
+    typed_by: BTreeMap<u64, u64>,
 }
 
 impl<'a> Model<'a> {
@@ -1199,6 +1442,8 @@ impl<'a> Model<'a> {
         let mut project = None;
         let mut aggregates: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut contains: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut defines: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
+        let mut typed_by: BTreeMap<u64, u64> = BTreeMap::new();
 
         for inst in step.instances.values() {
             let Some(view) = TypedEntity::new(inst) else {
@@ -1233,6 +1478,35 @@ impl<'a> Model<'a> {
                         }
                     }
                 }
+                EntityKind::RelDefinesByProperties => {
+                    // RelatedObjects : SET OF IfcObjectDefinition;
+                    // RelatingPropertyDefinition : one definition or a
+                    // set of definitions (IfcPropertySetDefinitionSelect).
+                    if let (Some(objects), Some(definition)) = (
+                        view.attr("RelatedObjects"),
+                        view.attr("RelatingPropertyDefinition"),
+                    ) {
+                        let mut object_ids = Vec::new();
+                        push_refs(objects, &mut object_ids);
+                        for object in object_ids {
+                            let sets = defines.entry(object).or_default();
+                            push_refs(definition, sets);
+                        }
+                    }
+                }
+                EntityKind::RelDefinesByType => {
+                    if let (Some(objects), Some(ty)) =
+                        (view.attr("RelatedObjects"), view.attr("RelatingType"))
+                    {
+                        if let Some(type_id) = ty.as_reference() {
+                            let mut object_ids = Vec::new();
+                            push_refs(objects, &mut object_ids);
+                            for object in object_ids {
+                                typed_by.entry(object).or_insert(type_id);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1242,6 +1516,8 @@ impl<'a> Model<'a> {
             project,
             aggregates,
             contains,
+            defines,
+            typed_by,
         }
     }
 
@@ -1290,6 +1566,68 @@ impl<'a> Model<'a> {
         })
     }
 
+    /// The property-set / quantity-set definition `#id`s assigned
+    /// **directly** to the object `id` via `IfcRelDefinesByProperties`
+    /// (type-inherited sets are not included — see
+    /// [`Model::property_set_ids`]). Empty when nothing is assigned.
+    pub fn defined_property_sets(&self, id: u64) -> &[u64] {
+        self.defines.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The `#id` of the `IfcTypeObject` the occurrence `id` is typed by
+    /// (`IfcRelDefinesByType.RelatingType`), when one is assigned. The
+    /// EXPRESS `Types` inverse is `SET [0:1]`, so the first relationship
+    /// encountered wins if a malformed file assigns several.
+    pub fn type_of(&self, id: u64) -> Option<u64> {
+        self.typed_by.get(&id).copied()
+    }
+
+    /// Every property-set / quantity-set definition `#id` that applies
+    /// to the object `id`: its directly assigned sets
+    /// (`IfcRelDefinesByProperties`) plus the sets inherited from its
+    /// type object's `HasPropertySets` (`IfcRelDefinesByType`).
+    ///
+    /// An occurrence set **shadows** a type set with the same
+    /// `IfcRoot.Name` — the occurrence overrides the type-level default
+    /// — so at most one set per name survives, occurrence-first.
+    /// `HasPropertySets` is read positionally at index 5, which holds
+    /// for every `IfcTypeObject` subtype (ApplicableOccurrence and
+    /// HasPropertySets directly follow the IfcRoot attributes).
+    pub fn property_set_ids(&self, id: u64) -> Vec<u64> {
+        let mut out: Vec<u64> = self.defined_property_sets(id).to_vec();
+        let Some(type_id) = self.type_of(id) else {
+            return out;
+        };
+        let Some(type_inst) = self.step.get(type_id) else {
+            return out;
+        };
+        let occurrence_names: Vec<&str> = out
+            .iter()
+            .filter_map(|sid| self.step.get(*sid))
+            .filter_map(|inst| inst.args.get(2).and_then(Value::as_str))
+            .collect();
+        let Some(Value::List(sets)) = type_inst.args.get(5) else {
+            return out;
+        };
+        for set in sets {
+            let Some(sid) = set.as_reference() else {
+                continue;
+            };
+            if out.contains(&sid) {
+                continue;
+            }
+            let shadowed = self
+                .step
+                .get(sid)
+                .and_then(|inst| inst.args.get(2).and_then(Value::as_str))
+                .is_some_and(|name| occurrence_names.contains(&name));
+            if !shadowed {
+                out.push(sid);
+            }
+        }
+        out
+    }
+
     /// Every physical product (`EntityKind::Product`) in the model, as
     /// typed views, in ascending id order.
     pub fn products(&self) -> impl Iterator<Item = TypedEntity<'a>> + '_ {
@@ -1297,6 +1635,28 @@ impl<'a> Model<'a> {
             let view = TypedEntity::new(inst)?;
             matches!(view.kind(), EntityKind::Product).then_some(view)
         })
+    }
+
+    /// Every resolved [`PropertySet`](crate::props::PropertySet) that
+    /// applies to the object `id` — directly assigned and
+    /// type-inherited sets per [`Model::property_set_ids`], with
+    /// non-`IfcPropertySet` definitions (quantity sets) skipped.
+    pub fn property_sets(&self, id: u64) -> Vec<crate::props::PropertySet<'a>> {
+        self.property_set_ids(id)
+            .into_iter()
+            .filter_map(|sid| crate::props::property_set(self.step, sid))
+            .collect()
+    }
+
+    /// Every resolved
+    /// [`ElementQuantity`](crate::props::ElementQuantity) that applies
+    /// to the object `id` — the quantity-set complement of
+    /// [`Model::property_sets`].
+    pub fn element_quantities(&self, id: u64) -> Vec<crate::props::ElementQuantity<'a>> {
+        self.property_set_ids(id)
+            .into_iter()
+            .filter_map(|sid| crate::props::element_quantity(self.step, sid))
+            .collect()
     }
 }
 
@@ -1391,6 +1751,28 @@ mod tests {
             ("IFCHALFSPACESOLID", 2),    // BaseSurface + AgreementFlag
             ("IFCPOLYGONALBOUNDEDHALFSPACE", 4), // + Position,Boundary
             ("IFCPLANE", 1),             // Position
+            ("IFCRELDEFINESBYPROPERTIES", 6), // Root4 + 2
+            ("IFCRELDEFINESBYTYPE", 6),  // Root4 + 2
+            ("IFCPROPERTYSET", 5),       // Root4 + HasProperties
+            ("IFCPROPERTYSINGLEVALUE", 4), // Name,Desc,NominalValue,Unit
+            ("IFCPROPERTYENUMERATEDVALUE", 4), // Name,Desc,Values,Reference
+            ("IFCPROPERTYENUMERATION", 3), // Name,Values,Unit
+            ("IFCPROPERTYBOUNDEDVALUE", 6), // Name,Desc,Upper,Lower,Unit,SetPoint
+            ("IFCPROPERTYLISTVALUE", 4), // Name,Desc,Values,Unit
+            ("IFCPROPERTYTABLEVALUE", 8), // Name,Desc + 6
+            ("IFCPROPERTYREFERENCEVALUE", 4), // Name,Desc,UsageName,Reference
+            ("IFCCOMPLEXPROPERTY", 4),   // Name,Desc,UsageName,HasProperties
+            ("IFCELEMENTQUANTITY", 6),   // Root4 + Method,Quantities
+            ("IFCQUANTITYLENGTH", 5),    // Name,Desc,Unit,Value,Formula
+            ("IFCQUANTITYAREA", 5),
+            ("IFCQUANTITYVOLUME", 5),
+            ("IFCQUANTITYCOUNT", 5),
+            ("IFCQUANTITYWEIGHT", 5),
+            ("IFCQUANTITYTIME", 5),
+            ("IFCPHYSICALCOMPLEXQUANTITY", 6), // Name,Desc + 4
+            ("IFCWALLTYPE", 10),               // Root4 + Type2 + Product2 + Elem1 + 1
+            ("IFCWINDOWTYPE", 13),             // Root4 + Type2 + Product2 + Elem1 + 4
+            ("IFCSANITARYTERMINALTYPE", 10),
         ];
         for (kw, want) in lens {
             assert_eq!(

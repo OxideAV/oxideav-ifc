@@ -88,6 +88,7 @@ pub mod geometry;
 pub mod header;
 mod lexer;
 pub mod parser;
+pub mod props;
 pub mod schema;
 pub mod value;
 
@@ -102,6 +103,10 @@ pub use geometry::{
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use parser::{
     parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
+};
+pub use props::{
+    element_quantity, property_set, ElementQuantity, IfcValue, Property, PropertySet,
+    PropertyValue, Quantity, QuantityValue,
 };
 pub use schema::{
     length_unit_scale, plane_angle_unit_scale, schema_of, EntityKind, EntitySchema, Model,

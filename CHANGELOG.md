@@ -6,6 +6,44 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (property + quantity sets): new [`props`] module — the typed
+  semantic-data surface over the Phase-2 schema layer.
+  - `Model` now folds `IfcRelDefinesByProperties` (object →
+    property-set definitions; single definitions and
+    `IfcPropertySetDefinitionSet` aggregates both) and
+    `IfcRelDefinesByType` (occurrence → type object, first edge wins
+    per the `SET [0:1]` Types inverse): `defined_property_sets(id)`,
+    `type_of(id)`, and `property_set_ids(id)` — the applicable sets
+    with type-level `HasPropertySets` inherited and **occurrence sets
+    shadowing same-named type sets**. `HasPropertySets` reads
+    positionally at index 5, valid for every `IfcTypeObject` subtype.
+  - `property_set(step, id)` → `PropertySet` (IfcRoot header + named
+    members, `property("IsExternal")` lookup); the whole
+    `IfcSimpleProperty` family resolves: `IfcPropertySingleValue`,
+    `IfcPropertyEnumeratedValue` (+ `IfcPropertyEnumeration`
+    reference), `IfcPropertyBoundedValue` (upper/lower/set-point),
+    `IfcPropertyListValue`, `IfcPropertyTableValue` (paired columns +
+    units + interpolation), `IfcPropertyReferenceValue`, and nested
+    `IfcComplexProperty` groups (depth-capped, self-reference dropped).
+  - `element_quantity(step, id)` → `ElementQuantity` with the six
+    `IfcPhysicalSimpleQuantity` kinds (`Length`/`Area`/`Volume`/
+    `Count`/`Weight`/`Time`, each with the optional per-quantity
+    named-unit override and `Formula`) and nested
+    `IfcPhysicalComplexQuantity` groups.
+  - `IfcValue` — the SELECT-typed leaf: keeps the defined-type wrapper
+    (`IFCBOOLEAN(.T.)` → `type_name` + payload) with `as_number` /
+    `as_str` / `as_bool` / `as_enum` accessors; plain literals accepted.
+  - `Model::property_sets(id)` / `Model::element_quantities(id)` —
+    resolved convenience walks.
+  - Schema entries for the 12 property/quantity entities, the two
+    relationships, and the fixture type-object slice (`IfcWallType`,
+    `IfcWindowType`, `IfcSanitaryTerminalType`), transcribed from
+    `IFC4_ADD2.exp`.
+  - 13 unit tests + a new `property_sets` integration suite over the
+    wall fixture (`Pset_WallCommon` 10 members with boolean/measure
+    assertions, `Pset_WindowCommon` + window-type link) and the basin
+    fixture (type link, `HasPropertySets` unset).
+
 - Phase 3 (sectioned solids): `IfcSectionedSolidHorizontal`
   (`Directrix`, `CrossSections`, `CrossSectionPositions`) — the IFC 4.3
   infrastructure/alignment solid — now tessellates per the swept-disk
