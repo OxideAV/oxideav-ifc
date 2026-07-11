@@ -433,6 +433,55 @@ impl Quantity<'_> {
             QuantityValue::Complex { .. } => None,
         }
     }
+
+    /// The `IfcUnitEnum` dimension literal the WHERE rules require of
+    /// this quantity's unit (`None` for counts — dimensionless — and
+    /// complex groups).
+    fn unit_type(&self) -> Option<&'static str> {
+        match self.value {
+            QuantityValue::Length(_) => Some("LENGTHUNIT"),
+            QuantityValue::Area(_) => Some("AREAUNIT"),
+            QuantityValue::Volume(_) => Some("VOLUMEUNIT"),
+            QuantityValue::Weight(_) => Some("MASSUNIT"),
+            QuantityValue::Time(_) => Some("TIMEUNIT"),
+            QuantityValue::Count(_) | QuantityValue::Complex { .. } => None,
+        }
+    }
+
+    /// The factor from this quantity's unit to SI reference units
+    /// (metres / m² / m³ / kilograms / seconds).
+    ///
+    /// The optional per-quantity `IfcPhysicalSimpleQuantity.Unit`
+    /// override wins (resolved by
+    /// [`named_unit_scale`](crate::schema::named_unit_scale) against
+    /// the dimension the quantity kind requires); otherwise the model
+    /// default of that dimension applies
+    /// ([`length_unit_scale`](crate::schema::length_unit_scale) and
+    /// friends). Counts scale by 1; complex groups and unresolvable
+    /// units yield `None`.
+    pub fn si_scale(&self, step: &StepFile) -> Option<f64> {
+        if matches!(self.value, QuantityValue::Count(_)) {
+            return Some(1.0);
+        }
+        let unit_type = self.unit_type()?;
+        match self.unit {
+            Some(uid) => crate::schema::named_unit_scale(step, uid, unit_type),
+            None => match self.value {
+                QuantityValue::Length(_) => crate::schema::length_unit_scale(step),
+                QuantityValue::Area(_) => crate::schema::area_unit_scale(step),
+                QuantityValue::Volume(_) => crate::schema::volume_unit_scale(step),
+                QuantityValue::Weight(_) => crate::schema::mass_unit_scale(step),
+                QuantityValue::Time(_) => crate::schema::time_unit_scale(step),
+                QuantityValue::Count(_) | QuantityValue::Complex { .. } => None,
+            },
+        }
+    }
+
+    /// The scalar payload converted to SI reference units —
+    /// [`Quantity::scalar`] × [`Quantity::si_scale`].
+    pub fn si_value(&self, step: &StepFile) -> Option<f64> {
+        Some(self.scalar()? * self.si_scale(step)?)
+    }
 }
 
 /// A resolved `IfcElementQuantity`: the `IfcRoot` header plus its
@@ -909,5 +958,113 @@ mod tests {
         assert!(psets.iter().any(|p| p.name == Some("Pset_TypeOnly")));
         // An untyped object inherits nothing.
         assert_eq!(m.property_set_ids(30), Vec::<u64>::new());
+    }
+
+    #[test]
+    fn quantities_scale_to_si_with_model_defaults() {
+        // A millimetre model with explicit (unprefixed) SI area/volume
+        // units, kilogram mass, second time.
+        let f = parse(
+            "#1=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);\n\
+             #2=IFCSIUNIT(*,.AREAUNIT.,$,.SQUARE_METRE.);\n\
+             #3=IFCSIUNIT(*,.VOLUMEUNIT.,$,.CUBIC_METRE.);\n\
+             #4=IFCSIUNIT(*,.MASSUNIT.,.KILO.,.GRAM.);\n\
+             #5=IFCSIUNIT(*,.TIMEUNIT.,$,.SECOND.);\n\
+             #6=IFCUNITASSIGNMENT((#1,#2,#3,#4,#5));\n\
+             #7=IFCPROJECT('x',$,$,$,$,$,$,$,#6);\n\
+             #10=IFCQUANTITYLENGTH('W',$,$,300.,$);\n\
+             #11=IFCQUANTITYAREA('A',$,$,2.5,$);\n\
+             #12=IFCQUANTITYVOLUME('V',$,$,0.75,$);\n\
+             #13=IFCQUANTITYWEIGHT('M',$,$,5.,$);\n\
+             #14=IFCQUANTITYTIME('T',$,$,60.,$);\n\
+             #15=IFCQUANTITYCOUNT('N',$,$,2.,$);",
+        );
+        use crate::schema;
+        assert_eq!(schema::length_unit_scale(&f), Some(1e-3));
+        assert_eq!(schema::area_unit_scale(&f), Some(1.0));
+        assert_eq!(schema::volume_unit_scale(&f), Some(1.0));
+        assert_eq!(schema::mass_unit_scale(&f), Some(1.0)); // kilo+gram = kg
+        assert_eq!(schema::time_unit_scale(&f), Some(1.0));
+
+        let close = |a: Option<f64>, b: f64| (a.unwrap() - b).abs() < 1e-12;
+        assert!(close(quantity(&f, 10).unwrap().si_value(&f), 0.3));
+        assert!(close(quantity(&f, 11).unwrap().si_value(&f), 2.5));
+        assert!(close(quantity(&f, 12).unwrap().si_value(&f), 0.75));
+        assert!(close(quantity(&f, 13).unwrap().si_value(&f), 5.0));
+        assert!(close(quantity(&f, 14).unwrap().si_value(&f), 60.0));
+        // Counts are dimensionless — scale 1 even with model units.
+        assert!(close(quantity(&f, 15).unwrap().si_value(&f), 2.0));
+    }
+
+    #[test]
+    fn quantity_unit_override_beats_model_default() {
+        // Model default is metres; the quantity carries a millimetre
+        // override, which wins.
+        let f = parse(
+            "#1=IFCSIUNIT(*,.LENGTHUNIT.,$,.METRE.);\n\
+             #6=IFCUNITASSIGNMENT((#1));\n\
+             #7=IFCPROJECT('x',$,$,$,$,$,$,$,#6);\n\
+             #8=IFCSIUNIT(*,.LENGTHUNIT.,.MILLI.,.METRE.);\n\
+             #10=IFCQUANTITYLENGTH('W',$,#8,300.,$);\n\
+             #11=IFCQUANTITYLENGTH('X',$,$,2.,$);\n\
+             #12=IFCQUANTITYLENGTH('Bad',$,#13,1.,$);\n\
+             #13=IFCSIUNIT(*,.AREAUNIT.,$,.SQUARE_METRE.);",
+        );
+        let q = quantity(&f, 10).unwrap();
+        assert!((q.si_value(&f).unwrap() - 0.3).abs() < 1e-12);
+        // No override → model metre.
+        assert!((quantity(&f, 11).unwrap().si_value(&f).unwrap() - 2.0).abs() < 1e-12);
+        // A dimension-mismatched override (the WR21 violation) refuses
+        // to scale rather than mis-scaling.
+        assert_eq!(quantity(&f, 12).unwrap().si_scale(&f), None);
+    }
+
+    #[test]
+    fn mass_units_anchor_on_gram() {
+        // An unprefixed gram model yields 10⁻³ kg per unit; a pound
+        // resolves through a conversion chain over the gram base.
+        let f = parse(
+            "#1=IFCSIUNIT(*,.MASSUNIT.,$,.GRAM.);\n\
+             #6=IFCUNITASSIGNMENT((#1));\n\
+             #7=IFCPROJECT('x',$,$,$,$,$,$,$,#6);",
+        );
+        assert_eq!(crate::schema::mass_unit_scale(&f), Some(1e-3));
+
+        let f = parse(
+            "#1=IFCSIUNIT(*,.MASSUNIT.,.KILO.,.GRAM.);\n\
+             #2=IFCMEASUREWITHUNIT(IFCRATIOMEASURE(0.45359237),#1);\n\
+             #3=IFCCONVERSIONBASEDUNIT(*,.MASSUNIT.,'POUND',#2);\n\
+             #6=IFCUNITASSIGNMENT((#3));\n\
+             #7=IFCPROJECT('x',$,$,$,$,$,$,$,#6);",
+        );
+        let s = crate::schema::mass_unit_scale(&f).unwrap();
+        assert!((s - 0.45359237).abs() < 1e-12);
+    }
+
+    #[test]
+    fn prefixed_area_and_volume_si_units_are_refused() {
+        // Whether .MILLI. on SQUARE_METRE scales the base length or
+        // the derived unit is not stated by the staged schema text —
+        // the scale resolves to None instead of guessing.
+        let f = parse(
+            "#1=IFCSIUNIT(*,.AREAUNIT.,.MILLI.,.SQUARE_METRE.);\n\
+             #2=IFCSIUNIT(*,.VOLUMEUNIT.,.CENTI.,.CUBIC_METRE.);\n\
+             #6=IFCUNITASSIGNMENT((#1,#2));\n\
+             #7=IFCPROJECT('x',$,$,$,$,$,$,$,#6);",
+        );
+        assert_eq!(crate::schema::area_unit_scale(&f), None);
+        assert_eq!(crate::schema::volume_unit_scale(&f), None);
+
+        // A conversion-based area chain over an unprefixed SI base
+        // still resolves (square foot in m²).
+        let f = parse(
+            "#1=IFCSIUNIT(*,.AREAUNIT.,$,.SQUARE_METRE.);\n\
+             #2=IFCMEASUREWITHUNIT(IFCRATIOMEASURE(0.09290304),#1);\n\
+             #3=IFCCONVERSIONBASEDUNIT(*,.AREAUNIT.,'SQUARE FOOT',#2);\n\
+             #6=IFCUNITASSIGNMENT((#3));\n\
+             #7=IFCPROJECT('x',$,$,$,$,$,$,$,#6);",
+        );
+        let s = crate::schema::area_unit_scale(&f).unwrap();
+        assert!((s - 0.09290304).abs() < 1e-12);
     }
 }

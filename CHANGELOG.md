@@ -6,6 +6,28 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (unit engine): the §8.11.3.11 project-unit walk is
+  generalised over a per-dimension table, adding public
+  `area_unit_scale` (m²), `volume_unit_scale` (m³), `mass_unit_scale`
+  (**kilograms** — the SI name is `.GRAM.`, so an unprefixed gram
+  model yields 10⁻³) and `time_unit_scale` (seconds) alongside the
+  existing length / plane-angle scales, plus `named_unit_scale(step,
+  unit_id, unit_type)` for resolving one `IfcSIUnit` /
+  `IfcConversionBasedUnit(WithOffset)` chain directly.
+  - A **prefixed** `.SQUARE_METRE.` / `.CUBIC_METRE.` SI unit resolves
+    to `None`: whether the prefix scales the base length (mm² = 10⁻⁶
+    m²) or the derived unit (10⁻³ m²) is not stated by the staged
+    schema text, so no guess is made (docs gap noted); conversion-based
+    area/volume chains resolve normally.
+  - `Quantity::si_scale` / `Quantity::si_value` — the per-quantity
+    `IfcPhysicalSimpleQuantity.Unit` override wins (validated against
+    the dimension the quantity kind's WHERE rule requires — a
+    mismatched override refuses rather than mis-scales); otherwise the
+    model default applies; counts are dimensionless (scale 1).
+  - 4 new unit tests (model-default scaling across all six kinds,
+    override-beats-default + WR21 mismatch refusal, gram/pound mass
+    anchoring, prefixed-area refusal + square-foot conversion chain).
+
 - Phase 4 (property + quantity sets): new [`props`] module — the typed
   semantic-data surface over the Phase-2 schema layer.
   - `Model` now folds `IfcRelDefinesByProperties` (object →

@@ -1017,6 +1017,168 @@ pub fn schema_of(keyword: &str) -> Option<&'static EntitySchema> {
     SCHEMA.iter().find(|s| s.keyword == want)
 }
 
+/// One resolvable unit dimension: the `IfcUnitEnum` selector, the SI
+/// unit name that anchors it, the factor from that SI unit to the
+/// reference unit the public functions promise, and whether an SI
+/// prefix is meaningful on the anchor.
+///
+/// `prefix_ok` is `false` for the exponent-carrying SI names
+/// (`SQUARE_METRE`, `CUBIC_METRE`): whether a prefix there scales the
+/// base length (mm² = 10⁻⁶ m²) or the derived unit (10⁻³ m²) is not
+/// stated by the staged schema text, so a prefixed area/volume SI unit
+/// resolves to `None` instead of guessing.
+struct UnitDimension {
+    unit_type: &'static str,
+    si_name: &'static str,
+    si_to_reference: f64,
+    prefix_ok: bool,
+}
+
+const LENGTH_DIMENSION: UnitDimension = UnitDimension {
+    unit_type: "LENGTHUNIT",
+    si_name: "METRE",
+    si_to_reference: 1.0,
+    prefix_ok: true,
+};
+const PLANE_ANGLE_DIMENSION: UnitDimension = UnitDimension {
+    unit_type: "PLANEANGLEUNIT",
+    si_name: "RADIAN",
+    si_to_reference: 1.0,
+    prefix_ok: true,
+};
+const AREA_DIMENSION: UnitDimension = UnitDimension {
+    unit_type: "AREAUNIT",
+    si_name: "SQUARE_METRE",
+    si_to_reference: 1.0,
+    prefix_ok: false,
+};
+const VOLUME_DIMENSION: UnitDimension = UnitDimension {
+    unit_type: "VOLUMEUNIT",
+    si_name: "CUBIC_METRE",
+    si_to_reference: 1.0,
+    prefix_ok: false,
+};
+/// The SI mass name is GRAM (a kilogram is `.KILO.` + `.GRAM.`), and
+/// the reference the public function promises is the kilogram.
+const MASS_DIMENSION: UnitDimension = UnitDimension {
+    unit_type: "MASSUNIT",
+    si_name: "GRAM",
+    si_to_reference: 1e-3,
+    prefix_ok: true,
+};
+const TIME_DIMENSION: UnitDimension = UnitDimension {
+    unit_type: "TIMEUNIT",
+    si_name: "SECOND",
+    si_to_reference: 1.0,
+    prefix_ok: true,
+};
+
+/// Look up the [`UnitDimension`] for an `IfcUnitEnum` literal.
+fn dimension_of(unit_type: &str) -> Option<&'static UnitDimension> {
+    Some(match unit_type {
+        "LENGTHUNIT" => &LENGTH_DIMENSION,
+        "PLANEANGLEUNIT" => &PLANE_ANGLE_DIMENSION,
+        "AREAUNIT" => &AREA_DIMENSION,
+        "VOLUMEUNIT" => &VOLUME_DIMENSION,
+        "MASSUNIT" => &MASS_DIMENSION,
+        "TIMEUNIT" => &TIME_DIMENSION,
+        _ => return None,
+    })
+}
+
+/// The §8.11.3.11 walk: `IfcProject.UnitsInContext` →
+/// `IfcUnitAssignment.Units : SET [1:?] OF IfcUnit` → the (at most
+/// one) unit of the requested dimension, resolved to reference units.
+fn project_unit_scale(step: &StepFile, dim: &UnitDimension) -> Option<f64> {
+    // IfcProject: IfcRoot(4) + IfcContext(ObjectType, LongName, Phase,
+    // RepresentationContexts, UnitsInContext) → UnitsInContext index 8.
+    let project = step
+        .instances
+        .values()
+        .find(|i| i.keyword == "IFCPROJECT")?;
+    let assignment_id = project.args.get(8).and_then(Value::as_reference)?;
+    let assignment = step.get(assignment_id)?;
+    if assignment.keyword != "IFCUNITASSIGNMENT" {
+        return None;
+    }
+    let units = assignment.args.first().and_then(Value::as_list)?;
+    for unit in units {
+        let Some(uid) = unit.as_reference() else {
+            continue;
+        };
+        if let Some(scale) = resolve_named_unit(step, uid, dim) {
+            return Some(scale);
+        }
+    }
+    None
+}
+
+/// Resolve one named unit to reference units if it is of the requested
+/// dimension.
+fn resolve_named_unit(step: &StepFile, unit_id: u64, dim: &UnitDimension) -> Option<f64> {
+    let unit = step.get(unit_id)?;
+    match unit.keyword.as_str() {
+        // IfcSIUnit(Dimensions [derived, `*` on the wire], UnitType,
+        // Prefix, Name).
+        "IFCSIUNIT" => {
+            if unit.args.get(1).and_then(Value::as_enum) != Some(dim.unit_type)
+                || unit.args.get(3).and_then(Value::as_enum) != Some(dim.si_name)
+            {
+                return None;
+            }
+            let prefix = match unit.args.get(2).and_then(Value::as_enum) {
+                Some(prefix) => {
+                    if !dim.prefix_ok {
+                        // Prefix-on-exponent semantics undocumented in
+                        // the staged set — refuse rather than guess.
+                        return None;
+                    }
+                    si_prefix_multiplier(prefix)?
+                }
+                None => 1.0,
+            };
+            Some(prefix * dim.si_to_reference)
+        }
+        // IfcConversionBasedUnit(Dimensions, UnitType, Name,
+        // ConversionFactor : IfcMeasureWithUnit).
+        "IFCCONVERSIONBASEDUNIT" | "IFCCONVERSIONBASEDUNITWITHOFFSET" => {
+            if unit.args.get(1).and_then(Value::as_enum) != Some(dim.unit_type) {
+                return None;
+            }
+            let mwu_id = unit.args.get(3).and_then(Value::as_reference)?;
+            let mwu = step.get(mwu_id)?;
+            if mwu.keyword != "IFCMEASUREWITHUNIT" {
+                return None;
+            }
+            // ValueComponent : IfcValue — a plain real or a typed
+            // measure wrapper (e.g. IFCRATIOMEASURE(0.3048)).
+            let value = match mwu.args.first()? {
+                v @ (Value::Real(_) | Value::Integer(_)) => v.as_number()?,
+                Value::Typed { args, .. } => args.first().and_then(Value::as_number)?,
+                _ => return None,
+            };
+            let base_id = mwu.args.get(1).and_then(Value::as_reference)?;
+            Some(value * resolve_named_unit(step, base_id, dim)?)
+        }
+        _ => None,
+    }
+}
+
+/// Resolve one named unit (`IfcSIUnit` / `IfcConversionBasedUnit`
+/// chain) to reference units, given the `IfcUnitEnum` dimension
+/// literal it must declare (`"LENGTHUNIT"`, `"AREAUNIT"`,
+/// `"VOLUMEUNIT"`, `"MASSUNIT"`, `"TIMEUNIT"`, `"PLANEANGLEUNIT"`).
+///
+/// The reference units are those of the per-dimension model functions:
+/// metres / m² / m³ / **kilograms** / seconds / radians. This is the
+/// per-instance analogue of [`length_unit_scale`] — quantity sets use
+/// it for the optional `IfcPhysicalSimpleQuantity.Unit` override.
+/// Returns `None` for unknown dimensions, mismatched unit types, and
+/// the undocumented prefixed-area/volume SI forms.
+pub fn named_unit_scale(step: &StepFile, unit_id: u64, unit_type: &str) -> Option<f64> {
+    resolve_named_unit(step, unit_id, dimension_of(unit_type)?)
+}
+
 /// Metres per model length unit, resolved from the project's global
 /// unit assignment.
 ///
@@ -1036,69 +1198,7 @@ pub fn schema_of(keyword: &str) -> Option<&'static EntitySchema> {
 /// Returns `None` when the model has no resolvable length unit (the
 /// caller keeps raw model units — the decoder does not rescale).
 pub fn length_unit_scale(step: &StepFile) -> Option<f64> {
-    // IfcProject: IfcRoot(4) + IfcContext(ObjectType, LongName, Phase,
-    // RepresentationContexts, UnitsInContext) → UnitsInContext index 8.
-    let project = step
-        .instances
-        .values()
-        .find(|i| i.keyword == "IFCPROJECT")?;
-    let assignment_id = project.args.get(8).and_then(Value::as_reference)?;
-    let assignment = step.get(assignment_id)?;
-    if assignment.keyword != "IFCUNITASSIGNMENT" {
-        return None;
-    }
-    let units = assignment.args.first().and_then(Value::as_list)?;
-    for unit in units {
-        let Some(uid) = unit.as_reference() else {
-            continue;
-        };
-        if let Some(scale) = length_unit_metres(step, uid) {
-            return Some(scale);
-        }
-    }
-    None
-}
-
-/// Resolve one named unit to metres if it is a length unit.
-fn length_unit_metres(step: &StepFile, unit_id: u64) -> Option<f64> {
-    let unit = step.get(unit_id)?;
-    match unit.keyword.as_str() {
-        // IfcSIUnit(Dimensions [derived, `*` on the wire], UnitType,
-        // Prefix, Name).
-        "IFCSIUNIT" => {
-            if unit.args.get(1).and_then(Value::as_enum) != Some("LENGTHUNIT")
-                || unit.args.get(3).and_then(Value::as_enum) != Some("METRE")
-            {
-                return None;
-            }
-            Some(match unit.args.get(2).and_then(Value::as_enum) {
-                Some(prefix) => si_prefix_multiplier(prefix)?,
-                None => 1.0,
-            })
-        }
-        // IfcConversionBasedUnit(Dimensions, UnitType, Name,
-        // ConversionFactor : IfcMeasureWithUnit).
-        "IFCCONVERSIONBASEDUNIT" | "IFCCONVERSIONBASEDUNITWITHOFFSET" => {
-            if unit.args.get(1).and_then(Value::as_enum) != Some("LENGTHUNIT") {
-                return None;
-            }
-            let mwu_id = unit.args.get(3).and_then(Value::as_reference)?;
-            let mwu = step.get(mwu_id)?;
-            if mwu.keyword != "IFCMEASUREWITHUNIT" {
-                return None;
-            }
-            // ValueComponent : IfcValue — a plain real or a typed
-            // measure wrapper (e.g. IFCRATIOMEASURE(0.3048)).
-            let value = match mwu.args.first()? {
-                v @ (Value::Real(_) | Value::Integer(_)) => v.as_number()?,
-                Value::Typed { args, .. } => args.first().and_then(Value::as_number)?,
-                _ => return None,
-            };
-            let base_id = mwu.args.get(1).and_then(Value::as_reference)?;
-            Some(value * length_unit_metres(step, base_id)?)
-        }
-        _ => None,
-    }
+    project_unit_scale(step, &LENGTH_DIMENSION)
 }
 
 /// Resolve the model's plane-angle unit to **radians per model angle
@@ -1114,64 +1214,38 @@ fn length_unit_metres(step: &StepFile, unit_id: u64) -> Option<f64> {
 /// (`IfcParameterValue` on an `IfcTrimmedCurve`) and revolution angles
 /// are expressed in this unit.
 pub fn plane_angle_unit_scale(step: &StepFile) -> Option<f64> {
-    let project = step
-        .instances
-        .values()
-        .find(|i| i.keyword == "IFCPROJECT")?;
-    let assignment_id = project.args.get(8).and_then(Value::as_reference)?;
-    let assignment = step.get(assignment_id)?;
-    if assignment.keyword != "IFCUNITASSIGNMENT" {
-        return None;
-    }
-    let units = assignment.args.first().and_then(Value::as_list)?;
-    for unit in units {
-        let Some(uid) = unit.as_reference() else {
-            continue;
-        };
-        if let Some(scale) = plane_angle_unit_radians(step, uid) {
-            return Some(scale);
-        }
-    }
-    None
+    project_unit_scale(step, &PLANE_ANGLE_DIMENSION)
 }
 
-/// Resolve one named unit to radians if it is a plane-angle unit.
-fn plane_angle_unit_radians(step: &StepFile, unit_id: u64) -> Option<f64> {
-    let unit = step.get(unit_id)?;
-    match unit.keyword.as_str() {
-        // IfcSIUnit(Dimensions [`*`], UnitType, Prefix, Name).
-        "IFCSIUNIT" => {
-            if unit.args.get(1).and_then(Value::as_enum) != Some("PLANEANGLEUNIT")
-                || unit.args.get(3).and_then(Value::as_enum) != Some("RADIAN")
-            {
-                return None;
-            }
-            Some(match unit.args.get(2).and_then(Value::as_enum) {
-                Some(prefix) => si_prefix_multiplier(prefix)?,
-                None => 1.0,
-            })
-        }
-        // IfcConversionBasedUnit(Dimensions, UnitType, Name,
-        // ConversionFactor : IfcMeasureWithUnit) — e.g. degree.
-        "IFCCONVERSIONBASEDUNIT" | "IFCCONVERSIONBASEDUNITWITHOFFSET" => {
-            if unit.args.get(1).and_then(Value::as_enum) != Some("PLANEANGLEUNIT") {
-                return None;
-            }
-            let mwu_id = unit.args.get(3).and_then(Value::as_reference)?;
-            let mwu = step.get(mwu_id)?;
-            if mwu.keyword != "IFCMEASUREWITHUNIT" {
-                return None;
-            }
-            let value = match mwu.args.first()? {
-                v @ (Value::Real(_) | Value::Integer(_)) => v.as_number()?,
-                Value::Typed { args, .. } => args.first().and_then(Value::as_number)?,
-                _ => return None,
-            };
-            let base_id = mwu.args.get(1).and_then(Value::as_reference)?;
-            Some(value * plane_angle_unit_radians(step, base_id)?)
-        }
-        _ => None,
-    }
+/// Square metres per model area unit (`.AREAUNIT.`), from the
+/// project's unit assignment — the area analogue of
+/// [`length_unit_scale`].
+///
+/// A **prefixed** `.SQUARE_METRE.` SI unit resolves to `None`: whether
+/// the prefix scales the base length or the derived unit is not stated
+/// by the staged schema text, so no guess is made. Conversion-based
+/// area chains (e.g. square feet over an SI base) resolve normally.
+pub fn area_unit_scale(step: &StepFile) -> Option<f64> {
+    project_unit_scale(step, &AREA_DIMENSION)
+}
+
+/// Cubic metres per model volume unit (`.VOLUMEUNIT.`) — the volume
+/// analogue of [`length_unit_scale`], with the same prefixed-SI-form
+/// refusal as [`area_unit_scale`].
+pub fn volume_unit_scale(step: &StepFile) -> Option<f64> {
+    project_unit_scale(step, &VOLUME_DIMENSION)
+}
+
+/// **Kilograms** per model mass unit (`.MASSUNIT.`). The SI unit name
+/// is `.GRAM.` (a kilogram model declares `.KILO.` + `.GRAM.`), so an
+/// unprefixed gram model yields 10⁻³.
+pub fn mass_unit_scale(step: &StepFile) -> Option<f64> {
+    project_unit_scale(step, &MASS_DIMENSION)
+}
+
+/// Seconds per model time unit (`.TIMEUNIT.`).
+pub fn time_unit_scale(step: &StepFile) -> Option<f64> {
+    project_unit_scale(step, &TIME_DIMENSION)
 }
 
 /// SI prefix multiplier (ISO 80000 decimal prefixes, as enumerated by

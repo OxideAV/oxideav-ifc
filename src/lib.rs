@@ -109,8 +109,9 @@ pub use props::{
     PropertyValue, Quantity, QuantityValue,
 };
 pub use schema::{
-    length_unit_scale, plane_angle_unit_scale, schema_of, EntityKind, EntitySchema, Model,
-    SpatialKind, TypedEntity, SCHEMA,
+    area_unit_scale, length_unit_scale, mass_unit_scale, named_unit_scale, plane_angle_unit_scale,
+    schema_of, time_unit_scale, volume_unit_scale, EntityKind, EntitySchema, Model, SpatialKind,
+    TypedEntity, SCHEMA,
 };
 pub use value::Value;
 
