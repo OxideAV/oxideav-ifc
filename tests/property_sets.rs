@@ -113,3 +113,22 @@ fn basin_fixture_type_link_resolves() {
     assert!(m.property_sets(217).is_empty());
     assert!(m.element_quantities(217).is_empty());
 }
+
+#[test]
+fn basin_fixture_material_falls_back_to_type() {
+    let f = parse_step(BASIN).expect("parse");
+    let m = Model::from_step(&f);
+
+    // #207 = IFCRELASSOCIATESMATERIAL(..., (#209), #206) associates
+    // Ceramic with the *type*; the occurrence (#217) has no direct
+    // association and inherits it.
+    assert_eq!(m.material_of(209), Some(206));
+    assert_eq!(m.material_of(217), Some(206));
+    let assignment = m.material_assignment(217).expect("material");
+    assert_eq!(assignment.name(), Some("Ceramic"));
+    let oxideav_ifc::MaterialAssignment::Material(mat) = assignment else {
+        panic!("expected a plain material");
+    };
+    assert_eq!(mat.id, 206);
+    assert_eq!(mat.description, None);
+}

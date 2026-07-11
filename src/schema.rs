@@ -72,6 +72,9 @@ pub enum EntityKind {
     /// `IfcRelDefinesByType` — type-object assignment to occurrences
     /// (the occurrence inherits the type's `HasPropertySets`).
     RelDefinesByType,
+    /// `IfcRelAssociatesMaterial` — material assignment to objects
+    /// (occurrences and type objects).
+    RelAssociatesMaterial,
     /// A placement entity (`IfcLocalPlacement`).
     Placement,
     /// A representation / context entity referenced by a product.
@@ -983,6 +986,151 @@ pub const SCHEMA: &[EntitySchema] = &[
             &["PredefinedType"]
         ),
     },
+    // ---- Material associations ----
+    EntitySchema {
+        keyword: "IFCRELASSOCIATESMATERIAL",
+        kind: EntityKind::RelAssociatesMaterial,
+        // IfcRoot + IfcRelAssociates(RelatedObjects) +
+        // IfcRelAssociatesMaterial(RelatingMaterial).
+        attrs: chain!(ROOT, &["RelatedObjects", "RelatingMaterial"]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIAL",
+        kind: EntityKind::Other,
+        // IfcMaterialDefinition adds nothing; IfcMaterial(Name,
+        // Description, Category).
+        attrs: chain!(&["Name", "Description", "Category"]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALLIST",
+        kind: EntityKind::Other,
+        attrs: chain!(&["Materials"]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALLAYER",
+        kind: EntityKind::Other,
+        // IfcMaterialLayer(Material, LayerThickness, IsVentilated,
+        // Name, Description, Category, Priority).
+        attrs: chain!(&[
+            "Material",
+            "LayerThickness",
+            "IsVentilated",
+            "Name",
+            "Description",
+            "Category",
+            "Priority"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALLAYERWITHOFFSETS",
+        kind: EntityKind::Other,
+        // IfcMaterialLayer(7) + (OffsetDirection, OffsetValues).
+        attrs: chain!(&[
+            "Material",
+            "LayerThickness",
+            "IsVentilated",
+            "Name",
+            "Description",
+            "Category",
+            "Priority",
+            "OffsetDirection",
+            "OffsetValues"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALLAYERSET",
+        kind: EntityKind::Other,
+        // IfcMaterialLayerSet(MaterialLayers, LayerSetName, Description).
+        attrs: chain!(&["MaterialLayers", "LayerSetName", "Description"]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALLAYERSETUSAGE",
+        kind: EntityKind::Other,
+        // IfcMaterialUsageDefinition adds nothing;
+        // IfcMaterialLayerSetUsage(ForLayerSet, LayerSetDirection,
+        // DirectionSense, OffsetFromReferenceLine, ReferenceExtent).
+        attrs: chain!(&[
+            "ForLayerSet",
+            "LayerSetDirection",
+            "DirectionSense",
+            "OffsetFromReferenceLine",
+            "ReferenceExtent"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALPROFILE",
+        kind: EntityKind::Other,
+        // IfcMaterialProfile(Name, Description, Material, Profile,
+        // Priority, Category).
+        attrs: chain!(&[
+            "Name",
+            "Description",
+            "Material",
+            "Profile",
+            "Priority",
+            "Category"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALPROFILEWITHOFFSETS",
+        kind: EntityKind::Other,
+        // IfcMaterialProfile(6) + (OffsetValues).
+        attrs: chain!(&[
+            "Name",
+            "Description",
+            "Material",
+            "Profile",
+            "Priority",
+            "Category",
+            "OffsetValues"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALPROFILESET",
+        kind: EntityKind::Other,
+        // IfcMaterialProfileSet(Name, Description, MaterialProfiles,
+        // CompositeProfile).
+        attrs: chain!(&[
+            "Name",
+            "Description",
+            "MaterialProfiles",
+            "CompositeProfile"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALPROFILESETUSAGE",
+        kind: EntityKind::Other,
+        // IfcMaterialProfileSetUsage(ForProfileSet, CardinalPoint,
+        // ReferenceExtent).
+        attrs: chain!(&["ForProfileSet", "CardinalPoint", "ReferenceExtent"]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALPROFILESETUSAGETAPERING",
+        kind: EntityKind::Other,
+        // IfcMaterialProfileSetUsage(3) + (ForProfileEndSet,
+        // CardinalEndPoint).
+        attrs: chain!(&[
+            "ForProfileSet",
+            "CardinalPoint",
+            "ReferenceExtent",
+            "ForProfileEndSet",
+            "CardinalEndPoint"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALCONSTITUENT",
+        kind: EntityKind::Other,
+        // IfcMaterialConstituent(Name, Description, Material, Fraction,
+        // Category).
+        attrs: chain!(&["Name", "Description", "Material", "Fraction", "Category"]),
+    },
+    EntitySchema {
+        keyword: "IFCMATERIALCONSTITUENTSET",
+        kind: EntityKind::Other,
+        // IfcMaterialConstituentSet(Name, Description,
+        // MaterialConstituents).
+        attrs: chain!(&["Name", "Description", "MaterialConstituents"]),
+    },
     // ---- Units ----
     EntitySchema {
         keyword: "IFCUNITASSIGNMENT",
@@ -1501,6 +1649,9 @@ pub struct Model<'a> {
     /// `occurrence -> type object` edges from `IfcRelDefinesByType`
     /// (the EXPRESS `Types` inverse is `SET [0:1]` — first edge wins).
     typed_by: BTreeMap<u64, u64>,
+    /// `object -> IfcMaterialSelect` edges from
+    /// `IfcRelAssociatesMaterial` (first edge wins).
+    materials: BTreeMap<u64, u64>,
 }
 
 impl<'a> Model<'a> {
@@ -1518,6 +1669,7 @@ impl<'a> Model<'a> {
         let mut contains: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut defines: BTreeMap<u64, Vec<u64>> = BTreeMap::new();
         let mut typed_by: BTreeMap<u64, u64> = BTreeMap::new();
+        let mut materials: BTreeMap<u64, u64> = BTreeMap::new();
 
         for inst in step.instances.values() {
             let Some(view) = TypedEntity::new(inst) else {
@@ -1581,6 +1733,19 @@ impl<'a> Model<'a> {
                         }
                     }
                 }
+                EntityKind::RelAssociatesMaterial => {
+                    if let (Some(objects), Some(material)) =
+                        (view.attr("RelatedObjects"), view.attr("RelatingMaterial"))
+                    {
+                        if let Some(material_id) = material.as_reference() {
+                            let mut object_ids = Vec::new();
+                            push_refs(objects, &mut object_ids);
+                            for object in object_ids {
+                                materials.entry(object).or_insert(material_id);
+                            }
+                        }
+                    }
+                }
                 _ => {}
             }
         }
@@ -1592,6 +1757,7 @@ impl<'a> Model<'a> {
             contains,
             defines,
             typed_by,
+            materials,
         }
     }
 
@@ -1654,6 +1820,26 @@ impl<'a> Model<'a> {
     /// encountered wins if a malformed file assigns several.
     pub fn type_of(&self, id: u64) -> Option<u64> {
         self.typed_by.get(&id).copied()
+    }
+
+    /// The `#id` of the `IfcMaterialSelect` associated with the object
+    /// `id` (`IfcRelAssociatesMaterial.RelatingMaterial`) — a directly
+    /// associated material wins; otherwise the material associated with
+    /// the object's type (`IfcRelDefinesByType`) applies, per the
+    /// occurrence-overrides-type convention.
+    pub fn material_of(&self, id: u64) -> Option<u64> {
+        if let Some(mid) = self.materials.get(&id) {
+            return Some(*mid);
+        }
+        let type_id = self.type_of(id)?;
+        self.materials.get(&type_id).copied()
+    }
+
+    /// The resolved
+    /// [`MaterialAssignment`](crate::material::MaterialAssignment) for
+    /// the object `id`, following [`Model::material_of`].
+    pub fn material_assignment(&self, id: u64) -> Option<crate::material::MaterialAssignment<'a>> {
+        crate::material::material_assignment(self.step, self.material_of(id)?)
     }
 
     /// Every property-set / quantity-set definition `#id` that applies

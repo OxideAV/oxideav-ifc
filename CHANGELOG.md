@@ -6,6 +6,32 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 4 (material associations): new [`material`] module resolving
+  the full `IfcMaterialSelect` family.
+  - `Model` folds `IfcRelAssociatesMaterial` (object →
+    `RelatingMaterial`, first edge wins): `material_of(id)` — a
+    directly associated material wins, else the material associated
+    with the object's **type** applies (occurrence-overrides-type) —
+    and `material_assignment(id)` for the resolved view.
+  - `material_assignment(step, id)` → `MaterialAssignment`:
+    `IfcMaterial` (name/description/category), `IfcMaterialList`,
+    `IfcMaterialLayer(WithOffsets)` + `IfcMaterialLayerSet` (typed
+    layers with material / thickness / IsVentilated / category /
+    priority and the derived `total_thickness()` per
+    `IfcMlsTotalThickness`) + `IfcMaterialLayerSetUsage` (direction /
+    sense / offset), `IfcMaterialProfile(WithOffsets)` +
+    `IfcMaterialProfileSet` (profile-def `#id`s into the geometry
+    layer's profile family) + `IfcMaterialProfileSetUsage(Tapering)`
+    (cardinal point), and `IfcMaterialConstituent(Set)` (fractions).
+    `MaterialAssignment::name()` gives the headline display name.
+  - Schema entries for the 14 material entities +
+    `IfcRelAssociatesMaterial`, transcribed from `IFC4_ADD2.exp`.
+  - 6 unit tests (plain material, cavity-wall layer-set usage with
+    total-thickness and ventilation flags, list + constituent set,
+    profile-set usage, occurrence-beats-type precedence, non-material
+    target) + a basin-fixture integration test (the occurrence
+    inherits Ceramic through its sanitary-terminal type).
+
 - Phase 4 (unit engine): the §8.11.3.11 project-unit walk is
   generalised over a per-dimension table, adding public
   `area_unit_scale` (m²), `volume_unit_scale` (m³), `mass_unit_scale`

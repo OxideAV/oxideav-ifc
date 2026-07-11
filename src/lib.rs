@@ -87,6 +87,7 @@ pub mod error;
 pub mod geometry;
 pub mod header;
 mod lexer;
+pub mod material;
 pub mod parser;
 pub mod props;
 pub mod schema;
@@ -101,6 +102,7 @@ pub use geometry::{
     placement_transform, tessellate_item, GeometryError, Transform, TriMesh,
 };
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
+pub use material::{material_assignment, MaterialAssignment};
 pub use parser::{
     parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
 };
