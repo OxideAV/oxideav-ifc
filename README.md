@@ -22,6 +22,7 @@ extension.
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
 | **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids over the full profile family with arc boundaries (trimmed conics, three-point arcs, composite curves), swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, and surface-style materials | ✅ this release; advanced (curved) breps, non-convex mesh–mesh booleans, named profiles (I/L/T/U/Z/C) later |
+| **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), void/fill opening graph, georeferencing (`IfcMapConversion` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time) | ✅ this release |
 
 ## Phase 1 surface
 
@@ -295,9 +296,85 @@ raw model units.
 
 Still later in Phase 3: the remaining swept solids
 (`IfcSurfaceCurveSweptAreaSolid` / the tapered subtypes), named
-parameterised profiles (I/L/T/U/Z/C), advanced (curved) breps
+parameterised profiles (I/L/T/U/Z/C — blocked on a docs digest for
+the contour / anchor conventions), advanced (curved) breps
 (`IfcAdvancedBrep` / curved `IfcFaceSurface`), non-convex mesh–mesh
 booleans, and EXPRESS WHERE-rule validation.
+
+## Phase 4 surface — semantic data layer
+
+The typed model resolves the definition / association relationships
+into a queryable surface (all std-only, `--no-default-features`
+included):
+
+```rust
+let step = oxideav_ifc::parse_step(&bytes)?;
+let model = oxideav_ifc::Model::from_step(&step);
+
+for pset in model.property_sets(wall_id) {
+    println!("{}", pset.name.unwrap_or("?"));
+    if let Some(p) = pset.property("IsExternal") {
+        println!("  external: {:?}", p.nominal().and_then(|v| v.as_bool()));
+    }
+}
+let name = model.material_assignment(wall_id).and_then(|m| m.name().map(String::from));
+```
+
+* **Property sets** (`oxideav_ifc::props`): `Model` folds
+  `IfcRelDefinesByProperties` (single definitions and definition-set
+  aggregates) and `IfcRelDefinesByType`; `property_set_ids(id)` merges
+  the occurrence's sets with the type's `HasPropertySets`, an
+  occurrence set **shadowing** a same-named type set, and a type
+  object queried directly answers with its own sets.
+  `property_set(step, id)` resolves the whole `IfcSimpleProperty`
+  family — single (`nominal()` with the measure-type wrapper kept:
+  `IFCBOOLEAN(.T.)` → `type_name` + `as_bool`), enumerated (+
+  `IfcPropertyEnumeration` reference), bounded (upper / lower /
+  set-point), list, table (paired columns + units + interpolation),
+  reference — plus nested `IfcComplexProperty` groups (depth-capped).
+* **Quantity sets**: `element_quantity(step, id)` resolves
+  `IfcElementQuantity` into length / area / volume / count / weight /
+  time quantities (+ nested `IfcPhysicalComplexQuantity` groups),
+  each with `Formula` and the optional per-quantity named-unit
+  override. `Quantity::si_value` converts to SI reference units —
+  the override wins (dimension-checked per the WHERE rules), else the
+  model default.
+* **Unit engine**: `area_unit_scale` (m²) / `volume_unit_scale` (m³) /
+  `mass_unit_scale` (kg — the SI name is `.GRAM.`) /
+  `time_unit_scale` (s) join the length / plane-angle scales, all via
+  one per-dimension §8.11.3.11 walk; `named_unit_scale(step, id,
+  unit_type)` resolves one `IfcSIUnit` / conversion-based chain
+  directly. Prefixed `.SQUARE_METRE.` / `.CUBIC_METRE.` SI units
+  resolve to `None` (prefix-on-exponent semantics are not stated by
+  the staged schema text).
+* **Materials** (`oxideav_ifc::material`): `Model::material_of(id)`
+  (occurrence association wins, else the type's) →
+  `material_assignment` resolving the full `IfcMaterialSelect`:
+  plain `IfcMaterial`, `IfcMaterialList`, layer sets (+ usage;
+  `total_thickness()` per `IfcMlsTotalThickness`), profile sets
+  (+ usage incl. tapering; profile-def ids into the Phase-3 profile
+  family), and constituent sets — with a headline `name()` accessor.
+* **Openings**: `openings_of(wall)` / `voided_element_of(opening)`
+  (`IfcRelVoidsElement`), `fillers_of(opening)` /
+  `filled_opening_of(window)` (`IfcRelFillsElement`), and the
+  flattened `hosted_fillers(wall)` walk.
+* **Type objects**: `EntityKind::TypeObject` classifies the common
+  element-type slice (wall / window / column / beam / slab / door
+  (+style) / covering / member / plate / railing / roof / stair /
+  furniture / proxy / sanitary-terminal types);
+  `Model::type_objects()` enumerates, `is_type_object(id)` also
+  recognises `RelatingType` targets outside the slice.
+* **Georeferencing** (`oxideav_ifc::geo`): `map_conversion(step)` —
+  the `IfcMapConversion` bound to the geometric representation
+  context, with its `IfcProjectedCRS` target (EPSG name, datums,
+  map unit); `MapConversion::to_map` applies the planar similarity
+  (normalised x-axis rotation, planar `Scale`, E/N/H translation).
+  `site_geolocation(step)` converts `IfcSite` compound-measure
+  lat/long to decimal degrees.
+
+The registry decoder uses the layer too: primitives with no surface
+style fall back to the product's associated material as a named
+`Material` (the basin fixture decodes with `"Ceramic"`).
 
 ## Cargo features
 

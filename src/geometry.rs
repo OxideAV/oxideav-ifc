@@ -81,7 +81,7 @@
 //!   Mapped items may nest (a source representation can contain further
 //!   mapped items); recursion is bounded by a depth cap.
 //!
-//! Swept-solid profiles are resolved as full areas ([`ProfileArea`]):
+//! Swept-solid profiles are resolved as full areas (`ProfileArea`):
 //! arbitrary closed profiles (polyline or full-circle outer curves,
 //! with or without voids), rectangles (plain and hollow), circles
 //! (plain and hollow), and ellipses. Caps are triangulated hole-aware

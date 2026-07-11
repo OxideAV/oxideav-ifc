@@ -2,7 +2,7 @@
 //!
 //! Phase 1 ([`crate::parser`]) turns a `.ifc` file into a positional
 //! instance graph: every `#id = KEYWORD(args);` record is a
-//! [`ParsedInstance`](crate::ParsedInstance) whose `args` are an
+//! [`ParsedInstance`] whose `args` are an
 //! ordered list of [`Value`]s with no attribute names attached. The
 //! wire format carries position only — the IFC EXPRESS schema is what
 //! gives each positional slot a *name* and a *type*.

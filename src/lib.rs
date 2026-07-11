@@ -65,6 +65,28 @@
 //! Swept solids, advanced (curved) breps, boolean results, and mapped
 //! items are later Phase-3 slices.
 //!
+//! ## Phase 4 (this release): semantic data layer
+//!
+//! The typed model resolves the definition / association
+//! relationships into a queryable surface:
+//!
+//! * [`props`] — property sets ([`Model::property_sets`], the full
+//!   `IfcSimpleProperty` family + complex groups, type-inherited with
+//!   occurrence shadowing) and quantity sets
+//!   ([`Model::element_quantities`], six quantity kinds with
+//!   [`Quantity::si_value`] SI scaling).
+//! * [`material`] — `IfcRelAssociatesMaterial` resolution
+//!   ([`Model::material_assignment`]): materials, layer / profile /
+//!   constituent sets and their usages.
+//! * Openings — [`Model::openings_of`] / [`Model::fillers_of`] and the
+//!   [`Model::hosted_fillers`] walk over `IfcRelVoidsElement` /
+//!   `IfcRelFillsElement`.
+//! * [`geo`] — georeferencing: [`map_conversion`] (`IfcMapConversion`
+//!   + `IfcProjectedCRS`) and [`site_geolocation`].
+//! * Unit engine — [`area_unit_scale`] / [`volume_unit_scale`] /
+//!   [`mass_unit_scale`] / [`time_unit_scale`] / [`named_unit_scale`]
+//!   alongside the length / plane-angle scales.
+//!
 //! ## Standalone build
 //!
 //! The framework deps (`oxideav-core`, `oxideav-mesh3d`) sit behind
