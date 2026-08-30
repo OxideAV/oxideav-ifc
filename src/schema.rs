@@ -798,6 +798,31 @@ pub const SCHEMA: &[EntitySchema] = &[
         ]),
     },
     EntitySchema {
+        keyword: "IFCDERIVEDPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcProfileDef(2) + IfcDerivedProfileDef(ParentProfile, Operator,
+        // Label).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "ParentProfile",
+            "Operator",
+            "Label"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMIRROREDPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcDerivedProfileDef(5); Operator is derived (`*` on the wire).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "ParentProfile",
+            "Operator",
+            "Label"
+        ]),
+    },
+    EntitySchema {
         keyword: "IFCEXTRUDEDAREASOLIDTAPERED",
         kind: EntityKind::Geometry,
         // IfcExtrudedAreaSolid(4) + IfcExtrudedAreaSolidTapered(EndSweptArea).
@@ -3025,6 +3050,8 @@ mod tests {
             ("IFCCSHAPEPROFILEDEF", 8),
             ("IFCROUNDEDRECTANGLEPROFILEDEF", 6),
             ("IFCTRAPEZIUMPROFILEDEF", 7),
+            ("IFCDERIVEDPROFILEDEF", 5),
+            ("IFCMIRROREDPROFILEDEF", 5),
             ("IFCEXTRUDEDAREASOLIDTAPERED", 5),
             ("IFCREVOLVEDAREASOLIDTAPERED", 5),
             ("IFCSURFACECURVESWEPTAREASOLID", 6),

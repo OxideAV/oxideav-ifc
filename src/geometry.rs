@@ -4154,6 +4154,10 @@ impl ProfileArea {
 /// ring plus any inner (hole) rings.
 ///
 /// Beyond the single-ring kinds of [`profile_ring`] this resolves:
+/// * `IfcDerivedProfileDef(…, ParentProfile, Operator, Label)` — the
+///   parent profile's area mapped by the 2-D Cartesian transformation
+///   operator (translation / rotation / uniform or per-axis scale), and
+///   `IfcMirroredProfileDef`, whose derived operator mirrors x.
 /// * `IfcArbitraryProfileDefWithVoids(…, OuterCurve, InnerCurves)` — the
 ///   `InnerCurves : SET [1:?] OF IfcCurve` (attribute index 3) become
 ///   hole rings (IFC4 EXPRESS `IfcArbitraryProfileDefWithVoids`).
@@ -4171,10 +4175,60 @@ impl ProfileArea {
 /// Ring orientation is normalised: every returned ring is
 /// counter-clockwise (holes are re-oriented during cap triangulation).
 fn profile_area(step: &StepFile, profile_id: u64) -> Result<ProfileArea, GeometryError> {
+    profile_area_depth(step, profile_id, 0)
+}
+
+/// Nesting bound for `IfcDerivedProfileDef.ParentProfile` chains.
+const MAX_DERIVED_PROFILE_DEPTH: usize = 16;
+
+/// Depth-tracked core of [`profile_area`] (`depth` counts derived-profile
+/// indirections).
+fn profile_area_depth(
+    step: &StepFile,
+    profile_id: u64,
+    depth: usize,
+) -> Result<ProfileArea, GeometryError> {
     let inst = step
         .get(profile_id)
         .ok_or(GeometryError::MissingInstance(profile_id))?;
     let mut area = match inst.keyword.as_str() {
+        // IfcDerivedProfileDef(ProfileType, ProfileName, ParentProfile,
+        // Operator : IfcCartesianTransformationOperator2D, Label): the
+        // parent's area mapped by the 2-D operator. IfcMirroredProfileDef
+        // derives its Operator (`*` on the wire) as the x-mirror
+        // (Axis1 = (−1, 0), Axis2 = (0, 1), origin (0, 0), scale 1).
+        "IFCDERIVEDPROFILEDEF" | "IFCMIRROREDPROFILEDEF" => {
+            if depth >= MAX_DERIVED_PROFILE_DEPTH {
+                return Err(GeometryError::Unsupported(inst.keyword.clone()));
+            }
+            let parent_id = inst
+                .args
+                .get(2)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadProfile)?;
+            let mut parent = profile_area_depth(step, parent_id, depth + 1)?;
+            let map: Box<dyn Fn([f64; 2]) -> [f64; 2]> = if inst.keyword == "IFCMIRROREDPROFILEDEF"
+            {
+                Box::new(|p: [f64; 2]| [-p[0], p[1]])
+            } else {
+                let op_id = inst
+                    .args
+                    .get(3)
+                    .and_then(Value::as_reference)
+                    .ok_or(GeometryError::BadProfile)?;
+                let xform = transformation_operator(step, op_id)?;
+                Box::new(move |p: [f64; 2]| {
+                    let q = xform.apply([p[0], p[1], 0.0]);
+                    [q[0], q[1]]
+                })
+            };
+            for ring in core::iter::once(&mut parent.outer).chain(parent.holes.iter_mut()) {
+                for p in ring.iter_mut() {
+                    *p = map(*p);
+                }
+            }
+            parent
+        }
         "IFCARBITRARYPROFILEDEFWITHVOIDS" => {
             let outer = profile_ring(step, profile_id)?;
             // InnerCurves : SET [1:?] OF IfcCurve (attribute index 3).
@@ -6412,6 +6466,66 @@ mod tests {
         // Component prisms stay centred on their own Positions.
         assert!(m.positions[..8].iter().all(|p| p[0] < 0.0));
         assert!(m.positions[8..].iter().all(|p| p[0] > 0.0));
+    }
+
+    #[test]
+    fn derived_profile_applies_2d_operator() {
+        // A 2×4 rectangle scaled ×2 about its origin and moved to
+        // (10, 0): an 4×8 box centred at (10, 0).
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #4=IFCCARTESIANPOINT((10.,0.));\n\
+             #5=IFCCARTESIANTRANSFORMATIONOPERATOR2D($,$,#4,2.);\n\
+             #6=IFCDERIVEDPROFILEDEF(.AREA.,$,#1,#5,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#6,$,#2,1.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert!((m.signed_volume() - 32.0).abs() < 1e-9);
+        let xs: Vec<f64> = m.positions.iter().map(|p| p[0]).collect();
+        assert!(xs
+            .iter()
+            .all(|x| (x - 8.0).abs() < 1e-9 || (x - 12.0).abs() < 1e-9));
+        // Non-uniform 2-D operator: Scale2 stretches y only.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.));\n\
+             #5=IFCCARTESIANTRANSFORMATIONOPERATOR2DNONUNIFORM($,$,#4,1.,3.);\n\
+             #6=IFCDERIVEDPROFILEDEF(.AREA.,$,#1,#5,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#6,$,#2,1.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert!((m.signed_volume() - 24.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn mirrored_profile_flips_x() {
+        // An L-section (vertical leg on the left) mirrored: the vertical
+        // leg lands on the right; area unchanged; the operator is `*`.
+        let f = parse(
+            "#1=IFCLSHAPEPROFILEDEF(.AREA.,$,$,100.,60.,8.,$,$,$);\n\
+             #6=IFCMIRROREDPROFILEDEF(.AREA.,$,#1,*,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#6,$,#2,1.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert!(
+            (m.signed_volume() - 1216.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m
+            .positions
+            .iter()
+            .any(|p| (p[0] - 22.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9));
+        // A derived profile whose parent is itself is bounded.
+        let f = parse(
+            "#6=IFCMIRROREDPROFILEDEF(.AREA.,$,#6,*,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#6,$,#2,1.);",
+        );
+        assert!(tessellate_item(&f, 3).is_err());
     }
 
     #[test]

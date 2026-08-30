@@ -46,6 +46,11 @@ All notable changes to this project will be documented in this file.
   (mm² = 10⁻⁶ m²), returning a `UnitScale` that flags the assumption;
   the default functions still refuse it.
 
+- Phase 3: `IfcDerivedProfileDef` (parent area mapped by its 2-D
+  Cartesian transformation operator, uniform or non-uniform) and
+  `IfcMirroredProfileDef` (derived x-mirror operator) sweep; parent
+  chains are depth-capped. Both join the typed schema slice.
+
 ### Fixed
 
 - `MapConversion::to_map` applied `Scale` to the planar components
