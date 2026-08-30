@@ -68,6 +68,19 @@ All notable changes to this project will be documented in this file.
   units, `IfcMapConversion` georeferencing) through the std-only API
   and the registry decoder.
 
+- New `rules` module — EXPRESS WHERE-rule validation transcribed from
+  the staged schema for the entities this round touches:
+  `where_rule_violations(step, id)` (`None` = no rules transcribed for
+  that entity) and `model_where_rule_violations(step)`, each naming the
+  failed rule label. Covered: the eight named profiles, rectangle /
+  circle hollow profiles, composite profiles (`InvariantProfileType` /
+  `NoRecursion`), swept area solids (`SweptAreaType`,
+  `ValidExtrusionDirection`, `AxisStartInXY` / `AxisDirectionInXY`,
+  tapered `CorrectProfileAssignment`), swept disk solids
+  (`InnerRadiusSize` / `DirectrixBounded`), `IfcMapConversion`
+  (`TargetCRSOnlyProjected`) and `IfcRigidOperation`
+  (`SameCoordinateType`). 7 new tests.
+
 ### Fixed
 
 - `MapConversion::to_map` applied `Scale` to the planar components

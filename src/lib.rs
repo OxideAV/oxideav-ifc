@@ -114,6 +114,7 @@ mod lexer;
 pub mod material;
 pub mod parser;
 pub mod props;
+pub mod rules;
 pub mod schema;
 pub mod value;
 
@@ -142,6 +143,7 @@ pub use props::{
     element_quantity, property_set, ElementQuantity, IfcValue, Property, PropertySet,
     PropertyValue, Quantity, QuantityValue,
 };
+pub use rules::{model_where_rule_violations, where_rule_violations, RuleViolation};
 pub use schema::{
     area_unit_scale, area_unit_scale_with, length_unit_scale, mass_unit_scale, named_unit_scale,
     named_unit_scale_with, plane_angle_unit_scale, schema_of, time_unit_scale, volume_unit_scale,
