@@ -186,9 +186,13 @@ pub(super) fn round_corners(corners: &[Corner]) -> Result<Vec<[f64; 2]>, Geometr
         while delta < -core::f64::consts::PI {
             delta += 2.0 * core::f64::consts::PI;
         }
-        let segs = ((CIRCLE_SEGMENTS as f64 * delta.abs() / (2.0 * core::f64::consts::PI)).ceil()
-            as usize)
-            .max(2);
+        // Segment count from the swept fraction of a turn. The fraction
+        // is nudged below the exact value before ceil() so a right
+        // angle is exactly CIRCLE_SEGMENTS / 4 on every platform (a
+        // last-ulp difference in atan2 must not change the point count
+        // — a tapered loft pairs rings by count).
+        let fraction = delta.abs() / (2.0 * core::f64::consts::PI);
+        let segs = ((CIRCLE_SEGMENTS as f64 * fraction - 1e-6).ceil() as usize).max(2);
         for k in 0..=segs {
             let a = a0 + delta * (k as f64) / (segs as f64);
             push_unique(
