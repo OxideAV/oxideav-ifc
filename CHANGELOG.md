@@ -51,6 +51,15 @@ All notable changes to this project will be documented in this file.
   `IfcMirroredProfileDef` (derived x-mirror operator) sweep; parent
   chains are depth-capped. Both join the typed schema slice.
 
+- Phase 3 (tapered sweeps): `IfcExtrudedAreaSolidTapered` and
+  `IfcRevolvedAreaSolidTapered` — the section varies linearly from
+  `SweptArea` to `EndSweptArea` along the sweep (the
+  `CorrectProfileAssignment` rule's same-type / derived pairing gives
+  the point correspondence; mismatched topology is `BadProfile`);
+  holes taper with the outer ring, both caps are triangulated on their
+  own section, and a tapered full-turn revolution keeps its end caps.
+  3 new tests (frustum volumes, hollow taper, angular interpolation).
+
 ### Fixed
 
 - `MapConversion::to_map` applied `Scale` to the planar components

@@ -270,9 +270,15 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         // Surface models: collections of IfcConnectedFaceSet / IfcShell.
         "IFCFACEBASEDSURFACEMODEL" | "IFCSHELLBASEDSURFACEMODEL" => surface_model(step, &inst.args),
         // Swept area solid: sweep a 2-D profile along a direction.
-        "IFCEXTRUDEDAREASOLID" => extruded_area_solid(step, &inst.args),
+        // The tapered subtype adds EndSweptArea (index 4): the section
+        // varies linearly from SweptArea to EndSweptArea along the sweep.
+        "IFCEXTRUDEDAREASOLID" | "IFCEXTRUDEDAREASOLIDTAPERED" => {
+            extruded_area_solid(step, &inst.args)
+        }
         // Revolved area solid: revolve a 2-D profile about an axis line.
-        "IFCREVOLVEDAREASOLID" => revolved_area_solid(step, &inst.args),
+        "IFCREVOLVEDAREASOLID" | "IFCREVOLVEDAREASOLIDTAPERED" => {
+            revolved_area_solid(step, &inst.args)
+        }
         // Swept disk solid: a disk / annulus swept along a 3-D directrix.
         "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => swept_disk_solid(step, &inst.args),
         // Sectioned solid: profiles lofted at stations along a directrix.
@@ -2088,7 +2094,16 @@ fn surface_model(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryErr
 // wall per boundary edge (outer ring and hole rings alike). The caps are
 // ear-clipped through `triangulate_profile`, so concave outer boundaries
 // and profile holes (hollow / voided profile kinds) triangulate
-// correctly. The tapered subtype is not yet applied.
+// correctly.
+//
+// IfcExtrudedAreaSolidTapered adds EndSweptArea (index 4). The EXPRESS
+// CorrectProfileAssignment rule (IfcTaperedSweptAreaProfiles) requires
+// the end profile to be of the same parameterised type as the start, or
+// an IfcDerivedProfileDef of it — which is what makes the vertex
+// correspondence between the two contours well defined: the solid is
+// the loft whose cross-section varies linearly from SweptArea at the
+// base to EndSweptArea at Depth. A pair whose resolved rings do not
+// share a point count (the rule violated) is BadProfile.
 // ---------------------------------------------------------------------
 fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
     // SweptArea (profile) — attribute index 0.
@@ -2097,6 +2112,7 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadProfile)?;
     let areas = profile_areas(step, profile_id)?;
+    let end_areas = tapered_end_areas(step, args.get(4), &areas)?;
 
     // ExtrudedDirection (index 2) and Depth (index 3), both in the
     // Position coordinate system.
@@ -2112,8 +2128,9 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     // One closed prism per profile area (a composite profile is the
     // union of its component areas), merged into a single mesh.
     let mut mesh = TriMesh::default();
-    for area in &areas {
-        append_mesh(&mut mesh, extrude_area(area, sweep)?);
+    for (i, area) in areas.iter().enumerate() {
+        let top = end_areas.as_ref().map_or(area, |e| &e[i]);
+        append_mesh(&mut mesh, loft_area(area, top, sweep)?);
     }
 
     // Position: OPTIONAL IfcAxis2Placement3D (index 1). When present it
@@ -2125,8 +2142,60 @@ fn extruded_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     Ok(mesh)
 }
 
+/// Resolve a tapered sweep's `EndSweptArea` (the attribute value, if the
+/// item is a `…Tapered` subtype) against the start areas: `None` for a
+/// plain sweep, else the end areas with ring-for-ring point
+/// correspondence verified.
+fn tapered_end_areas(
+    step: &StepFile,
+    end_arg: Option<&Value>,
+    start: &[ProfileArea],
+) -> Result<Option<Vec<ProfileArea>>, GeometryError> {
+    let Some(end_id) = end_arg.and_then(Value::as_reference) else {
+        return Ok(None);
+    };
+    let end = profile_areas(step, end_id)?;
+    if end.len() != start.len() || start.iter().zip(&end).any(|(a, b)| !a.same_topology(b)) {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok(Some(end))
+}
+
+/// Linear interpolation of two topology-matched areas.
+fn lerp_area(a: &ProfileArea, b: &ProfileArea, t: f64) -> ProfileArea {
+    let lerp_ring = |ra: &[[f64; 2]], rb: &[[f64; 2]]| -> Vec<[f64; 2]> {
+        ra.iter()
+            .zip(rb)
+            .map(|(p, q)| [p[0] + (q[0] - p[0]) * t, p[1] + (q[1] - p[1]) * t])
+            .collect()
+    };
+    ProfileArea {
+        outer: lerp_ring(&a.outer, &b.outer),
+        holes: a
+            .holes
+            .iter()
+            .zip(&b.holes)
+            .map(|(h, k)| lerp_ring(h, k))
+            .collect(),
+    }
+}
+
 /// Build the closed prism of one [`ProfileArea`] swept by `sweep`.
 fn extrude_area(area: &ProfileArea, sweep: [f64; 3]) -> Result<TriMesh, GeometryError> {
+    loft_area(area, area, sweep)
+}
+
+/// Build the closed loft from `bottom` (at the profile plane) to `top`
+/// (translated by `sweep`); the two areas must share ring topology.
+fn loft_area(
+    bottom: &ProfileArea,
+    top_area: &ProfileArea,
+    sweep: [f64; 3],
+) -> Result<TriMesh, GeometryError> {
+    if !bottom.same_topology(top_area) {
+        return Err(GeometryError::BadProfile);
+    }
+    let area = bottom;
     let total = area.point_count();
     let mut positions: Vec<[f64; 3]> = Vec::with_capacity(total * 2);
     // Bottom rings (profile plane, local z = 0): outer, then each hole.
@@ -2135,16 +2204,22 @@ fn extrude_area(area: &ProfileArea, sweep: [f64; 3]) -> Result<TriMesh, Geometry
             positions.push([x, y, 0.0]);
         }
     }
-    // Top rings (bottom + sweep), same order.
-    for ring in area.rings() {
+    // Top rings (top area + sweep), same order.
+    for ring in top_area.rings() {
         for &[x, y] in ring {
             positions.push([x + sweep[0], y + sweep[1], sweep[2]]);
         }
     }
 
     // Caps: the hole-aware profile triangulation (indices address the
-    // concatenated rings in the same order as `positions`).
+    // concatenated rings in the same order as `positions`); the top
+    // cap is triangulated on its own area.
     let cap = triangulate_profile(area)?;
+    let top_cap = if core::ptr::eq(area, top_area) {
+        cap.clone()
+    } else {
+        triangulate_profile(top_area)?
+    };
     let top = total as u32;
     let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(cap.len() * 2 + total * 2);
     // Bottom cap wound to face away from the sweep (reversed), top cap
@@ -2152,7 +2227,7 @@ fn extrude_area(area: &ProfileArea, sweep: [f64; 3]) -> Result<TriMesh, Geometry
     for &[a, b, c] in &cap {
         triangles.push([a, c, b]);
     }
-    for &[a, b, c] in &cap {
+    for &[a, b, c] in &top_cap {
         triangles.push([top + a, top + b, top + c]);
     }
     // Side walls: one quad (two triangles) per ring edge. Hole walls are
@@ -2214,6 +2289,9 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadProfile)?;
     let areas = profile_areas(step, profile_id)?;
+    // IfcRevolvedAreaSolidTapered.EndSweptArea (index 4): the section
+    // varies linearly with the swept angle.
+    let end_areas = tapered_end_areas(step, args.get(4), &areas)?;
 
     // Axis : IfcAxis1Placement (index 2) — its Location and direction.
     let axis_id = args
@@ -2236,8 +2314,12 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
     // One surface of revolution per profile area (a composite profile is
     // the union of its component areas), merged into a single mesh.
     let mut mesh = TriMesh::default();
-    for area in &areas {
-        append_mesh(&mut mesh, revolve_area(area, axis_origin, axis_dir, angle)?);
+    for (i, area) in areas.iter().enumerate() {
+        let end = end_areas.as_ref().map(|e| &e[i]);
+        append_mesh(
+            &mut mesh,
+            revolve_area(area, end, axis_origin, axis_dir, angle)?,
+        );
     }
 
     // Position: OPTIONAL IfcAxis2Placement3D (index 1) re-places the solid.
@@ -2250,9 +2332,13 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
 
 /// Build the tessellated surface of revolution of one [`ProfileArea`]
 /// about the axis line through `axis_origin` with direction `axis_dir`,
-/// swept by `angle` radians.
+/// swept by `angle` radians. With an `end` area (a tapered revolution)
+/// the section interpolates linearly with the angle; a tapered full
+/// turn does not wrap (its first and last sections differ) and keeps
+/// both end caps.
 fn revolve_area(
     area: &ProfileArea,
+    end: Option<&ProfileArea>,
     axis_origin: [f64; 3],
     axis_dir: [f64; 3],
     angle: f64,
@@ -2263,7 +2349,7 @@ fn revolve_area(
     let two_pi = 2.0 * core::f64::consts::PI;
     // A full turn (within tolerance) wraps closed: no end caps, and the
     // last ring coincides with the first.
-    let full_turn = (angle.abs() - two_pi).abs() < 1e-9 || angle.abs() > two_pi;
+    let full_turn = end.is_none() && ((angle.abs() - two_pi).abs() < 1e-9 || angle.abs() > two_pi);
     let ring_count = if full_turn { segments } else { segments + 1 };
 
     // One "slice" per angular step: the concatenated profile rings
@@ -2273,8 +2359,10 @@ fn revolve_area(
     for s in 0..ring_count {
         // Angular position of this slice (the last slice of a full turn
         // is not emitted separately — it reuses slice 0).
-        let theta = angle * (s as f64) / (segments as f64);
-        for ring in area.rings() {
+        let t = (s as f64) / (segments as f64);
+        let theta = angle * t;
+        let section = end.map(|e| lerp_area(area, e, t));
+        for ring in section.as_ref().unwrap_or(area).rings() {
             for &[x, y] in ring {
                 let p = [x, y, 0.0];
                 positions.push(rotate_about_axis(p, axis_origin, axis_dir, theta));
@@ -2312,9 +2400,15 @@ fn revolve_area(
     // of the swept volume).
     if !full_turn {
         let cap = triangulate_profile(area)?;
+        let end_cap = match end {
+            Some(e) => triangulate_profile(e)?,
+            None => cap.clone(),
+        };
         let last = (segments * n) as u32;
         for &[a, b, c] in &cap {
             triangles.push([a, c, b]);
+        }
+        for &[a, b, c] in &end_cap {
             triangles.push([last + a, last + b, last + c]);
         }
     }
@@ -4147,6 +4241,18 @@ impl ProfileArea {
     /// The rings in mesh-vertex order: outer first, then each hole.
     fn rings(&self) -> impl Iterator<Item = &Vec<[f64; 2]>> {
         core::iter::once(&self.outer).chain(self.holes.iter())
+    }
+
+    /// Whether `other` has the same ring count and per-ring point count
+    /// (so the two can be lofted point-for-point).
+    fn same_topology(&self, other: &ProfileArea) -> bool {
+        self.outer.len() == other.outer.len()
+            && self.holes.len() == other.holes.len()
+            && self
+                .holes
+                .iter()
+                .zip(&other.holes)
+                .all(|(a, b)| a.len() == b.len())
     }
 }
 
@@ -6526,6 +6632,109 @@ mod tests {
              #3=IFCEXTRUDEDAREASOLID(#6,$,#2,1.);",
         );
         assert!(tessellate_item(&f, 3).is_err());
+    }
+
+    #[test]
+    fn extruded_tapered_lofts_to_end_profile() {
+        // A 4×4 square tapering to a 2×2 square over depth 3: a
+        // frustum, volume = h/3·(A1 + A2 + √(A1·A2)) = 1·(16+4+8) = 28.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLIDTAPERED(#1,$,#2,3.,#4);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert!(
+            (m.signed_volume() - 28.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert_eq!(m.vertex_count(), 8);
+        // Top ring is the small square at z = 3.
+        for p in &m.positions[4..] {
+            assert!((p[0].abs() - 1.0).abs() < 1e-9 && (p[2] - 3.0).abs() < 1e-9);
+        }
+        // Via a derived end profile (scale ½ about the origin): same.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #5=IFCCARTESIANPOINT((0.,0.));\n\
+             #6=IFCCARTESIANTRANSFORMATIONOPERATOR2D($,$,#5,0.5);\n\
+             #4=IFCDERIVEDPROFILEDEF(.AREA.,$,#1,#6,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLIDTAPERED(#1,$,#2,3.,#4);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert!((m.signed_volume() - 28.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn extruded_tapered_hollow_profiles_keep_holes() {
+        // A tube 10×10 wall 1 tapering to 6×6 wall 1: the hole tapers
+        // with it. Volume = frustum(outer) − frustum(inner) over depth 3:
+        // outer 100→36: (100+36+60)=196; inner 64→16: (64+16+32)=112.
+        let f = parse(
+            "#1=IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,$,10.,10.,1.,$,$);\n\
+             #4=IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,$,6.,6.,1.,$,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLIDTAPERED(#1,$,#2,3.,#4);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert!(
+            (m.signed_volume() - 84.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        // Mismatched topology (rectangle → circle) violates the
+        // CorrectProfileAssignment rule → BadProfile.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #4=IFCCIRCLEPROFILEDEF(.AREA.,$,$,1.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLIDTAPERED(#1,$,#2,3.,#4);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 3).unwrap_err(),
+            GeometryError::BadProfile
+        );
+    }
+
+    #[test]
+    fn revolved_tapered_interpolates_with_angle() {
+        // A 2×2 square at x ∈ [4, 6] revolved a quarter turn about the
+        // y-axis, tapering to a 1×1 square at x ∈ [4.5, 5.5]: sections
+        // shrink with the angle, both end caps present, positive volume
+        // between the two constant-section revolutions.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,#10,2.,2.);\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,#10,1.,1.);\n\
+             #10=IFCAXIS2PLACEMENT2D(#11,$);\n#11=IFCCARTESIANPOINT((5.,0.));\n\
+             #5=IFCAXIS1PLACEMENT(#6,#7);\n#6=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #7=IFCDIRECTION((0.,1.,0.));\n\
+             #3=IFCREVOLVEDAREASOLIDTAPERED(#1,$,#5,1.5707963267948966,#4);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        let big = 4.0 * core::f64::consts::FRAC_PI_2 * 5.0; // Pappus, area 4
+        let small = 1.0 * core::f64::consts::FRAC_PI_2 * 5.0;
+        let v = m.signed_volume().abs();
+        assert!(v < big && v > small, "{v} not between {small} and {big}");
+        // The last ring is the small square.
+        let n = m.vertex_count();
+        let last = &m.positions[n - 4..];
+        for p in last {
+            assert!((p[1].abs() - 0.5).abs() < 1e-9);
+        }
+        // A tapered full turn keeps its end caps (does not wrap).
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,#10,2.,2.);\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,#10,1.,1.);\n\
+             #10=IFCAXIS2PLACEMENT2D(#11,$);\n#11=IFCCARTESIANPOINT((5.,0.));\n\
+             #5=IFCAXIS1PLACEMENT(#6,#7);\n#6=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #7=IFCDIRECTION((0.,1.,0.));\n\
+             #3=IFCREVOLVEDAREASOLIDTAPERED(#1,$,#5,6.283185307179586,#4);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        assert_eq!(m.vertex_count(), 4 * 49);
     }
 
     #[test]
