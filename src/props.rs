@@ -1058,6 +1058,20 @@ mod tests {
         );
         assert_eq!(crate::schema::area_unit_scale(&f), None);
         assert_eq!(crate::schema::volume_unit_scale(&f), None);
+        // The explicit opt-in reads the prefix on the underlying length
+        // (mm² = 10⁻⁶ m², cm³ = 10⁻⁶ m³) and flags the assumption.
+        use crate::schema::{
+            area_unit_scale_with, named_unit_scale_with, volume_unit_scale_with,
+            PrefixedDerivedUnit,
+        };
+        let a = area_unit_scale_with(&f, PrefixedDerivedUnit::PrefixScalesLength).unwrap();
+        assert!((a.factor - 1e-6).abs() < 1e-18 && a.assumed_prefix_on_length);
+        let v = volume_unit_scale_with(&f, PrefixedDerivedUnit::PrefixScalesLength).unwrap();
+        assert!((v.factor - 1e-6).abs() < 1e-18 && v.assumed_prefix_on_length);
+        assert_eq!(area_unit_scale_with(&f, PrefixedDerivedUnit::Refuse), None);
+        let n = named_unit_scale_with(&f, 1, "AREAUNIT", PrefixedDerivedUnit::PrefixScalesLength)
+            .unwrap();
+        assert!((n.factor - 1e-6).abs() < 1e-18);
 
         // A conversion-based area chain over an unprefixed SI base
         // still resolves (square foot in m²).
@@ -1070,5 +1084,8 @@ mod tests {
         );
         let s = crate::schema::area_unit_scale(&f).unwrap();
         assert!((s - 0.09290304).abs() < 1e-12);
+        // …and is not flagged under either policy.
+        let u = area_unit_scale_with(&f, PrefixedDerivedUnit::PrefixScalesLength).unwrap();
+        assert!((u.factor - 0.09290304).abs() < 1e-12 && !u.assumed_prefix_on_length);
     }
 }

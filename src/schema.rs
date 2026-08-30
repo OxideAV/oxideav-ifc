@@ -1771,44 +1771,74 @@ pub fn schema_of(keyword: &str) -> Option<&'static EntitySchema> {
 
 /// One resolvable unit dimension: the `IfcUnitEnum` selector, the SI
 /// unit name that anchors it, the factor from that SI unit to the
-/// reference unit the public functions promise, and whether an SI
-/// prefix is meaningful on the anchor.
+/// reference unit the public functions promise, and the power of
+/// length the anchor carries.
 ///
-/// `prefix_ok` is `false` for the exponent-carrying SI names
-/// (`SQUARE_METRE`, `CUBIC_METRE`): whether a prefix there scales the
-/// base length (mm² = 10⁻⁶ m²) or the derived unit (10⁻³ m²) is not
-/// stated by the staged schema text, so a prefixed area/volume SI unit
-/// resolves to `None` instead of guessing.
+/// `length_exponent` is `2` / `3` for the named derived SI units
+/// `SQUARE_METRE` / `CUBIC_METRE`. The specification defines the SI
+/// prefix as a plain decimal factor and never states how it combines
+/// with a named derived unit (units digest §2), so a prefixed
+/// area/volume SI unit is refused by default — see
+/// [`PrefixedDerivedUnit`] for the explicit opt-in.
 struct UnitDimension {
     unit_type: &'static str,
     si_name: &'static str,
     si_to_reference: f64,
-    prefix_ok: bool,
+    length_exponent: u32,
+}
+
+/// How to read an `IfcSIUnit` that combines a `Prefix` with a **named
+/// derived** unit (`.MILLI.` + `.SQUARE_METRE.`) — a construction the
+/// specification leaves undefined (units digest §2: the conforming
+/// form is an `IfcDerivedUnit` over a prefixed base unit).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum PrefixedDerivedUnit {
+    /// Resolve to `None` — the only reading that cannot yield a
+    /// 1 000× wrong area. The default of every `*_unit_scale` function.
+    #[default]
+    Refuse,
+    /// Read the prefix as qualifying the underlying *length*, so the
+    /// exponent applies to the prefix too: `.MILLI.` + `.SQUARE_METRE.`
+    /// = mm² = 10⁻⁶ m² (the digest's reading B, what exporters writing
+    /// this form almost certainly intend). The result is flagged.
+    PrefixScalesLength,
+}
+
+/// A resolved unit scale with provenance: whether an undefined
+/// prefixed-derived-unit form was read under
+/// [`PrefixedDerivedUnit::PrefixScalesLength`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct UnitScale {
+    /// Reference units per model unit.
+    pub factor: f64,
+    /// `true` when the factor rests on the prefix-scales-length
+    /// assumption rather than on the specification.
+    pub assumed_prefix_on_length: bool,
 }
 
 const LENGTH_DIMENSION: UnitDimension = UnitDimension {
     unit_type: "LENGTHUNIT",
     si_name: "METRE",
     si_to_reference: 1.0,
-    prefix_ok: true,
+    length_exponent: 1,
 };
 const PLANE_ANGLE_DIMENSION: UnitDimension = UnitDimension {
     unit_type: "PLANEANGLEUNIT",
     si_name: "RADIAN",
     si_to_reference: 1.0,
-    prefix_ok: true,
+    length_exponent: 0,
 };
 const AREA_DIMENSION: UnitDimension = UnitDimension {
     unit_type: "AREAUNIT",
     si_name: "SQUARE_METRE",
     si_to_reference: 1.0,
-    prefix_ok: false,
+    length_exponent: 2,
 };
 const VOLUME_DIMENSION: UnitDimension = UnitDimension {
     unit_type: "VOLUMEUNIT",
     si_name: "CUBIC_METRE",
     si_to_reference: 1.0,
-    prefix_ok: false,
+    length_exponent: 3,
 };
 /// The SI mass name is GRAM (a kilogram is `.KILO.` + `.GRAM.`), and
 /// the reference the public function promises is the kilogram.
@@ -1816,13 +1846,13 @@ const MASS_DIMENSION: UnitDimension = UnitDimension {
     unit_type: "MASSUNIT",
     si_name: "GRAM",
     si_to_reference: 1e-3,
-    prefix_ok: true,
+    length_exponent: 0,
 };
 const TIME_DIMENSION: UnitDimension = UnitDimension {
     unit_type: "TIMEUNIT",
     si_name: "SECOND",
     si_to_reference: 1.0,
-    prefix_ok: true,
+    length_exponent: 0,
 };
 
 /// Look up the [`UnitDimension`] for an `IfcUnitEnum` literal.
@@ -1842,6 +1872,15 @@ fn dimension_of(unit_type: &str) -> Option<&'static UnitDimension> {
 /// `IfcUnitAssignment.Units : SET [1:?] OF IfcUnit` → the (at most
 /// one) unit of the requested dimension, resolved to reference units.
 fn project_unit_scale(step: &StepFile, dim: &UnitDimension) -> Option<f64> {
+    project_unit_scale_with(step, dim, PrefixedDerivedUnit::Refuse).map(|u| u.factor)
+}
+
+/// [`project_unit_scale`] with an explicit prefixed-derived-unit policy.
+fn project_unit_scale_with(
+    step: &StepFile,
+    dim: &UnitDimension,
+    policy: PrefixedDerivedUnit,
+) -> Option<UnitScale> {
     // IfcProject: IfcRoot(4) + IfcContext(ObjectType, LongName, Phase,
     // RepresentationContexts, UnitsInContext) → UnitsInContext index 8.
     let project = step
@@ -1858,7 +1897,7 @@ fn project_unit_scale(step: &StepFile, dim: &UnitDimension) -> Option<f64> {
         let Some(uid) = unit.as_reference() else {
             continue;
         };
-        if let Some(scale) = resolve_named_unit(step, uid, dim) {
+        if let Some(scale) = resolve_named_unit(step, uid, dim, policy) {
             return Some(scale);
         }
     }
@@ -1867,7 +1906,12 @@ fn project_unit_scale(step: &StepFile, dim: &UnitDimension) -> Option<f64> {
 
 /// Resolve one named unit to reference units if it is of the requested
 /// dimension.
-fn resolve_named_unit(step: &StepFile, unit_id: u64, dim: &UnitDimension) -> Option<f64> {
+fn resolve_named_unit(
+    step: &StepFile,
+    unit_id: u64,
+    dim: &UnitDimension,
+    policy: PrefixedDerivedUnit,
+) -> Option<UnitScale> {
     let unit = step.get(unit_id)?;
     match unit.keyword.as_str() {
         // IfcSIUnit(Dimensions [derived, `*` on the wire], UnitType,
@@ -1878,18 +1922,23 @@ fn resolve_named_unit(step: &StepFile, unit_id: u64, dim: &UnitDimension) -> Opt
             {
                 return None;
             }
-            let prefix = match unit.args.get(2).and_then(Value::as_enum) {
-                Some(prefix) => {
-                    if !dim.prefix_ok {
-                        // Prefix-on-exponent semantics undocumented in
-                        // the staged set — refuse rather than guess.
-                        return None;
-                    }
-                    si_prefix_multiplier(prefix)?
-                }
-                None => 1.0,
+            let (prefix, assumed) = match unit.args.get(2).and_then(Value::as_enum) {
+                Some(prefix) if dim.length_exponent > 1 => match policy {
+                    // The prefix / named-derived-unit combination is
+                    // undefined by the specification (units digest §2).
+                    PrefixedDerivedUnit::Refuse => return None,
+                    PrefixedDerivedUnit::PrefixScalesLength => (
+                        si_prefix_multiplier(prefix)?.powi(dim.length_exponent as i32),
+                        true,
+                    ),
+                },
+                Some(prefix) => (si_prefix_multiplier(prefix)?, false),
+                None => (1.0, false),
             };
-            Some(prefix * dim.si_to_reference)
+            Some(UnitScale {
+                factor: prefix * dim.si_to_reference,
+                assumed_prefix_on_length: assumed,
+            })
         }
         // IfcConversionBasedUnit(Dimensions, UnitType, Name,
         // ConversionFactor : IfcMeasureWithUnit).
@@ -1910,7 +1959,11 @@ fn resolve_named_unit(step: &StepFile, unit_id: u64, dim: &UnitDimension) -> Opt
                 _ => return None,
             };
             let base_id = mwu.args.get(1).and_then(Value::as_reference)?;
-            Some(value * resolve_named_unit(step, base_id, dim)?)
+            let base = resolve_named_unit(step, base_id, dim, policy)?;
+            Some(UnitScale {
+                factor: value * base.factor,
+                assumed_prefix_on_length: base.assumed_prefix_on_length,
+            })
         }
         _ => None,
     }
@@ -1928,7 +1981,30 @@ fn resolve_named_unit(step: &StepFile, unit_id: u64, dim: &UnitDimension) -> Opt
 /// Returns `None` for unknown dimensions, mismatched unit types, and
 /// the undocumented prefixed-area/volume SI forms.
 pub fn named_unit_scale(step: &StepFile, unit_id: u64, unit_type: &str) -> Option<f64> {
-    resolve_named_unit(step, unit_id, dimension_of(unit_type)?)
+    named_unit_scale_with(step, unit_id, unit_type, PrefixedDerivedUnit::Refuse).map(|u| u.factor)
+}
+
+/// [`named_unit_scale`] with an explicit [`PrefixedDerivedUnit`]
+/// policy; the result records whether that policy was exercised.
+pub fn named_unit_scale_with(
+    step: &StepFile,
+    unit_id: u64,
+    unit_type: &str,
+    policy: PrefixedDerivedUnit,
+) -> Option<UnitScale> {
+    resolve_named_unit(step, unit_id, dimension_of(unit_type)?, policy)
+}
+
+/// [`area_unit_scale`] with an explicit [`PrefixedDerivedUnit`] policy
+/// — the opt-in for models that write `.MILLI.` + `.SQUARE_METRE.`.
+pub fn area_unit_scale_with(step: &StepFile, policy: PrefixedDerivedUnit) -> Option<UnitScale> {
+    project_unit_scale_with(step, &AREA_DIMENSION, policy)
+}
+
+/// [`volume_unit_scale`] with an explicit [`PrefixedDerivedUnit`]
+/// policy.
+pub fn volume_unit_scale_with(step: &StepFile, policy: PrefixedDerivedUnit) -> Option<UnitScale> {
+    project_unit_scale_with(step, &VOLUME_DIMENSION, policy)
 }
 
 /// Metres per model length unit, resolved from the project's global

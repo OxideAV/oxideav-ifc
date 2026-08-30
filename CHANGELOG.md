@@ -32,6 +32,27 @@ All notable changes to this project will be documented in this file.
   `IfcRigidOperation` (attribute orders transcribed from the staged
   EXPRESS).
 
+- Phase 4 (georeferencing, units digest §1): `IfcMapConversionScaled`
+  (IFC 4.3) resolves through `map_conversion` / `map_conversion_by_id`
+  with its `FactorX/Y/Z` in `MapConversion::factors`;
+  `MapConversion::rotation_angle()` (`atan2(XAxisOrdinate,
+  XAxisAbscissa)`) and the inverse `from_map`. `IfcRigidOperation` is
+  exposed as `RigidOperation` (`rigid_operations` /
+  `rigid_operation_by_id`, typed `Length` / `PlaneAngle` pair kind).
+- Units (units digest §2): `PrefixedDerivedUnit` policy —
+  `area_unit_scale_with` / `volume_unit_scale_with` /
+  `named_unit_scale_with` accept the undefined `.MILLI.` +
+  `.SQUARE_METRE.` form under an explicit `PrefixScalesLength` opt-in
+  (mm² = 10⁻⁶ m²), returning a `UnitScale` that flags the assumption;
+  the default functions still refuse it.
+
+### Fixed
+
+- `MapConversion::to_map` applied `Scale` to the planar components
+  only; the `IfcMapConversion` page states one scale on **all three**
+  axes (x, y, z) before the rotation and the unscaled translation.
+  Heights are now scaled too.
+
 - Phase 4 (groups / systems / zones): `Model` folds
   `IfcRelAssignsToGroup` (+ the `ByFactor` subtype) and
   `IfcRelServicesBuildings` — `group_members(group)` /

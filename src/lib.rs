@@ -124,7 +124,11 @@ pub use error::{Error, Result};
 pub use external::{
     classification_assignment, document_assignment, ClassificationAssignment, DocumentAssignment,
 };
-pub use geo::{map_conversion, site_geolocation, MapConversion, ProjectedCrs, SiteGeolocation};
+pub use geo::{
+    map_conversion, map_conversion_by_id, rigid_operation_by_id, rigid_operations,
+    site_geolocation, MapConversion, ProjectedCrs, RigidCoordinateKind, RigidOperation,
+    SiteGeolocation,
+};
 pub use geometry::{
     mesh_from_product_shape, mesh_from_shape_representation, meshed_items_from_product_shape,
     placement_transform, tessellate_item, GeometryError, Transform, TriMesh,
@@ -139,9 +143,10 @@ pub use props::{
     PropertyValue, Quantity, QuantityValue,
 };
 pub use schema::{
-    area_unit_scale, length_unit_scale, mass_unit_scale, named_unit_scale, plane_angle_unit_scale,
-    schema_of, time_unit_scale, volume_unit_scale, EntityKind, EntitySchema, Model, SpatialKind,
-    TypedEntity, SCHEMA,
+    area_unit_scale, area_unit_scale_with, length_unit_scale, mass_unit_scale, named_unit_scale,
+    named_unit_scale_with, plane_angle_unit_scale, schema_of, time_unit_scale, volume_unit_scale,
+    volume_unit_scale_with, EntityKind, EntitySchema, Model, PrefixedDerivedUnit, SpatialKind,
+    TypedEntity, UnitScale, SCHEMA,
 };
 pub use value::Value;
 

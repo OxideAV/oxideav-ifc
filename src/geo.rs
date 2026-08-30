@@ -13,13 +13,17 @@
 //! coordinates (`XAxisAbscissa` / `XAxisOrdinate` — the schema names
 //! its easting and northing components), and an optional `Scale`.
 //!
-//! [`MapConversion::to_map`] applies the planar similarity those
-//! attributes describe: the local x/y plane is rotated by the
-//! normalised x-axis direction, scaled, and translated to
-//! (`Eastings`, `Northings`); the local origin's height lands at
-//! `OrthogonalHeight`. The staged schema text gives no rule for
-//! scaling heights, so `Scale` is applied to the planar components
-//! only and `z` translates unscaled.
+//! [`MapConversion::to_map`] applies the transformation the
+//! `IfcMapConversion` page states, in its order (units digest §1): a
+//! scaling of **all three** axes by the same `Scale` (a unit
+//! conversion, default 1), then an anti-clockwise rotation about z by
+//! `θ = atan2(XAxisOrdinate, XAxisAbscissa)`, then the translation
+//! (`Eastings`, `Northings`, `OrthogonalHeight`) — which is *not*
+//! scaled. The IFC 4.3 `IfcMapConversionScaled` subtype adds per-axis
+//! `FactorX/Y/Z` that scale coordinates (not units) on top of `Scale`,
+//! before the rotation; plain conversions never get anisotropic
+//! scaling. `IfcRigidOperation` (the other `IfcCoordinateOperation`)
+//! is exposed as [`RigidOperation`].
 
 use crate::parser::StepFile;
 use crate::schema::TypedEntity;
@@ -75,8 +79,13 @@ pub struct MapConversion<'a> {
     /// The northing component of the local +x axis direction in map
     /// coordinates, when set.
     pub x_axis_ordinate: Option<f64>,
-    /// The optional scale factor from local to map lengths.
+    /// The optional scale factor from local to map lengths (a unit
+    /// conversion applied to x, y and z alike).
     pub scale: Option<f64>,
+    /// `IfcMapConversionScaled.FactorX / FactorY / FactorZ` — per-axis
+    /// coordinate factors (IFC 4.3), `None` for a plain
+    /// `IfcMapConversion`.
+    pub factors: Option<[f64; 3]>,
 }
 
 impl MapConversion<'_> {
@@ -95,22 +104,137 @@ impl MapConversion<'_> {
         }
     }
 
-    /// Map a local engineering point to (easting, northing, height):
-    /// the planar components are rotated by [`MapConversion::rotation`],
-    /// scaled by `Scale` (default 1), and translated to
-    /// (`Eastings`, `Northings`); the height translates by
-    /// `OrthogonalHeight` unscaled (the staged schema text states no
-    /// height-scaling rule).
+    /// The rotation angle θ in radians, anti-clockwise about z, of the
+    /// local x-axis in the map plane: `atan2(XAxisOrdinate,
+    /// XAxisAbscissa)` (zero when the direction is unset or degenerate).
+    pub fn rotation_angle(&self) -> f64 {
+        let (cos, sin) = self.rotation();
+        sin.atan2(cos)
+    }
+
+    /// Map a local engineering point to (easting, northing, height) —
+    /// scale all three axes by `Scale` (default 1; times the per-axis
+    /// `FactorX/Y/Z` of an `IfcMapConversionScaled`), rotate about z by
+    /// [`MapConversion::rotation`], then translate by (`Eastings`,
+    /// `Northings`, `OrthogonalHeight`).
     pub fn to_map(&self, point: [f64; 3]) -> [f64; 3] {
         let (cos, sin) = self.rotation();
         let s = self.scale.unwrap_or(1.0);
+        let f = self.factors.unwrap_or([1.0; 3]);
         let [x, y, z] = point;
+        let (x, y, z) = (s * f[0] * x, s * f[1] * y, s * f[2] * z);
         [
-            self.eastings + s * (x * cos - y * sin),
-            self.northings + s * (x * sin + y * cos),
+            self.eastings + (x * cos - y * sin),
+            self.northings + (x * sin + y * cos),
             self.orthogonal_height + z,
         ]
     }
+
+    /// The inverse of [`MapConversion::to_map`]: a map point back to
+    /// local engineering coordinates. `None` when a scale factor is
+    /// zero.
+    pub fn from_map(&self, point: [f64; 3]) -> Option<[f64; 3]> {
+        let (cos, sin) = self.rotation();
+        let s = self.scale.unwrap_or(1.0);
+        let f = self.factors.unwrap_or([1.0; 3]);
+        let [e, n, h] = point;
+        let (dx, dy, dz) = (
+            e - self.eastings,
+            n - self.northings,
+            h - self.orthogonal_height,
+        );
+        // Undo the rotation (transpose), then the scaling.
+        let (rx, ry) = (dx * cos + dy * sin, -dx * sin + dy * cos);
+        let div = |v: f64, k: f64| if k == 0.0 { None } else { Some(v / k) };
+        Some([div(rx, s * f[0])?, div(ry, s * f[1])?, div(dz, s * f[2])?])
+    }
+}
+
+/// The kind of coordinate pair an `IfcRigidOperation` carries — the
+/// `SameCoordinateType` WHERE rule requires both to be lengths or both
+/// plane angles.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RigidCoordinateKind {
+    /// Both coordinates are `IfcLengthMeasure` (a projected source).
+    Length,
+    /// Both coordinates are `IfcPlaneAngleMeasure` (a geographic
+    /// source: latitude / longitude).
+    PlaneAngle,
+    /// Untyped or mixed wrappers — the file violates the WHERE rule;
+    /// the values are still exposed.
+    Unknown,
+}
+
+/// A resolved `IfcRigidOperation` (IFC 4.3) — a coordinate operation
+/// that is a pure translation of the source CRS origin to
+/// (`FirstCoordinate`, `SecondCoordinate`[, `Height`]) in the target.
+#[derive(Debug, Clone, PartialEq)]
+pub struct RigidOperation<'a> {
+    /// The `#id` of the `IfcRigidOperation` instance.
+    pub id: u64,
+    /// The `#id` of the `SourceCRS`.
+    pub source: Option<u64>,
+    /// The `#id` of the `TargetCRS` (any `IfcCoordinateReferenceSystem`).
+    pub target: Option<u64>,
+    /// The resolved target when it is an `IfcProjectedCRS`.
+    pub target_crs: Option<ProjectedCrs<'a>>,
+    /// `FirstCoordinate` (easting or latitude, by `kind`).
+    pub first: f64,
+    /// `SecondCoordinate` (northing or longitude, by `kind`).
+    pub second: f64,
+    /// The optional `Height`.
+    pub height: Option<f64>,
+    /// Which measure type the pair was written with.
+    pub kind: RigidCoordinateKind,
+}
+
+/// Resolve one `IfcRigidOperation` instance.
+pub fn rigid_operation_by_id(step: &StepFile, id: u64) -> Option<RigidOperation<'_>> {
+    let inst = step.get(id)?;
+    if inst.keyword != "IFCRIGIDOPERATION" {
+        return None;
+    }
+    let view = TypedEntity::new(inst)?;
+    let measure = |name: &str| -> Option<(f64, Option<&str>)> {
+        match view.attr(name)? {
+            Value::Typed { keyword, args } => {
+                Some((args.first().and_then(Value::as_number)?, Some(keyword)))
+            }
+            other => Some((other.as_number()?, None)),
+        }
+    };
+    let (first, kf) = measure("FirstCoordinate")?;
+    let (second, ks) = measure("SecondCoordinate")?;
+    let kind = match (kf, ks) {
+        (Some("IFCLENGTHMEASURE"), Some("IFCLENGTHMEASURE")) => RigidCoordinateKind::Length,
+        (Some("IFCPLANEANGLEMEASURE"), Some("IFCPLANEANGLEMEASURE")) => {
+            RigidCoordinateKind::PlaneAngle
+        }
+        _ => RigidCoordinateKind::Unknown,
+    };
+    let target = view.attr("TargetCRS").and_then(Value::as_reference);
+    Some(RigidOperation {
+        id,
+        source: view.attr("SourceCRS").and_then(Value::as_reference),
+        target,
+        target_crs: target.and_then(|cid| projected_crs(step, cid)),
+        first,
+        second,
+        height: view.attr("Height").and_then(|v| match v {
+            Value::Typed { args, .. } => args.first().and_then(Value::as_number),
+            other => other.as_number(),
+        }),
+        kind,
+    })
+}
+
+/// Every `IfcRigidOperation` in the model, in ascending id order.
+pub fn rigid_operations(step: &StepFile) -> Vec<RigidOperation<'_>> {
+    step.instances
+        .values()
+        .filter(|inst| inst.keyword == "IFCRIGIDOPERATION")
+        .filter_map(|inst| rigid_operation_by_id(step, inst.id))
+        .collect()
 }
 
 /// Resolve one `IfcProjectedCRS` instance.
@@ -133,10 +257,11 @@ pub fn projected_crs(step: &StepFile, id: u64) -> Option<ProjectedCrs<'_>> {
     })
 }
 
-/// Resolve one `IfcMapConversion` instance.
+/// Resolve one `IfcMapConversion` (or `IfcMapConversionScaled`)
+/// instance.
 pub fn map_conversion_by_id(step: &StepFile, id: u64) -> Option<MapConversion<'_>> {
     let inst = step.get(id)?;
-    if inst.keyword != "IFCMAPCONVERSION" {
+    if inst.keyword != "IFCMAPCONVERSION" && inst.keyword != "IFCMAPCONVERSIONSCALED" {
         return None;
     }
     let view = TypedEntity::new(inst)?;
@@ -145,6 +270,11 @@ pub fn map_conversion_by_id(step: &StepFile, id: u64) -> Option<MapConversion<'_
             Value::Typed { args, .. } => args.first().and_then(Value::as_number),
             other => other.as_number(),
         }
+    };
+    let factors = if inst.keyword == "IFCMAPCONVERSIONSCALED" {
+        Some([num("FactorX")?, num("FactorY")?, num("FactorZ")?])
+    } else {
+        None
     };
     Some(MapConversion {
         id,
@@ -159,6 +289,7 @@ pub fn map_conversion_by_id(step: &StepFile, id: u64) -> Option<MapConversion<'_
         x_axis_abscissa: num("XAxisAbscissa"),
         x_axis_ordinate: num("XAxisOrdinate"),
         scale: num("Scale"),
+        factors,
     })
 }
 
@@ -169,7 +300,9 @@ pub fn map_conversion_by_id(step: &StepFile, id: u64) -> Option<MapConversion<'_
 pub fn map_conversion(step: &StepFile) -> Option<MapConversion<'_>> {
     step.instances
         .values()
-        .filter(|inst| inst.keyword == "IFCMAPCONVERSION")
+        .filter(|inst| {
+            inst.keyword == "IFCMAPCONVERSION" || inst.keyword == "IFCMAPCONVERSIONSCALED"
+        })
         .filter_map(|inst| map_conversion_by_id(step, inst.id))
         .find(|conv| {
             conv.source
@@ -288,8 +421,8 @@ mod tests {
 
     #[test]
     fn map_conversion_defaults_and_scale() {
-        // Unset rotation defaults to identity; Scale multiplies the
-        // planar components only.
+        // Unset rotation defaults to identity; Scale multiplies all
+        // three axes (a millimetre model into a metre CRS).
         let f = parse(
             "#10=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,$,$,$);\n\
              #20=IFCPROJECTEDCRS('EPSG:3857',$,$,$,$,$,$);\n\
@@ -297,11 +430,89 @@ mod tests {
         );
         let conv = map_conversion(&f).expect("map conversion");
         assert_eq!(conv.rotation(), (1.0, 0.0));
-        let p = conv.to_map([3000.0, -1000.0, 5.0]);
+        assert_eq!(conv.rotation_angle(), 0.0);
+        assert_eq!(conv.factors, None);
+        let p = conv.to_map([3000.0, -1000.0, 5000.0]);
         assert!((p[0] - 103.0).abs() < 1e-12);
         assert!((p[1] - 199.0).abs() < 1e-12);
-        // Height translates unscaled.
+        // Height is scaled too; the translation is not.
         assert!((p[2] - 15.0).abs() < 1e-12);
+        // Round trip.
+        let back = conv.from_map(p).unwrap();
+        assert!((back[0] - 3000.0).abs() < 1e-9);
+        assert!((back[1] + 1000.0).abs() < 1e-9);
+        assert!((back[2] - 5000.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn rotation_angle_is_atan2_of_the_axis_vector() {
+        // A pure-northing x-axis (abscissa 0) is a quarter turn — no
+        // division by zero; a non-unit vector gives the same angle.
+        let f = parse(
+            "#10=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,$,$,$);\n\
+             #20=IFCPROJECTEDCRS('EPSG:3857',$,$,$,$,$,$);\n\
+             #30=IFCMAPCONVERSION(#10,#20,0.,0.,0.,0.,5.,$);",
+        );
+        let conv = map_conversion(&f).unwrap();
+        assert!((conv.rotation_angle() - core::f64::consts::FRAC_PI_2).abs() < 1e-12);
+        let p = conv.to_map([1.0, 0.0, 0.0]);
+        assert!(p[0].abs() < 1e-12 && (p[1] - 1.0).abs() < 1e-12);
+    }
+
+    #[test]
+    fn map_conversion_scaled_applies_per_axis_factors() {
+        // Factors scale coordinates on top of Scale, before rotation.
+        let f = parse(
+            "#10=IFCGEOMETRICREPRESENTATIONCONTEXT($,'Model',3,$,$,$);\n\
+             #20=IFCPROJECTEDCRS('EPSG:25832',$,$,$,$,$,$);\n\
+             #30=IFCMAPCONVERSIONSCALED(#10,#20,1000.,2000.,30.,0.,1.,2.,\
+             1.5,0.5,3.);",
+        );
+        let conv = map_conversion(&f).expect("scaled binding found");
+        assert_eq!(conv.id, 30);
+        assert_eq!(conv.factors, Some([1.5, 0.5, 3.0]));
+        // (10, 20, 1): scale 2 → (20, 40, 2); factors → (30, 20, 6);
+        // rotate 90° → (−20, 30, 6); translate → (980, 2030, 36).
+        let p = conv.to_map([10.0, 20.0, 1.0]);
+        assert!((p[0] - 980.0).abs() < 1e-9);
+        assert!((p[1] - 2030.0).abs() < 1e-9);
+        assert!((p[2] - 36.0).abs() < 1e-9);
+        let back = conv.from_map(p).unwrap();
+        assert!((back[0] - 10.0).abs() < 1e-9 && (back[1] - 20.0).abs() < 1e-9);
+        assert!((back[2] - 1.0).abs() < 1e-9);
+        assert_eq!(
+            map_conversion_by_id(&f, 30).unwrap().factors,
+            Some([1.5, 0.5, 3.0])
+        );
+    }
+
+    #[test]
+    fn rigid_operation_resolves_typed_pairs() {
+        let f = parse(
+            "#20=IFCPROJECTEDCRS('EPSG:25832',$,$,$,$,$,$);\n\
+             #21=IFCGEOGRAPHICCRS('EPSG:4326',$,$,$,$);\n\
+             #30=IFCRIGIDOPERATION(#20,#21,IFCPLANEANGLEMEASURE(49.5),\
+             IFCPLANEANGLEMEASURE(8.25),IFCLENGTHMEASURE(120.));\n\
+             #31=IFCRIGIDOPERATION(#21,#20,IFCLENGTHMEASURE(400000.),\
+             IFCLENGTHMEASURE(5600000.),$);\n\
+             #32=IFCRIGIDOPERATION(#21,#20,1.,2.,$);",
+        );
+        let ops = rigid_operations(&f);
+        assert_eq!(ops.len(), 3);
+        assert_eq!(ops[0].id, 30);
+        assert_eq!(ops[0].kind, RigidCoordinateKind::PlaneAngle);
+        assert_eq!((ops[0].first, ops[0].second), (49.5, 8.25));
+        assert_eq!(ops[0].height, Some(120.0));
+        assert_eq!(ops[0].source, Some(20));
+        assert_eq!(ops[0].target, Some(21));
+        assert!(ops[0].target_crs.is_none()); // geographic, not projected
+        assert_eq!(ops[1].kind, RigidCoordinateKind::Length);
+        assert_eq!(ops[1].target_crs.as_ref().unwrap().name, Some("EPSG:25832"));
+        assert_eq!(ops[1].height, None);
+        assert_eq!(ops[2].kind, RigidCoordinateKind::Unknown);
+        assert!(rigid_operation_by_id(&f, 20).is_none());
+        // Rigid operations are not the map binding.
+        assert!(map_conversion(&f).is_none());
     }
 
     #[test]
