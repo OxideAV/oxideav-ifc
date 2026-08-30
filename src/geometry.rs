@@ -2180,13 +2180,9 @@ fn lerp_area(a: &ProfileArea, b: &ProfileArea, t: f64) -> ProfileArea {
     }
 }
 
-/// Build the closed prism of one [`ProfileArea`] swept by `sweep`.
-fn extrude_area(area: &ProfileArea, sweep: [f64; 3]) -> Result<TriMesh, GeometryError> {
-    loft_area(area, area, sweep)
-}
-
 /// Build the closed loft from `bottom` (at the profile plane) to `top`
-/// (translated by `sweep`); the two areas must share ring topology.
+/// (translated by `sweep`); the two areas must share ring topology. A
+/// plain extrusion passes the same area for both.
 fn loft_area(
     bottom: &ProfileArea,
     top_area: &ProfileArea,
