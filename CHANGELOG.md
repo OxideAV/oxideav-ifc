@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3 (named parameterised profiles): the `IfcParameterizedProfileDef`
+  family with implicit contours now sweeps — `IfcIShapeProfileDef`,
+  `IfcLShapeProfileDef`, `IfcTShapeProfileDef`, `IfcUShapeProfileDef`,
+  `IfcZShapeProfileDef`, `IfcCShapeProfileDef`,
+  `IfcRoundedRectangleProfileDef` and the deprecated
+  `IfcTrapeziumProfileDef` — built bbox-centred per the
+  parameterised-profiles digest (§0 origin convention; Z overall width
+  `2·FlangeWidth − WebThickness`, trapezium centred on its
+  `BottomXDim × YDim` rectangle), with tangent-arc fillet / edge radii
+  at the documented corners, `FlangeSlope` / `WebSlope` / `LegSlope`
+  tilting the inner faces (thickness at the `b/4` station for the
+  T/I/U flanges; T-web and L-leg stations are undocumented and taken at
+  the face mid-length), the optional 2-D `Position`, and the entity
+  WHERE rules enforced (`BadProfile`). Omitted radii resolve as sharp
+  corners. Beams / columns using them decode to meshes through every
+  swept solid. 18 new tests (area / bbox / symmetry pins).
+
 - Phase 4 (groups / systems / zones): `Model` folds
   `IfcRelAssignsToGroup` (+ the `ByFactor` subtype) and
   `IfcRelServicesBuildings` — `group_members(group)` /

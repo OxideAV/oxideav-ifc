@@ -141,6 +141,8 @@
 use crate::parser::StepFile;
 use crate::value::Value;
 
+mod profiles;
+
 /// A flat, indexed triangle mesh in the local coordinate space of the
 /// representation item it was extracted from.
 ///
@@ -3602,7 +3604,13 @@ fn profile_ring(step: &StepFile, profile_id: u64) -> Result<Vec<[f64; 2]>, Geome
             }
             positioned_profile_ring(step, inst.args.get(2), ellipse_ring(a, b))
         }
-        other => Err(GeometryError::Unsupported(other.to_string())),
+        // Named parameterised profiles (I/L/T/U/Z/C, rounded rectangle,
+        // trapezium) — implicit contours built in the bbox-centred local
+        // frame, then placed by their optional 2-D Position.
+        other => match profiles::parameterised_ring(step, other, &inst.args)? {
+            Some(ring) => positioned_profile_ring(step, inst.args.get(2), ring),
+            None => Err(GeometryError::Unsupported(other.to_string())),
+        },
     }
 }
 
@@ -5809,15 +5817,15 @@ mod tests {
 
     #[test]
     fn extruded_unsupported_profile_surfaces_keyword() {
-        // A trapezium profile is out of this slice → Unsupported(keyword).
+        // An asymmetric I profile is out of this slice → Unsupported(keyword).
         let f = parse(
-            "#1=IFCTRAPEZIUMPROFILEDEF(.AREA.,$,$,3.,2.,1.,0.5);\n\
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,3.,2.,1.,0.5,2.,$,$,$,$,$,$);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
              #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
         );
         assert_eq!(
             tessellate_item(&f, 3).unwrap_err(),
-            GeometryError::Unsupported("IFCTRAPEZIUMPROFILEDEF".to_string())
+            GeometryError::Unsupported("IFCASYMMETRICISHAPEPROFILEDEF".to_string())
         );
     }
 
