@@ -60,10 +60,14 @@
 //!   `IfcBuildAxes` axis derivation.
 //!
 //! With the `registry` feature, [`IfcDecoder`] lifts every tessellated /
-//! faceted-Brep product shape into an `oxideav_mesh3d::Scene3D`,
-//! positioned in world space by the owning product's placement chain.
-//! Swept solids, advanced (curved) breps, boolean results, and mapped
-//! items are later Phase-3 slices.
+//! faceted-Brep / swept-solid / boolean-result / mapped-item product
+//! shape into an `oxideav_mesh3d::Scene3D`, positioned in world space
+//! by the owning product's placement chain. Swept solids cover the
+//! extruded / revolved (+ tapered) sweeps over the full profile family
+//! — including the named parameterised I/L/T/U/Z/C sections — plus
+//! swept disks, sectioned solids and CSG primitives; [`rules`] checks
+//! the EXPRESS WHERE rules of that slice. Advanced (curved) breps and
+//! directrix-swept area solids are later Phase-3 slices.
 //!
 //! ## Phase 4 (this release): semantic data layer
 //!

@@ -21,8 +21,8 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids over the full profile family with arc boundaries (trimmed conics, three-point arcs, composite curves), swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, and surface-style materials | ✅ this release; advanced (curved) breps, non-convex mesh–mesh booleans, named profiles (I/L/T/U/Z/C) later |
-| **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time) | ✅ this release |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes) over the full profile family — arbitrary curves with arc boundaries (trimmed conics, three-point arcs, composite curves), **named parameterised sections** (I/L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps, directrix-swept area solids and non-convex mesh–mesh booleans later |
+| **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
 
@@ -184,16 +184,33 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `Position`, `Axis`, `Angle`) about its `IfcAxis1Placement` line by
   `Angle` radians (Rodrigues' rotation, 48 segments per full turn; a
   full 2π wraps closed, a partial sweep gets hole-aware end caps).
+  The **tapered** subtypes `IfcExtrudedAreaSolidTapered` /
+  `IfcRevolvedAreaSolidTapered` loft the section linearly from
+  `SweptArea` to `EndSweptArea` (the `CorrectProfileAssignment`
+  same-type / derived pairing gives the point correspondence; holes
+  taper with the outer ring, a tapered full turn keeps both caps).
 * The shared **profile family** behind the sweeps
   (`profile_area`/`profile_areas`): `IfcArbitraryClosedProfileDef` and
   `IfcArbitraryProfileDefWithVoids` (inner curves become hole rings),
   `IfcRectangleProfileDef` / `IfcRectangleHollowProfileDef`
-  (`WallThickness` inset; fillet radii not yet applied),
+  (`WallThickness` inset, inner / outer fillet radii rounded),
   `IfcCircleProfileDef` / `IfcCircleHollowProfileDef` (48-segment
-  circles / annuli), `IfcEllipseProfileDef`, and
-  `IfcCompositeProfileDef` (each component swept independently and
-  merged). All rings are normalised counter-clockwise; parameterised
-  profiles apply their optional 2-D `Position`.
+  circles / annuli), `IfcEllipseProfileDef`, the **named parameterised
+  sections** `IfcIShapeProfileDef` / `IfcLShapeProfileDef` /
+  `IfcTShapeProfileDef` / `IfcUShapeProfileDef` / `IfcZShapeProfileDef`
+  / `IfcCShapeProfileDef` / `IfcRoundedRectangleProfileDef` /
+  `IfcTrapeziumProfileDef` (contours built centred on the profile's
+  bounding box per the parameterised-profiles digest — Z overall width
+  `2·FlangeWidth − WebThickness`, trapezium centred on its
+  `BottomXDim × YDim` rectangle — with tangent-arc fillet / edge radii
+  at the documented corners, `FlangeSlope` / `WebSlope` / `LegSlope`
+  tilting the inner faces about the `b/4` thickness station, omitted
+  radii read as sharp, and the entity WHERE rules enforced),
+  `IfcDerivedProfileDef` / `IfcMirroredProfileDef` (parent area mapped
+  by the 2-D operator / x-mirror), and `IfcCompositeProfileDef` (each
+  component swept independently and merged). All rings are normalised
+  counter-clockwise; parameterised profiles apply their optional 2-D
+  `Position`.
 * Boundary **curves** cover the arc family: `IfcPolyline` (duplicated
   closing point dropped), full `IfcCircle` / `IfcEllipse`,
   `IfcTrimmedCurve` over a circle / ellipse / line basis (Cartesian
@@ -294,12 +311,21 @@ radians-per-model-angle-unit the same way (degree models scale their
 conic trim parameters and revolution angles). The decoder itself keeps
 raw model units.
 
-Still later in Phase 3: the remaining swept solids
-(`IfcSurfaceCurveSweptAreaSolid` / the tapered subtypes), named
-parameterised profiles (I/L/T/U/Z/C — blocked on a docs digest for
-the contour / anchor conventions), advanced (curved) breps
-(`IfcAdvancedBrep` / curved `IfcFaceSurface`), non-convex mesh–mesh
-booleans, and EXPRESS WHERE-rule validation.
+`oxideav_ifc::rules` validates the **EXPRESS WHERE rules** of this
+slice — `where_rule_violations(step, id)` names the failed rule labels
+of one instance (`None` when the entity has no transcribed rules),
+`model_where_rule_violations(step)` sweeps the model: the named /
+hollow / composite profiles, the swept area solids (`SweptAreaType`,
+`ValidExtrusionDirection`, the revolution-axis rules, tapered
+`CorrectProfileAssignment`), swept disk solids, `IfcMapConversion`
+and `IfcRigidOperation`.
+
+Still later in Phase 3: the directrix-swept area solids
+(`IfcSurfaceCurveSweptAreaSolid` / `IfcFixedReferenceSweptAreaSolid` —
+their profile-frame convention along the directrix is not covered by
+the staged digests), `IfcAsymmetricIShapeProfileDef`, advanced
+(curved) breps (`IfcAdvancedBrep` / curved `IfcFaceSurface`), and
+non-convex mesh–mesh booleans.
 
 ## Phase 4 surface — semantic data layer
 
@@ -344,9 +370,13 @@ let name = model.material_assignment(wall_id).and_then(|m| m.name().map(String::
   `time_unit_scale` (s) join the length / plane-angle scales, all via
   one per-dimension §8.11.3.11 walk; `named_unit_scale(step, id,
   unit_type)` resolves one `IfcSIUnit` / conversion-based chain
-  directly. Prefixed `.SQUARE_METRE.` / `.CUBIC_METRE.` SI units
-  resolve to `None` (prefix-on-exponent semantics are not stated by
-  the staged schema text).
+  directly. A prefix on a **named derived** SI unit (`.MILLI.` +
+  `.SQUARE_METRE.`) is undefined by the specification (the conforming
+  form is an `IfcDerivedUnit` over a prefixed base unit), so the
+  default functions resolve it to `None`; the `*_with(…,
+  PrefixedDerivedUnit::PrefixScalesLength)` variants read it as mm² =
+  10⁻⁶ m² under explicit opt-in and flag the assumption in the
+  returned `UnitScale`.
 * **Materials** (`oxideav_ifc::material`): `Model::material_of(id)`
   (occurrence association wins, else the type's) →
   `material_assignment` resolving the full `IfcMaterialSelect`:
@@ -378,11 +408,16 @@ let name = model.material_assignment(wall_id).and_then(|m| m.name().map(String::
   distribution + building systems).
 * **Georeferencing** (`oxideav_ifc::geo`): `map_conversion(step)` —
   the `IfcMapConversion` bound to the geometric representation
-  context, with its `IfcProjectedCRS` target (EPSG name, datums,
-  map unit); `MapConversion::to_map` applies the planar similarity
-  (normalised x-axis rotation, planar `Scale`, E/N/H translation).
-  `site_geolocation(step)` converts `IfcSite` compound-measure
-  lat/long to decimal degrees.
+  context (or the IFC 4.3 `IfcMapConversionScaled`, with its
+  per-axis `factors`), with its `IfcProjectedCRS` target (EPSG name,
+  datums, map unit); `MapConversion::to_map` / `from_map` /
+  `transform()` apply the documented operation in order — one `Scale`
+  on all three axes, the anti-clockwise z-rotation
+  `atan2(XAxisOrdinate, XAxisAbscissa)` (`rotation_angle()`), then the
+  unscaled E/N/H translation — so a placed `TriMesh` carries into map
+  coordinates. `rigid_operations` exposes `IfcRigidOperation` (length
+  or plane-angle coordinate pairs). `site_geolocation(step)` converts
+  `IfcSite` compound-measure lat/long to decimal degrees.
 
 The registry decoder uses the layer too: primitives with no surface
 style fall back to the product's associated material as a named
@@ -410,6 +445,11 @@ buildingSMART **Sample-Test-Files** repository, licensed **CC-BY
 4.0** by buildingSMART International (attribution preserved here);
 they exercise tessellated face sets, a column, and a wall with
 opening + window over the full spatial hierarchy.
+`tests/named_profiles.rs` adds a synthetic IFC 4 steelwork model
+authored from the staged schema — an I-section beam laid along +x, a
+tapered U-section column, millimetre units and `IfcMapConversion`
+georeferencing — pinned through the std-only API and the registry
+decoder.
 
 ## License
 

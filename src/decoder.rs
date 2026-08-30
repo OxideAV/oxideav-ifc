@@ -17,8 +17,8 @@
 //! primitive's [`Material`] (`base_color`, deduplicated per style), and
 //! an `IfcIndexedColourMap` on a triangulated face set becomes
 //! per-vertex colours (vertices split per face so each triangle keeps
-//! its flat colour). Advanced (curved) breps and boolean intersections
-//! remain later Phase-3 slices.
+//! its flat colour). Advanced (curved) breps and directrix-swept area
+//! solids remain later Phase-3 slices.
 
 use std::collections::HashMap;
 

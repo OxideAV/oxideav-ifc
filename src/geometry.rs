@@ -131,10 +131,16 @@
 //! (a primitive, an extruded convex profile, …) carves through the
 //! same plane-splitting path as the half-space family.
 //!
+//! The tapered sweeps (`IfcExtrudedAreaSolidTapered` /
+//! `IfcRevolvedAreaSolidTapered`) loft the section linearly to
+//! `EndSweptArea`; the named parameterised profiles (I/L/T/U/Z/C,
+//! rounded rectangle, trapezium — see the `profiles` submodule) and
+//! derived / mirrored profiles feed every sweep.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): the other swept solids
-//! (`IfcSurfaceCurveSweptAreaSolid`, the tapered subtypes), the named
-//! parameterised profiles (I/L/T/U/Z/C shapes), advanced/curved breps
+//! rather than silently dropped): the directrix-swept area solids
+//! (`IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid`),
+//! `IfcAsymmetricIShapeProfileDef`, advanced/curved breps
 //! (`IfcAdvancedBrep`, `IfcFaceSurface`), and general mesh–mesh
 //! boolean subtraction / intersection.
 
