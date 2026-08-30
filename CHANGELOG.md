@@ -23,6 +23,15 @@ All notable changes to this project will be documented in this file.
   corners. Beams / columns using them decode to meshes through every
   swept solid. 18 new tests (area / bbox / symmetry pins).
 
+- Phase 3: `IfcRectangleHollowProfileDef.InnerFilletRadius` /
+  `OuterFilletRadius` now round the inner / outer rings (previously
+  square). Phase 2: the typed schema slice gains the eight named
+  profile entities, `IfcExtrudedAreaSolidTapered` /
+  `IfcRevolvedAreaSolidTapered` / `IfcSurfaceCurveSweptAreaSolid` /
+  `IfcFixedReferenceSweptAreaSolid`, `IfcMapConversionScaled` and
+  `IfcRigidOperation` (attribute orders transcribed from the staged
+  EXPRESS).
+
 - Phase 4 (groups / systems / zones): `Model` folds
   `IfcRelAssignsToGroup` (+ the `ByFactor` subtype) and
   `IfcRelServicesBuildings` — `group_members(group)` /

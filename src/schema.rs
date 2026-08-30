@@ -670,6 +670,177 @@ pub const SCHEMA: &[EntitySchema] = &[
             "OuterFilletRadius"
         ]),
     },
+    EntitySchema {
+        keyword: "IFCISHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcIShapeProfileDef(7).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "OverallWidth",
+            "OverallDepth",
+            "WebThickness",
+            "FlangeThickness",
+            "FilletRadius",
+            "FlangeEdgeRadius",
+            "FlangeSlope"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCLSHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcLShapeProfileDef(6).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "Depth",
+            "Width",
+            "Thickness",
+            "FilletRadius",
+            "EdgeRadius",
+            "LegSlope"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCTSHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcTShapeProfileDef(9).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "Depth",
+            "FlangeWidth",
+            "WebThickness",
+            "FlangeThickness",
+            "FilletRadius",
+            "FlangeEdgeRadius",
+            "WebEdgeRadius",
+            "WebSlope",
+            "FlangeSlope"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCUSHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcUShapeProfileDef(7).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "Depth",
+            "FlangeWidth",
+            "WebThickness",
+            "FlangeThickness",
+            "FilletRadius",
+            "EdgeRadius",
+            "FlangeSlope"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCZSHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcZShapeProfileDef(6).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "Depth",
+            "FlangeWidth",
+            "WebThickness",
+            "FlangeThickness",
+            "FilletRadius",
+            "EdgeRadius"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCCSHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcCShapeProfileDef(5).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "Depth",
+            "Width",
+            "WallThickness",
+            "Girth",
+            "InternalFilletRadius"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCROUNDEDRECTANGLEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcRectangleProfileDef(5) + IfcRoundedRectangleProfileDef(RoundingRadius).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "XDim",
+            "YDim",
+            "RoundingRadius"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCTRAPEZIUMPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + IfcTrapeziumProfileDef(4).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "BottomXDim",
+            "TopXDim",
+            "YDim",
+            "TopXOffset"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCEXTRUDEDAREASOLIDTAPERED",
+        kind: EntityKind::Geometry,
+        // IfcExtrudedAreaSolid(4) + IfcExtrudedAreaSolidTapered(EndSweptArea).
+        attrs: chain!(&[
+            "SweptArea",
+            "Position",
+            "ExtrudedDirection",
+            "Depth",
+            "EndSweptArea"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCREVOLVEDAREASOLIDTAPERED",
+        kind: EntityKind::Geometry,
+        // IfcRevolvedAreaSolid(4) + IfcRevolvedAreaSolidTapered(EndSweptArea).
+        attrs: chain!(&["SweptArea", "Position", "Axis", "Angle", "EndSweptArea"]),
+    },
+    EntitySchema {
+        keyword: "IFCSURFACECURVESWEPTAREASOLID",
+        kind: EntityKind::Geometry,
+        // IfcSweptAreaSolid(2) + Directrix, StartParam, EndParam (IfcDirectrixCurveSweptAreaSolid in IFC 4.3) + ReferenceSurface.
+        attrs: chain!(&[
+            "SweptArea",
+            "Position",
+            "Directrix",
+            "StartParam",
+            "EndParam",
+            "ReferenceSurface"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCFIXEDREFERENCESWEPTAREASOLID",
+        kind: EntityKind::Geometry,
+        // IfcSweptAreaSolid(2) + Directrix, StartParam, EndParam + FixedReference.
+        attrs: chain!(&[
+            "SweptArea",
+            "Position",
+            "Directrix",
+            "StartParam",
+            "EndParam",
+            "FixedReference"
+        ]),
+    },
     // ---- Boolean results / half spaces ----
     EntitySchema {
         keyword: "IFCBOOLEANRESULT",
@@ -1529,6 +1700,39 @@ pub const SCHEMA: &[EntitySchema] = &[
             "XAxisAbscissa",
             "XAxisOrdinate",
             "Scale"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCMAPCONVERSIONSCALED",
+        kind: EntityKind::Other,
+        // IfcMapConversion(8) + IfcMapConversionScaled(FactorX, FactorY,
+        // FactorZ) — IFC 4.3.
+        attrs: chain!(&[
+            "SourceCRS",
+            "TargetCRS",
+            "Eastings",
+            "Northings",
+            "OrthogonalHeight",
+            "XAxisAbscissa",
+            "XAxisOrdinate",
+            "Scale",
+            "FactorX",
+            "FactorY",
+            "FactorZ"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCRIGIDOPERATION",
+        kind: EntityKind::Other,
+        // IfcCoordinateOperation(SourceCRS, TargetCRS) +
+        // IfcRigidOperation(FirstCoordinate, SecondCoordinate, Height) —
+        // IFC 4.3.
+        attrs: chain!(&[
+            "SourceCRS",
+            "TargetCRS",
+            "FirstCoordinate",
+            "SecondCoordinate",
+            "Height"
         ]),
     },
     // ---- Units ----
@@ -2733,8 +2937,22 @@ mod tests {
             ("IFCCLASSIFICATIONREFERENCE", 6), // ExternalReference(3) + 3
             ("IFCDOCUMENTREFERENCE", 5),       // ExternalReference(3) + 2
             ("IFCDOCUMENTINFORMATION", 17),
-            ("IFCPROJECTEDCRS", 7),  // CRS(4) + 3
-            ("IFCMAPCONVERSION", 8), // Operation(2) + 6
+            ("IFCPROJECTEDCRS", 7),         // CRS(4) + 3
+            ("IFCMAPCONVERSION", 8),        // Operation(2) + 6
+            ("IFCMAPCONVERSIONSCALED", 11), // + FactorX/Y/Z
+            ("IFCRIGIDOPERATION", 5),       // Operation(2) + 3
+            ("IFCISHAPEPROFILEDEF", 10),
+            ("IFCLSHAPEPROFILEDEF", 9),
+            ("IFCTSHAPEPROFILEDEF", 12),
+            ("IFCUSHAPEPROFILEDEF", 10),
+            ("IFCZSHAPEPROFILEDEF", 9),
+            ("IFCCSHAPEPROFILEDEF", 8),
+            ("IFCROUNDEDRECTANGLEPROFILEDEF", 6),
+            ("IFCTRAPEZIUMPROFILEDEF", 7),
+            ("IFCEXTRUDEDAREASOLIDTAPERED", 5),
+            ("IFCREVOLVEDAREASOLIDTAPERED", 5),
+            ("IFCSURFACECURVESWEPTAREASOLID", 6),
+            ("IFCFIXEDREFERENCESWEPTAREASOLID", 6),
         ];
         for (kw, want) in lens {
             assert_eq!(

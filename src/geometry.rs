@@ -4165,8 +4165,8 @@ impl ProfileArea {
 ///   WallThickness, InnerFilletRadius, OuterFilletRadius)` — a
 ///   rectangular tube: the inner rectangle is `XDim − 2·WallThickness` ×
 ///   `YDim − 2·WallThickness` (`WallThickness` at index 5); the optional
-///   fillet radii (indices 6/7) are not applied in this slice — corners
-///   stay square.
+///   `InnerFilletRadius` / `OuterFilletRadius` (indices 6/7) round the
+///   inner / outer ring corners with tangent arcs (omitted → square).
 ///
 /// Ring orientation is normalised: every returned ring is
 /// counter-clockwise (holes are re-oriented during cap triangulation).
@@ -4240,11 +4240,37 @@ fn profile_area(step: &StepFile, profile_id: u64) -> Result<ProfileArea, Geometr
             if wall <= 0.0 || wall >= xdim / 2.0 || wall >= ydim / 2.0 {
                 return Err(GeometryError::BadProfile);
             }
-            let rect = |hx: f64, hy: f64| vec![[-hx, -hy], [hx, -hy], [hx, hy], [-hx, hy]];
+            // InnerFilletRadius (6) / OuterFilletRadius (7): optional,
+            // omitted → sharp. The EXPRESS ValidInnerRadius /
+            // ValidOuterRadius rules bound each by half the ring it
+            // rounds; the outer must clear the wall (OuterFilletRadius ≥
+            // WallThickness keeps the wall constant round the bend, but
+            // the schema only bounds it above, so any fitting value is
+            // accepted).
+            let fillet = |index: usize| -> Result<f64, GeometryError> {
+                match inst.args.get(index).and_then(Value::as_number) {
+                    None => Ok(0.0),
+                    Some(r) if r >= 0.0 => Ok(r),
+                    Some(_) => Err(GeometryError::BadProfile),
+                }
+            };
+            let r_in = fillet(6)?;
+            let r_out = fillet(7)?;
+            let (ix, iy) = (xdim / 2.0 - wall, ydim / 2.0 - wall);
+            if r_in > ix || r_in > iy || r_out > xdim / 2.0 || r_out > ydim / 2.0 {
+                return Err(GeometryError::BadProfile);
+            }
+            let rect = |hx: f64, hy: f64, r: f64| {
+                profiles::round_corners(&[
+                    profiles::corner(-hx, -hy, r),
+                    profiles::corner(hx, -hy, r),
+                    profiles::corner(hx, hy, r),
+                    profiles::corner(-hx, hy, r),
+                ])
+            };
             let pos = inst.args.get(2);
-            let outer = positioned_profile_ring(step, pos, rect(xdim / 2.0, ydim / 2.0))?;
-            let hole =
-                positioned_profile_ring(step, pos, rect(xdim / 2.0 - wall, ydim / 2.0 - wall))?;
+            let outer = positioned_profile_ring(step, pos, rect(xdim / 2.0, ydim / 2.0, r_out)?)?;
+            let hole = positioned_profile_ring(step, pos, rect(ix, iy, r_in)?)?;
             ProfileArea {
                 outer,
                 holes: vec![hole],
@@ -5991,6 +6017,33 @@ mod tests {
                 "cap triangle centroid ({cx},{cy}) inside the hole"
             );
         }
+    }
+
+    #[test]
+    fn extruded_rectangle_hollow_fillets_round_both_rings() {
+        // 40×20 tube, wall 4, inner fillet 2, outer fillet 6: area =
+        // (800 − 4k·36) − (32·12 − 4k·4) with k = 1 − π/4.
+        let f = parse(
+            "#1=IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,$,40.,20.,4.,2.,6.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
+        );
+        let m = tessellate_item(&f, 3).unwrap();
+        let k = 1.0 - core::f64::consts::FRAC_PI_4;
+        let expect = (800.0 - 4.0 * k * 36.0) - (384.0 - 4.0 * k * 4.0);
+        assert!((m.signed_volume() - expect).abs() < expect * 2e-3);
+        // Rounded rings have more than four points each.
+        assert!(m.vertex_count() > 16);
+        // An inner fillet larger than the inner half-height is rejected.
+        let f = parse(
+            "#1=IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,$,40.,20.,4.,7.,$);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
+        );
+        assert_eq!(
+            tessellate_item(&f, 3).unwrap_err(),
+            GeometryError::BadProfile
+        );
     }
 
     #[test]

@@ -30,12 +30,12 @@ use crate::value::Value;
 /// A polygon vertex with the radius its corner is rounded by (`0.0` =
 /// sharp).
 #[derive(Clone, Copy, Debug)]
-struct Corner {
-    p: [f64; 2],
-    r: f64,
+pub(super) struct Corner {
+    pub(super) p: [f64; 2],
+    pub(super) r: f64,
 }
 
-fn corner(x: f64, y: f64, r: f64) -> Corner {
+pub(super) fn corner(x: f64, y: f64, r: f64) -> Corner {
     Corner { p: [x, y], r }
 }
 
@@ -124,7 +124,7 @@ fn intersect_lines(
 /// [`CIRCLE_SEGMENTS`] density; a corner whose tangent lengths would
 /// overrun an adjoining edge (a radius too large for its corner) is
 /// malformed.
-fn round_corners(corners: &[Corner]) -> Result<Vec<[f64; 2]>, GeometryError> {
+pub(super) fn round_corners(corners: &[Corner]) -> Result<Vec<[f64; 2]>, GeometryError> {
     let n = corners.len();
     if n < 3 {
         return Err(GeometryError::BadProfile);
