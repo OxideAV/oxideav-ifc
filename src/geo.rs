@@ -130,6 +130,24 @@ impl MapConversion<'_> {
         ]
     }
 
+    /// The same operation as a [`Transform`](crate::geometry::Transform)
+    /// — apply it to a [`TriMesh`](crate::geometry::TriMesh) with
+    /// `TriMesh::transform` to carry a world-placed body into map
+    /// coordinates (eastings, northings, orthogonal height).
+    pub fn transform(&self) -> crate::geometry::Transform {
+        let (cos, sin) = self.rotation();
+        let s = self.scale.unwrap_or(1.0);
+        let f = self.factors.unwrap_or([1.0; 3]);
+        crate::geometry::Transform {
+            cols: [
+                [s * f[0] * cos, s * f[0] * sin, 0.0],
+                [-s * f[1] * sin, s * f[1] * cos, 0.0],
+                [0.0, 0.0, s * f[2]],
+            ],
+            translation: [self.eastings, self.northings, self.orthogonal_height],
+        }
+    }
+
     /// The inverse of [`MapConversion::to_map`]: a map point back to
     /// local engineering coordinates. `None` when a scale factor is
     /// zero.
@@ -480,6 +498,11 @@ mod tests {
         let back = conv.from_map(p).unwrap();
         assert!((back[0] - 10.0).abs() < 1e-9 && (back[1] - 20.0).abs() < 1e-9);
         assert!((back[2] - 1.0).abs() < 1e-9);
+        // The Transform form agrees with to_map.
+        let q = conv.transform().apply([10.0, 20.0, 1.0]);
+        for a in 0..3 {
+            assert!((q[a] - p[a]).abs() < 1e-9);
+        }
         assert_eq!(
             map_conversion_by_id(&f, 30).unwrap().factors,
             Some([1.5, 0.5, 3.0])

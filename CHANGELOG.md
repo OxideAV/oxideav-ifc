@@ -60,6 +60,14 @@ All notable changes to this project will be documented in this file.
   own section, and a tapered full-turn revolution keeps its end caps.
   3 new tests (frustum volumes, hollow taper, angular interpolation).
 
+- `MapConversion::transform()` — the map conversion as a geometry
+  `Transform`, so a world-placed `TriMesh` carries into (eastings,
+  northings, orthogonal height) with `TriMesh::transform`. New
+  `tests/named_profiles.rs` pins a synthetic IFC 4 steelwork model
+  (I-section beam laid along +x, tapered U-section column, millimetre
+  units, `IfcMapConversion` georeferencing) through the std-only API
+  and the registry decoder.
+
 ### Fixed
 
 - `MapConversion::to_map` applied `Scale` to the planar components
