@@ -13,7 +13,10 @@
 //! radial from its axis line, the sphere's outward radial from its
 //! centre, and the torus's outward radial from the tube centre circle.
 
-use super::{axis2_placement_3d, dot_raw, normalise, GeometryError, Transform};
+use super::{
+    axis1_placement, axis2_placement_3d, cross_raw, curve_points_2d, dot_raw, normalise,
+    profile_ring, GeometryError, Transform,
+};
 use crate::parser::StepFile;
 use crate::value::Value;
 
@@ -161,6 +164,35 @@ pub(super) enum ParamSurface {
         /// Control-net extent (for scale-relative tolerances).
         size: f64,
     },
+    /// `IfcSurfaceOfRevolution(SweptCurve, Position, AxisPosition)`: the
+    /// sampled 2-D profile (in the `Position` xy-plane) revolved about
+    /// the axis line — `u` the revolution angle (periodic), `v` the
+    /// fractional profile-sample index. The profile point `P(v)` is
+    /// decomposed against the axis into an axial offset and a signed
+    /// distance along `e1 = z × axis` (which lies in the xy-plane); the
+    /// revolution carries `e1` to `cos u · e1 + sin u · e2` with
+    /// `e2 = axis × e1 = z`.
+    Revolution {
+        frame: Transform,
+        profile: Vec<[f64; 2]>,
+        axis_origin: [f64; 3],
+        axis_dir: [f64; 3],
+        e1: [f64; 3],
+        e2: [f64; 3],
+    },
+    /// `IfcSurfaceOfLinearExtrusion(SweptCurve, Position,
+    /// ExtrudedDirection, Depth)`: the sampled 2-D profile (in the
+    /// `Position` xy-plane) translated along the extrusion direction —
+    /// `u` the fractional profile-sample index (periodic over the
+    /// sample count for a closed profile), `v` the distance along the
+    /// unit direction (`Depth` only bounds the authored surface; the
+    /// face loops bound the region).
+    Extrusion {
+        frame: Transform,
+        profile: Vec<[f64; 2]>,
+        closed: bool,
+        dir: [f64; 3],
+    },
 }
 
 /// A parameter-space point.
@@ -173,6 +205,66 @@ impl ParamSurface {
         match inst.keyword.as_str() {
             "IFCCYLINDRICALSURFACE" | "IFCSPHERICALSURFACE" | "IFCTOROIDALSURFACE" => {
                 Ok(Self::Elementary(ElementarySurface::from_id(step, id)?))
+            }
+            "IFCSURFACEOFREVOLUTION" | "IFCSURFACEOFLINEAREXTRUSION" => {
+                // IfcSweptSurface(SweptCurve, Position) + own attributes.
+                let profile_id = inst
+                    .args
+                    .first()
+                    .and_then(Value::as_reference)
+                    .ok_or(GeometryError::BadProfile)?;
+                let (profile, closed) = profile_curve(step, profile_id)?;
+                let frame = match inst.args.get(1).and_then(Value::as_reference) {
+                    Some(pid) => axis2_placement_3d(step, pid)?,
+                    None => Transform::IDENTITY,
+                };
+                if inst.keyword == "IFCSURFACEOFREVOLUTION" {
+                    // AxisPosition : IfcAxis1Placement (index 2), in the
+                    // Position frame.
+                    let axis_id = inst
+                        .args
+                        .get(2)
+                        .and_then(Value::as_reference)
+                        .ok_or(GeometryError::BadCoordinates)?;
+                    let (axis_origin, axis_dir) = axis1_placement(step, axis_id)?;
+                    let z = [0.0, 0.0, 1.0];
+                    // e1 ⟂ axis in the profile plane; a vertical axis
+                    // (the profile plane is then a plane of revolution
+                    // cross-sections, not a meridian) has no profile
+                    // side.
+                    let e1 = normalise(cross_raw(z, axis_dir)).ok_or(GeometryError::BadProfile)?;
+                    let e2 = cross_raw(axis_dir, e1);
+                    Ok(Self::Revolution {
+                        frame,
+                        profile,
+                        axis_origin,
+                        axis_dir,
+                        e1,
+                        e2,
+                    })
+                } else {
+                    // ExtrudedDirection (2), Depth (3).
+                    let dir = super::direction(step, inst.args.get(2))?
+                        .and_then(normalise)
+                        .ok_or(GeometryError::BadCoordinates)?;
+                    let depth = match inst.args.get(3) {
+                        Some(Value::Typed { args, .. }) => args.first().and_then(Value::as_number),
+                        Some(v) => v.as_number(),
+                        None => None,
+                    }
+                    .ok_or(GeometryError::BadCoordinate)?;
+                    // A direction in the profile plane sweeps no surface
+                    // graph over the plane; the inverse needs dir.z ≠ 0.
+                    if depth <= 0.0 || dir[2].abs() < 1e-9 {
+                        return Err(GeometryError::BadProfile);
+                    }
+                    Ok(Self::Extrusion {
+                        frame,
+                        profile,
+                        closed,
+                        dir,
+                    })
+                }
             }
             "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
                 let surface =
@@ -229,6 +321,39 @@ impl ParamSurface {
                 [d[0] + t[0], d[1] + t[1], d[2] + t[2]]
             }
             Self::BSpline { surface, .. } => surface.point_at(u, v),
+            Self::Revolution {
+                frame,
+                profile,
+                axis_origin,
+                axis_dir,
+                e1,
+                e2,
+            } => {
+                let p = polyline_point(profile, false, v);
+                let q = [
+                    p[0] - axis_origin[0],
+                    p[1] - axis_origin[1],
+                    -axis_origin[2],
+                ];
+                let a = dot_raw(q, *axis_dir);
+                let r = dot_raw(q, *e1);
+                let (c, s) = (u.cos(), u.sin());
+                let local = [
+                    axis_origin[0] + a * axis_dir[0] + r * (c * e1[0] + s * e2[0]),
+                    axis_origin[1] + a * axis_dir[1] + r * (c * e1[1] + s * e2[1]),
+                    axis_origin[2] + a * axis_dir[2] + r * (c * e1[2] + s * e2[2]),
+                ];
+                frame.apply(local)
+            }
+            Self::Extrusion {
+                frame,
+                profile,
+                closed,
+                dir,
+            } => {
+                let p = polyline_point(profile, *closed, u);
+                frame.apply([p[0] + v * dir[0], p[1] + v * dir[1], v * dir[2]])
+            }
         }
     }
 
@@ -300,7 +425,102 @@ impl ParamSurface {
                 }
                 ([u, v], false)
             }
+            Self::Revolution {
+                frame,
+                profile,
+                axis_origin,
+                axis_dir,
+                e1,
+                e2,
+            } => {
+                let l = frame.invert_point(p);
+                let q = [
+                    l[0] - axis_origin[0],
+                    l[1] - axis_origin[1],
+                    l[2] - axis_origin[2],
+                ];
+                let a = dot_raw(q, *axis_dir);
+                let (p1, p2) = (dot_raw(q, *e1), dot_raw(q, *e2));
+                let rho = p1.hypot(p2);
+                let scale = profile
+                    .iter()
+                    .map(|p| p[0].abs().max(p[1].abs()))
+                    .fold(1.0, f64::max);
+                if rho <= 1e-9 * scale {
+                    // On the axis: u is undefined; v from the axial offset.
+                    let base = [
+                        axis_origin[0] + a * axis_dir[0],
+                        axis_origin[1] + a * axis_dir[1],
+                    ];
+                    let (v, _) = nearest_on_polyline(profile, false, base);
+                    return ([0.0, v], true);
+                }
+                let u = p2.atan2(p1);
+                // The profile may lie on either side of the axis: try the
+                // unrotated point at +rho (angle u) and at −rho (angle
+                // u + π), keep the closer one.
+                let candidate = |sign: f64| -> (f64, f64) {
+                    let r = sign * rho;
+                    let pt = [
+                        axis_origin[0] + a * axis_dir[0] + r * e1[0],
+                        axis_origin[1] + a * axis_dir[1] + r * e1[1],
+                    ];
+                    nearest_on_polyline(profile, false, pt)
+                };
+                let (vp, dp) = candidate(1.0);
+                let (vn, dn) = candidate(-1.0);
+                if dp <= dn {
+                    ([u, vp], false)
+                } else {
+                    ([u + core::f64::consts::PI, vn], false)
+                }
+            }
+            Self::Extrusion {
+                frame,
+                profile,
+                closed,
+                dir,
+            } => {
+                let l = frame.invert_point(p);
+                let s = l[2] / dir[2];
+                let c = [l[0] - s * dir[0], l[1] - s * dir[1]];
+                let (u, _) = nearest_on_polyline(profile, *closed, c);
+                ([u, s], false)
+            }
         }
+    }
+
+    /// Where to split the parameter edge `a → b` (a fraction in
+    /// `(0, 1)`): the midpoint, unless the direction parameterised by
+    /// profile-sample index contains a sample between the ends — then
+    /// the sample nearest the middle, so refined edges follow the
+    /// sampled profile instead of cutting its corners.
+    pub(super) fn split_fraction(&self, a: Uv, b: Uv) -> f64 {
+        let index_axis = match self {
+            Self::Revolution { .. } => Some(1),
+            Self::Extrusion { .. } => Some(0),
+            _ => None,
+        };
+        if let Some(k) = index_axis {
+            let (lo, hi) = (a[k].min(b[k]), a[k].max(b[k]));
+            let mid = 0.5 * (lo + hi);
+            let candidates = [mid.floor(), mid.ceil()];
+            let mut best: Option<f64> = None;
+            for c in candidates {
+                let inside = c > lo + 1e-9 && c < hi - 1e-9;
+                let closer = match best {
+                    Some(b) => (c - mid).abs() < (b - mid).abs(),
+                    None => true,
+                };
+                if inside && closer {
+                    best = Some(c);
+                }
+            }
+            if let Some(c) = best {
+                return ((c - a[k]) / (b[k] - a[k])).clamp(1e-6, 1.0 - 1e-6);
+            }
+        }
+        0.5
     }
 
     /// The `u` period (the parameter wraps), if any.
@@ -310,6 +530,16 @@ impl ParamSurface {
                 SurfaceKind::Plane => None,
                 _ => Some(2.0 * core::f64::consts::PI),
             },
+            Self::Revolution { .. } => Some(2.0 * core::f64::consts::PI),
+            Self::Extrusion {
+                profile, closed, ..
+            } => {
+                if *closed {
+                    Some(profile.len() as f64)
+                } else {
+                    None
+                }
+            }
             Self::BSpline { surface, .. } => {
                 if surface.u_closed == Some(true) {
                     let (a, b) = surface.u_domain();
@@ -328,6 +558,7 @@ impl ParamSurface {
                 SurfaceKind::Torus { .. } => Some(2.0 * core::f64::consts::PI),
                 _ => None,
             },
+            Self::Revolution { .. } | Self::Extrusion { .. } => None,
             Self::BSpline { surface, .. } => {
                 if surface.v_closed == Some(true) {
                     let (a, b) = surface.v_domain();
@@ -344,8 +575,18 @@ impl ParamSurface {
     /// the loops decide.
     pub(super) fn u_extent(&self) -> Option<(f64, f64)> {
         match self {
-            Self::Elementary(_) => self.period_u().map(|p| (0.0, p)),
+            Self::Elementary(_) | Self::Revolution { .. } => self.period_u().map(|p| (0.0, p)),
             Self::BSpline { surface, .. } => Some(surface.u_domain()),
+            Self::Extrusion {
+                profile, closed, ..
+            } => Some((
+                0.0,
+                if *closed {
+                    profile.len() as f64
+                } else {
+                    (profile.len() - 1) as f64
+                },
+            )),
         }
     }
 
@@ -361,6 +602,8 @@ impl ParamSurface {
                 _ => None,
             },
             Self::BSpline { surface, .. } => Some(surface.v_domain()),
+            Self::Revolution { profile, .. } => Some((0.0, (profile.len() - 1) as f64)),
+            Self::Extrusion { .. } => None,
         }
     }
 
@@ -383,6 +626,10 @@ impl ParamSurface {
                 let (v0, v1) = surface.v_domain();
                 (Some((u1 - u0) / 24.0), Some((v1 - v0) / 24.0))
             }
+            // One profile sample per edge at most (the split lands on
+            // the samples); straight along the sweep.
+            Self::Revolution { .. } => (Some(angular), Some(1.0)),
+            Self::Extrusion { .. } => (Some(1.0), None),
         }
     }
 
@@ -402,6 +649,21 @@ impl ParamSurface {
                 let (v0, v1) = surface.v_domain();
                 (size / (u1 - u0), size / (v1 - v0))
             }
+            Self::Revolution {
+                profile,
+                axis_origin,
+                e1,
+                ..
+            } => {
+                let radius = profile
+                    .iter()
+                    .map(|p| {
+                        ((p[0] - axis_origin[0]) * e1[0] + (p[1] - axis_origin[1]) * e1[1]).abs()
+                    })
+                    .fold(1.0, f64::max);
+                (radius, polyline_mean_segment(profile))
+            }
+            Self::Extrusion { profile, .. } => (polyline_mean_segment(profile), 1.0),
         }
     }
 
@@ -433,8 +695,106 @@ impl ParamSurface {
         if pole {
             return (0, if uv[1] > 0.0 { i64::MAX } else { i64::MIN });
         }
+        if let Self::Revolution {
+            profile,
+            axis_origin,
+            e1,
+            ..
+        } = self
+        {
+            // A profile point on the axis is one surface point for
+            // every u.
+            let p = polyline_point(profile, false, uv[1]);
+            let r = (p[0] - axis_origin[0]) * e1[0] + (p[1] - axis_origin[1]) * e1[1];
+            let scale = profile
+                .iter()
+                .map(|p| p[0].abs().max(p[1].abs()))
+                .fold(1.0, f64::max);
+            if r.abs() <= 1e-9 * scale {
+                return (i64::MAX, q(uv[1], None));
+            }
+        }
         (q(uv[0], self.period_u()), q(uv[1], self.period_v()))
     }
+}
+
+/// The `SweptCurve` profile of a swept surface (`ProfileType` CURVE):
+/// an `IfcArbitraryOpenProfileDef(…, Curve)` samples its curve (open);
+/// any closed profile kind resolves through the shared ring path
+/// (closed). Returns the 2-D samples and whether they close.
+fn profile_curve(step: &StepFile, profile_id: u64) -> Result<(Vec<[f64; 2]>, bool), GeometryError> {
+    let inst = step
+        .get(profile_id)
+        .ok_or(GeometryError::MissingInstance(profile_id))?;
+    let (pts, closed) = match inst.keyword.as_str() {
+        "IFCARBITRARYOPENPROFILEDEF" => {
+            let curve_id = inst
+                .args
+                .get(2)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadProfile)?;
+            (curve_points_2d(step, curve_id)?, false)
+        }
+        _ => (profile_ring(step, profile_id)?, true),
+    };
+    if pts.len() < 2 || (closed && pts.len() < 3) {
+        return Err(GeometryError::BadProfile);
+    }
+    Ok((pts, closed))
+}
+
+/// The point at fractional sample index `t` of a polyline (linear
+/// between samples; a closed polyline wraps).
+fn polyline_point(pts: &[[f64; 2]], closed: bool, t: f64) -> [f64; 2] {
+    let n = pts.len();
+    let t = if closed {
+        t.rem_euclid(n as f64)
+    } else {
+        t.clamp(0.0, (n - 1) as f64)
+    };
+    let i = (t.floor() as usize).min(n - 1);
+    let f = t - i as f64;
+    let j = if closed {
+        (i + 1) % n
+    } else {
+        (i + 1).min(n - 1)
+    };
+    let (a, b) = (pts[i], pts[j]);
+    [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f]
+}
+
+/// The fractional sample index of the polyline point nearest to `p`,
+/// and that distance.
+fn nearest_on_polyline(pts: &[[f64; 2]], closed: bool, p: [f64; 2]) -> (f64, f64) {
+    let n = pts.len();
+    let segments = if closed { n } else { n - 1 };
+    let mut best = (0.0, f64::INFINITY);
+    for i in 0..segments {
+        let (a, b) = (pts[i], pts[(i + 1) % n]);
+        let d = [b[0] - a[0], b[1] - a[1]];
+        let len2 = d[0] * d[0] + d[1] * d[1];
+        let f = if len2 > 0.0 {
+            (((p[0] - a[0]) * d[0] + (p[1] - a[1]) * d[1]) / len2).clamp(0.0, 1.0)
+        } else {
+            0.0
+        };
+        let q = [a[0] + d[0] * f, a[1] + d[1] * f];
+        let dist = (p[0] - q[0]).hypot(p[1] - q[1]);
+        if dist < best.1 {
+            best = (i as f64 + f, dist);
+        }
+    }
+    best
+}
+
+/// Mean segment length of a polyline (a metric scale for its index
+/// parameter).
+fn polyline_mean_segment(pts: &[[f64; 2]]) -> f64 {
+    let total: f64 = pts
+        .windows(2)
+        .map(|w| (w[1][0] - w[0][0]).hypot(w[1][1] - w[0][1]))
+        .sum();
+    (total / (pts.len().saturating_sub(1).max(1) as f64)).max(f64::MIN_POSITIVE)
 }
 
 fn dist2(a: [f64; 3], b: [f64; 3]) -> f64 {

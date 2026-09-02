@@ -33,6 +33,9 @@ All notable changes to this project will be documented in this file.
   space (loop inversion + continuous unwrapping, period-image clipping to a
   fundamental rectangle with seam / pole edges, hole-aware ear clipping,
   midpoint refinement, parameter welding, cross-face chord repair).
+- Phase 3: `IfcSurfaceOfRevolution` / `IfcSurfaceOfLinearExtrusion` face
+  surfaces (sampled `SweptCurve` profile, sample-index parameterisation
+  with refinement splitting at the samples, ±ρ axis-side inverse).
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

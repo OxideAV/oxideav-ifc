@@ -1153,7 +1153,10 @@ fn midpoint(
         return m;
     }
     let (ua, ub) = (uvs[a as usize], uvs[b as usize]);
-    let uv = [0.5 * (ua[0] + ub[0]), 0.5 * (ua[1] + ub[1])];
+    // Where along the edge to split: the midpoint, unless the surface
+    // prefers a breakpoint (a sampled-profile vertex) inside the edge.
+    let f = surface.split_fraction(ua, ub);
+    let uv = [ua[0] + (ub[0] - ua[0]) * f, ua[1] + (ub[1] - ua[1]) * f];
     let as_pvert = |k: Local, uv: Uv| match k {
         Local::Loop { id, prev, next } => PVert::Loop { id, uv, prev, next },
         Local::Cross { a, b, t } => PVert::Cross { a, b, t, uv },
@@ -1180,12 +1183,12 @@ fn midpoint(
                 Local::Cross {
                     a: ca,
                     b: cb,
-                    t: 0.5 * (ta + tb),
+                    t: ta + (tb - ta) * f,
                 },
                 [
-                    0.5 * (qa[0] + qb[0]),
-                    0.5 * (qa[1] + qb[1]),
-                    0.5 * (qa[2] + qb[2]),
+                    qa[0] + (qb[0] - qa[0]) * f,
+                    qa[1] + (qb[1] - qa[1]) * f,
+                    qa[2] + (qb[2] - qa[2]) * f,
                 ],
             )
         }

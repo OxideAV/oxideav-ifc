@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; swept-surface faces, `IfcSectionedSpine` and non-convex mesh–mesh booleans later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline / revolved / extruded faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; `IfcSectionedSpine`, bounded-surface items and non-convex mesh–mesh booleans later |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
@@ -212,9 +212,17 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   half tubes and a box with a B-spline top all mesh **watertight**
   with consistently outward normals. A face whose flags leave the
   region empty (inconsistent `SameSense` / `Orientation` in the file)
-  is retried with the opposite orientation. `IfcSurfaceOfRevolution` /
-  `IfcSurfaceOfLinearExtrusion` face surfaces still surface
-  `Unsupported`.
+  is retried with the opposite orientation. The **swept surfaces**
+  `IfcSurfaceOfRevolution(SweptCurve, Position, AxisPosition)` and
+  `IfcSurfaceOfLinearExtrusion(SweptCurve, Position, ExtrudedDirection,
+  Depth)` join the same path: their `SweptCurve` (an
+  `IfcArbitraryOpenProfileDef` curve, or any closed profile kind) is
+  sampled in the `Position` xy-plane and parameterised by fractional
+  sample index (periodic for a closed extrusion profile) — refinement
+  splits edges *at* the profile samples, so meshed chords never cut a
+  profile corner — with the revolution angle / extrusion distance as
+  the other parameter; a profile on either side of the revolution
+  axis inverts correctly, and on-axis profile points weld like poles.
 * `tessellate_item` also sweeps the **extruded area solid**
   `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
   `Depth`) into a closed prism — hole-aware caps (ear-clipped, so
@@ -399,9 +407,9 @@ disk solids, B-spline curves
 `CorrespondingKnotLists`, rational `SameNumOfWeightsAndPoints` /
 `WeightsGreaterZero`), `IfcMapConversion` and `IfcRigidOperation`.
 
-Still later in Phase 3: swept-surface faces (`IfcSurfaceOfRevolution` /
-`IfcSurfaceOfLinearExtrusion` as `FaceSurface`), `IfcSectionedSpine`,
-and non-convex mesh–mesh booleans.
+Still later in Phase 3: `IfcSectionedSpine`, bounded-surface
+representation items (`IfcCurveBoundedPlane` / `IfcRectangularTrimmedSurface`
+outside a Brep), and non-convex mesh–mesh booleans.
 
 ## Phase 4 surface — semantic data layer
 

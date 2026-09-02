@@ -154,13 +154,13 @@
 //!
 //! `IfcAdvancedBrep` / `IfcAdvancedBrepWithVoids` follow the same
 //! shell walk; planar `IfcAdvancedFace`s take the polygon path and
-//! curved ones (cylindrical / spherical / toroidal / B-spline face
-//! surfaces) the parameter-space trimmer of the `trim` submodule.
+//! curved ones (cylindrical / spherical / toroidal / B-spline /
+//! revolved / extruded face surfaces) the parameter-space trimmer of
+//! the `trim` submodule.
 //!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): swept-surface faces
-//! (`IfcSurfaceOfRevolution` / `IfcSurfaceOfLinearExtrusion`),
-//! `IfcSectionedSpine`, and general mesh–mesh boolean subtraction /
+//! rather than silently dropped): `IfcSectionedSpine`, bounded-surface
+//! representation items, and general mesh–mesh boolean subtraction /
 //! intersection.
 
 use crate::parser::StepFile;
@@ -1665,6 +1665,32 @@ impl Transform {
             cx[0] * p[0] + cy[0] * p[1] + cz[0] * p[2] + self.translation[0],
             cx[1] * p[0] + cy[1] * p[1] + cz[1] * p[2] + self.translation[1],
             cx[2] * p[0] + cy[2] * p[1] + cz[2] * p[2] + self.translation[2],
+        ]
+    }
+
+    /// Map a parent-space point back into local space (the inverse of
+    /// [`Transform::apply`]), by the 3×3 inverse of the linear part;
+    /// a singular linear part maps every point to the origin.
+    pub(crate) fn invert_point(&self, p: [f64; 3]) -> [f64; 3] {
+        let [cx, cy, cz] = self.cols;
+        let d = [
+            p[0] - self.translation[0],
+            p[1] - self.translation[1],
+            p[2] - self.translation[2],
+        ];
+        // Columns of the inverse = rows of adj(M) / det(M).
+        let det = cx[0] * (cy[1] * cz[2] - cz[1] * cy[2]) - cy[0] * (cx[1] * cz[2] - cz[1] * cx[2])
+            + cz[0] * (cx[1] * cy[2] - cy[1] * cx[2]);
+        if det.abs() <= f64::MIN_POSITIVE {
+            return [0.0; 3];
+        }
+        let r0 = cross_raw(cy, cz);
+        let r1 = cross_raw(cz, cx);
+        let r2 = cross_raw(cx, cy);
+        [
+            dot_raw(r0, d) / det,
+            dot_raw(r1, d) / det,
+            dot_raw(r2, d) / det,
         ]
     }
 
@@ -6690,10 +6716,135 @@ mod tests {
     }
 
     #[test]
-    fn advanced_face_on_a_swept_surface_is_unsupported_for_now() {
+    fn surface_of_revolution_face_closes_a_cylinder_about_y() {
+        // The side of a cylinder about +Y (radius 1, y ∈ [0, 2]) as an
+        // IfcSurfaceOfRevolution of the open profile x = 1 (which lies
+        // on the negative side of the axis frame, exercising the ±ρ
+        // branch of the inverse), plus two planar caps.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((1.,0.,0.));\n#2=IFCCARTESIANPOINT((1.,2.,0.));\n\
+             #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#2);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n#21=IFCDIRECTION((0.,1.,0.));\n\
+             #22=IFCDIRECTION((1.,0.,0.));\n#23=IFCAXIS2PLACEMENT3D(#20,#21,#22);\n\
+             #24=IFCCIRCLE(#23,1.);\n\
+             #25=IFCCARTESIANPOINT((0.,2.,0.));\n#26=IFCAXIS2PLACEMENT3D(#25,#21,#22);\n\
+             #27=IFCCIRCLE(#26,1.);\n\
+             #30=IFCEDGECURVE(#11,#11,#24,.T.);\n#31=IFCEDGECURVE(#12,#12,#27,.T.);\n\
+             #35=IFCCARTESIANPOINT((1.,0.));\n#36=IFCCARTESIANPOINT((1.,2.));\n\
+             #37=IFCPOLYLINE((#35,#36));\n#38=IFCARBITRARYOPENPROFILEDEF(.CURVE.,$,#37);\n\
+             #39=IFCAXIS1PLACEMENT(#20,#21);\n\
+             #46=IFCSURFACEOFREVOLUTION(#38,$,#39);\n\
+             #40=IFCORIENTEDEDGE(*,*,#30,.T.);\n#41=IFCEDGELOOP((#40));\n#42=IFCFACEOUTERBOUND(#41,.T.);\n\
+             #43=IFCORIENTEDEDGE(*,*,#31,.F.);\n#44=IFCEDGELOOP((#43));\n#45=IFCFACEBOUND(#44,.T.);\n\
+             #47=IFCADVANCEDFACE((#42,#45),#46,.T.);\n\
+             #50=IFCPLANE(#23);\n\
+             #51=IFCORIENTEDEDGE(*,*,#30,.F.);\n#52=IFCEDGELOOP((#51));\n#53=IFCFACEOUTERBOUND(#52,.T.);\n\
+             #54=IFCADVANCEDFACE((#53),#50,.F.);\n\
+             #55=IFCORIENTEDEDGE(*,*,#31,.T.);\n#56=IFCEDGELOOP((#55));\n#57=IFCFACEOUTERBOUND(#56,.T.);\n\
+             #58=IFCPLANE(#26);\n#59=IFCADVANCEDFACE((#57),#58,.T.);\n\
+             #60=IFCCLOSEDSHELL((#47,#54,#59));\n#61=IFCADVANCEDBREP(#60);",
+        );
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        let exact = 2.0 * core::f64::consts::PI;
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 5e-3, "{v} vs {exact}");
+        for p in &m.positions {
+            assert!((p[0].hypot(p[2]) - 1.0).abs() < 1e-9, "{p:?}");
+            assert!(p[1] >= -1e-12 && p[1] <= 2.0 + 1e-12);
+        }
+    }
+
+    #[test]
+    fn surface_of_linear_extrusion_face_over_a_closed_profile() {
+        // The cylinder brep with its side on an IfcSurfaceOfLinearExtrusion
+        // of a closed circle profile (periodic sample-index parameter).
+        let src = CYLINDER_BREP.replace(
+            "#46=IFCCYLINDRICALSURFACE(#21,1.);",
+            "#70=IFCCARTESIANPOINT((0.,0.));\n#71=IFCAXIS2PLACEMENT2D(#70,$);\n\
+             #72=IFCCIRCLE(#71,1.);\n#73=IFCARBITRARYCLOSEDPROFILEDEF(.CURVE.,$,#72);\n\
+             #74=IFCDIRECTION((0.,0.,1.));\n\
+             #46=IFCSURFACEOFLINEAREXTRUSION(#73,#21,#74,2.);",
+        );
+        assert_ne!(src, CYLINDER_BREP);
+        let f = parse(&src);
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        let exact = 2.0 * core::f64::consts::PI;
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 5e-3, "{v} vs {exact}");
+        for p in &m.positions {
+            assert!((p[0].hypot(p[1]) - 1.0).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn surface_of_linear_extrusion_face_over_an_open_arc() {
+        // A half-cylinder sheet: a semicircular open profile extruded
+        // along +Z by 2, bounded by the two arcs and two generators.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((1.,0.,0.));\n#2=IFCCARTESIANPOINT((-1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((1.,0.,2.));\n#4=IFCCARTESIANPOINT((-1.,0.,2.));\n\
+             #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#2);\n#13=IFCVERTEXPOINT(#3);\n\
+             #14=IFCVERTEXPOINT(#4);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n#21=IFCAXIS2PLACEMENT3D(#20,$,$);\n\
+             #22=IFCCIRCLE(#21,1.);\n\
+             #23=IFCCARTESIANPOINT((0.,0.,2.));\n#24=IFCAXIS2PLACEMENT3D(#23,$,$);\n\
+             #25=IFCCIRCLE(#24,1.);\n\
+             #26=IFCDIRECTION((0.,0.,1.));\n#27=IFCVECTOR(#26,1.);\n#28=IFCLINE(#20,#27);\n\
+             #30=IFCEDGECURVE(#11,#12,#22,.T.);\n#31=IFCEDGECURVE(#12,#14,#28,.T.);\n\
+             #32=IFCEDGECURVE(#13,#14,#25,.T.);\n#33=IFCEDGECURVE(#11,#13,#28,.T.);\n\
+             #40=IFCORIENTEDEDGE(*,*,#30,.T.);\n#41=IFCORIENTEDEDGE(*,*,#31,.T.);\n\
+             #42=IFCORIENTEDEDGE(*,*,#32,.F.);\n#43=IFCORIENTEDEDGE(*,*,#33,.F.);\n\
+             #44=IFCEDGELOOP((#40,#41,#42,#43));\n#45=IFCFACEOUTERBOUND(#44,.T.);\n\
+             #70=IFCCARTESIANPOINT((0.,0.));\n#71=IFCAXIS2PLACEMENT2D(#70,$);\n\
+             #72=IFCCIRCLE(#71,1.);\n#73=IFCCARTESIANPOINT((1.,0.));\n#74=IFCCARTESIANPOINT((-1.,0.));\n\
+             #75=IFCTRIMMEDCURVE(#72,(#73),(#74),.T.,.CARTESIAN.);\n\
+             #76=IFCARBITRARYOPENPROFILEDEF(.CURVE.,$,#75);\n\
+             #46=IFCSURFACEOFLINEAREXTRUSION(#76,#21,#26,2.);\n\
+             #47=IFCADVANCEDFACE((#45),#46,.T.);\n#48=IFCOPENSHELL((#47));\n\
+             #49=IFCSHELLBASEDSURFACEMODEL((#48));",
+        );
+        let m = tessellate_item(&f, 49).unwrap();
+        let area: f64 = m
+            .triangles
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (
+                    m.positions[t[0] as usize],
+                    m.positions[t[1] as usize],
+                    m.positions[t[2] as usize],
+                );
+                let n = cross_raw(
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                );
+                0.5 * dot_raw(n, n).sqrt()
+            })
+            .sum();
+        // 24 chords of the half circle × height 2.
+        let n = CIRCLE_SEGMENTS as f64;
+        let expected = 2.0 * 24.0 * 2.0 * (core::f64::consts::PI / n).sin();
+        assert!((area - expected).abs() < 1e-9, "{area} vs {expected}");
+        for p in &m.positions {
+            assert!(
+                (p[0].hypot(p[1]) - 1.0).abs() < 1e-9 && p[1] >= -1e-9,
+                "{p:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn swept_surface_face_with_a_bad_profile_is_rejected() {
+        // An extrusion direction inside the profile plane sweeps no
+        // surface graph; a swept surface over a missing profile fails
+        // on the profile.
         let f = parse(
             "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
-             #3=IFCSURFACEOFLINEAREXTRUSION(#9,#2,#9,1.);\n\
+             #70=IFCCARTESIANPOINT((0.,0.));\n#71=IFCAXIS2PLACEMENT2D(#70,$);\n\
+             #72=IFCCIRCLE(#71,1.);\n#73=IFCARBITRARYCLOSEDPROFILEDEF(.CURVE.,$,#72);\n\
+             #74=IFCDIRECTION((1.,0.,0.));\n\
+             #3=IFCSURFACEOFLINEAREXTRUSION(#73,#2,#74,1.);\n\
              #4=IFCVERTEXPOINT(#1);\n#12=IFCCARTESIANPOINT((1.,0.,0.));\n\
              #13=IFCCARTESIANPOINT((0.,1.,0.));\n#14=IFCVERTEXPOINT(#12);\n#15=IFCVERTEXPOINT(#13);\n\
              #5=IFCEDGE(#4,#14);\n#16=IFCEDGE(#14,#15);\n#17=IFCEDGE(#15,#4);\n\
@@ -6705,7 +6856,7 @@ mod tests {
         );
         assert_eq!(
             tessellate_item(&f, 11).unwrap_err(),
-            GeometryError::Unsupported("IFCSURFACEOFLINEAREXTRUSION".to_string())
+            GeometryError::BadProfile
         );
     }
 
