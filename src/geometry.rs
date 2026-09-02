@@ -7614,6 +7614,26 @@ mod tests {
     }
 
     #[test]
+    fn advanced_brep_is_a_boolean_operand() {
+        // The curved cylinder Brep clipped by the half-space above z = 1
+        // (AgreementFlag FALSE: the positive side is the removed
+        // region): the watertight remainder is the lower half.
+        let src = format!(
+            "{CYLINDER_BREP}\
+             #70=IFCCARTESIANPOINT((0.,0.,1.));\n#71=IFCAXIS2PLACEMENT3D(#70,$,$);\n\
+             #72=IFCPLANE(#71);\n#73=IFCHALFSPACESOLID(#72,.F.);\n\
+             #74=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#61,#73);"
+        );
+        let f = parse(&src);
+        let whole = tessellate_item(&f, 61).unwrap();
+        let m = tessellate_item(&f, 74).unwrap();
+        assert_watertight(&m);
+        let v = m.signed_volume();
+        assert!((v - whole.signed_volume() / 2.0).abs() < 1e-6, "{v}");
+        assert_bbox_tol(&m, [-1.0, -1.0, 0.0], [1.0, 1.0, 1.0], 1e-9);
+    }
+
+    #[test]
     fn nurbs_circle_profile_extrudes_like_a_circle_profile() {
         // The rational quadratic circle meshes at the IfcCircle density
         // (48 segments) and its extrusion volume matches π r² h to the
