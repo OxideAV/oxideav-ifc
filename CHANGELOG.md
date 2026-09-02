@@ -23,6 +23,10 @@ All notable changes to this project will be documented in this file.
 - Phase 3: `IfcAsymmetricIShapeProfileDef` (IFC4 / 4.3 and the IFC 2x3
   12-attribute layout) with fillet / edge radii and flange slopes, plus
   its four WHERE rules.
+- Phase 3: `IfcEdgeLoop` face bounds — `IfcOrientedEdge` / `IfcEdgeCurve`
+  (line, unbounded conic, any bounded curve) / `IfcEdge` / `IfcSubedge`
+  over `IfcVertexPoint`s, edge runs shared between faces; `IfcAdvancedBrep`
+  / `IfcAdvancedBrepWithVoids` with planar `IfcAdvancedFace`s tessellate.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps and non-convex mesh–mesh booleans later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), planar-face advanced Breps, face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps and non-convex mesh–mesh booleans later |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
@@ -172,8 +172,25 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `IfcClosedShell` tessellates with consistently outward normals
   (positive `signed_volume`); planar `IfcFaceSurface` faces are
   accepted (`SameSense` relates the face to the *surface* normal and
-  does not flip the loop-derived winding). Advanced (curved) breps
-  remain `Unsupported`.
+  does not flip the loop-derived winding).
+* **Edge loops** — `IfcEdgeLoop(EdgeList : LIST OF IfcOrientedEdge)` —
+  bound faces too: each `IfcOrientedEdge(EdgeElement, Orientation)`
+  contributes the sampled run of its element, reversed for
+  `Orientation` FALSE, and consecutive edges chain head-to-tail. Edge
+  runs are cached per `IfcEdge` id so the two faces sharing an edge
+  share its vertices (watertight). `IfcEdgeCurve(EdgeStart, EdgeEnd,
+  EdgeGeometry, SameSense)` samples the geometry between its
+  `IfcVertexPoint`s: an `IfcLine` adds no interior points, an
+  unbounded `IfcCircle` / `IfcEllipse` is swept from the start vertex's
+  conic parameter to the end vertex's in the `SameSense` direction
+  (coincident vertices = the full conic), and any bounded 3-D curve
+  (polyline, trimmed / composite / indexed curve, B-spline) is sampled
+  whole and re-ended on the vertices. Bare `IfcEdge`s are straight and
+  `IfcSubedge`s clip their parent's run. **`IfcAdvancedBrep` /
+  `IfcAdvancedBrepWithVoids`** over **planar** `IfcAdvancedFace`s
+  (`FaceSurface` an `IfcPlane`) tessellate through this path; an
+  advanced face on a curved surface still surfaces `Unsupported`
+  with the surface keyword.
 * `tessellate_item` also sweeps the **extruded area solid**
   `IfcExtrudedAreaSolid` (`SweptArea`, `Position`, `ExtrudedDirection`,
   `Depth`) into a closed prism — hole-aware caps (ear-clipped, so
