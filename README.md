@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes) over the full profile family — arbitrary curves with arc boundaries (trimmed conics, three-point arcs, composite curves), **named parameterised sections** (I/L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps, directrix-swept area solids and non-convex mesh–mesh booleans later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I/L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps and non-convex mesh–mesh booleans later |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
@@ -237,6 +237,28 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   conic directrices (the angle) and B-spline directrices (their own
   knot parameter), closed-path wrap, disk / annulus end caps, reversed
   inner walls.
+* The **directrix-swept area solids** `IfcFixedReferenceSweptAreaSolid`
+  (and the IFC 4.3 `IfcDirectrixDerivedReferenceSweptAreaSolid`, same
+  attributes) and `IfcSurfaceCurveSweptAreaSolid` (IFC 2x3 / 4 / 4.3
+  attribute order alike) sweep a profile area along any supported 3-D
+  directrix. **Profile frame convention** (this crate's reading of the
+  EXPRESS text — the staged digests do not spell it out; flagged as a
+  docs ask): the profile plane is ⟂ the directrix tangent (profile +z
+  → tangent), profile **+x follows the reference** — the
+  `FixedReference` direction, or the `ReferenceSurface` normal at the
+  directrix point (`IfcPlane` / `IfcCylindricalSurface` /
+  `IfcSphericalSurface` / `IfcToroidalSurface`; other surfaces surface
+  `Unsupported`) — projected ⟂ the tangent, and +y = tangent × x.
+  Directrix and reference are read in the solid's `Position` frame,
+  which then places the whole solid. Corners of the sampled directrix
+  are **mitred** (the outgoing prism cut by the bisector plane), so a
+  polyline sweep is exactly area × length, an arc sweep of a centred
+  profile follows Pappus to the chord error, and a closed directrix
+  wraps without caps. `StartParam` / `EndParam` accept
+  `IfcCurveMeasureSelect` — `IFCPARAMETERVALUE` (conic angle, B-spline
+  knot parameter) or `IFCLENGTHMEASURE` distance along the directrix
+  (any curve); a parameter trim on a curve without a documented
+  parameterisation (polylines, composites) surfaces `Unsupported`.
 * **`IfcSectionedSolidHorizontal`** (IFC 4.3 alignment solid) lofts
   profiles at `IfcAxis2PlacementLinear` distance-along stations
   (lateral / vertical offsets honoured, longitudinal rejected per the
@@ -327,17 +349,15 @@ of one instance (`None` when the entity has no transcribed rules),
 `model_where_rule_violations(step)` sweeps the model: the named /
 hollow / composite profiles, the swept area solids (`SweptAreaType`,
 `ValidExtrusionDirection`, the revolution-axis rules, tapered
-`CorrectProfileAssignment`), swept disk solids, B-spline curves
+`CorrectProfileAssignment`, directrix-sweep `DirectrixBounded`), swept
+disk solids, B-spline curves
 (`ConsistentBSpline` via the transcribed `IfcConstraintsParamBSpline`,
 `CorrespondingKnotLists`, rational `SameNumOfWeightsAndPoints` /
 `WeightsGreaterZero`), `IfcMapConversion` and `IfcRigidOperation`.
 
-Still later in Phase 3: the directrix-swept area solids
-(`IfcSurfaceCurveSweptAreaSolid` / `IfcFixedReferenceSweptAreaSolid` —
-their profile-frame convention along the directrix is not covered by
-the staged digests), `IfcAsymmetricIShapeProfileDef`, advanced
-(curved) breps (`IfcAdvancedBrep` / curved `IfcFaceSurface`), and
-non-convex mesh–mesh booleans.
+Still later in Phase 3: `IfcAsymmetricIShapeProfileDef`, advanced
+(curved) breps (`IfcAdvancedBrep` / curved `IfcFaceSurface`),
+`IfcSectionedSpine`, and non-convex mesh–mesh booleans.
 
 ## Phase 4 surface — semantic data layer
 

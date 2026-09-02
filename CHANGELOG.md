@@ -13,6 +13,13 @@ All notable changes to this project will be documented in this file.
   `StartParam` / `EndParam` trim B-spline directrices in their own knot
   parameter; WHERE rules `ConsistentBSpline`, `CorrespondingKnotLists`,
   `SameNumOfWeightsAndPoints`, `WeightsGreaterZero`.
+- Phase 3: directrix-swept area solids — `IfcFixedReferenceSweptAreaSolid`
+  (+ `IfcDirectrixDerivedReferenceSweptAreaSolid`) and
+  `IfcSurfaceCurveSweptAreaSolid` sweep a profile along a 3-D directrix
+  with the profile +x following the fixed reference / the reference
+  surface normal (plane, cylinder, sphere, torus), mitred corners,
+  parameter or `IFCLENGTHMEASURE` trims, closed-path wrap; WHERE rule
+  `DirectrixBounded` for the family.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

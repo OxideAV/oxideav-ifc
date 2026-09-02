@@ -140,18 +140,26 @@
 //! rounded rectangle, trapezium — see the `profiles` submodule) and
 //! derived / mirrored profiles feed every sweep.
 //!
+//! The **directrix-swept area solids** `IfcFixedReferenceSweptAreaSolid`
+//! (+ the 4.3 `IfcDirectrixDerivedReferenceSweptAreaSolid`) and
+//! `IfcSurfaceCurveSweptAreaSolid` sweep a profile along a 3-D directrix
+//! (any supported 3-D curve incl. B-splines), the profile plane ⟂ the
+//! tangent and its +x axis following the `FixedReference` direction /
+//! the `ReferenceSurface` normal (elementary surfaces — see the
+//! `surfaces` submodule), with mitred corners, `StartParam` / `EndParam`
+//! as parameters or `IFCLENGTHMEASURE` distances, and closed-path wrap.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): the directrix-swept area solids
-//! (`IfcSurfaceCurveSweptAreaSolid`, `IfcFixedReferenceSweptAreaSolid`),
-//! `IfcAsymmetricIShapeProfileDef`, advanced/curved breps
-//! (`IfcAdvancedBrep`, `IfcFaceSurface`), and general mesh–mesh
-//! boolean subtraction / intersection.
+//! rather than silently dropped): `IfcAsymmetricIShapeProfileDef`,
+//! advanced/curved breps (`IfcAdvancedBrep`, curved `IfcFaceSurface`),
+//! and general mesh–mesh boolean subtraction / intersection.
 
 use crate::parser::StepFile;
 use crate::value::Value;
 
 pub(crate) mod bspline;
 mod profiles;
+mod surfaces;
 
 /// A flat, indexed triangle mesh in the local coordinate space of the
 /// representation item it was extracted from.
@@ -291,6 +299,14 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         }
         // Swept disk solid: a disk / annulus swept along a 3-D directrix.
         "IFCSWEPTDISKSOLID" | "IFCSWEPTDISKSOLIDPOLYGONAL" => swept_disk_solid(step, &inst.args),
+        // Directrix-swept area solids: a profile swept along a 3-D
+        // directrix with its frame fixed by a reference direction or a
+        // reference surface's normal.
+        "IFCFIXEDREFERENCESWEPTAREASOLID"
+        | "IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID"
+        | "IFCSURFACECURVESWEPTAREASOLID" => {
+            directrix_swept_area_solid(step, &inst.keyword, &inst.args)
+        }
         // Sectioned solid: profiles lofted at stations along a directrix.
         "IFCSECTIONEDSOLIDHORIZONTAL" => sectioned_solid_horizontal(step, &inst.args),
         // Parametric CSG primitives (swept-disk digest §3) and the CSG
@@ -2722,6 +2738,329 @@ fn swept_disk_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geometry
         positions,
         triangles,
     })
+}
+
+// =====================================================================
+// IfcFixedReferenceSweptAreaSolid / IfcSurfaceCurveSweptAreaSolid
+// (SweptArea, Position, Directrix, StartParam, EndParam,
+//  FixedReference | ReferenceSurface)
+//
+// EXPRESS (IFC4X3_ADD2, IFC4): IfcDirectrixCurveSweptAreaSolid adds
+// Directrix + optional StartParam / EndParam (IfcCurveMeasureSelect in
+// 4.3, IfcParameterValue in IFC4) to IfcSweptAreaSolid(SweptArea,
+// Position); the two concrete subtypes add FixedReference :
+// IfcDirection, respectively ReferenceSurface : IfcSurface.
+// IfcDirectrixDerivedReferenceSweptAreaSolid (4.3) subtypes the fixed-
+// reference solid without new attributes. IFC 2x3 has only the
+// surface-curve form, with mandatory parameters, in the same order.
+// WHERE DirectrixBounded: both parameters, or a conic / bounded
+// directrix.
+//
+// Profile frame along the directrix (this crate's reading of the
+// schema — the staged digests do not spell it out): at every directrix
+// point the profile plane is perpendicular to the directrix tangent t
+// (profile +z → t); the profile +x axis follows the REFERENCE — the
+// FixedReference direction, or the ReferenceSurface normal at that
+// point — projected perpendicular to t and normalised; profile +y is
+// t × x, so (x, y, t) is right-handed and a counter-clockwise profile
+// stays counter-clockwise about the direction of travel. The directrix
+// and the reference are read in the solid's Position coordinate
+// system, which then places the whole solid (as the revolved solid's
+// axis is). Corners of the sampled directrix are mitred: each section
+// is the profile prism of the outgoing segment cut by the bisector
+// plane (the ring is projected onto that plane along the segment
+// direction), so a straight polyline sweep is exactly area × length
+// and a closed directrix wraps without seams.
+// =====================================================================
+
+/// A `StartParam` / `EndParam` value: a curve parameter (plain number
+/// or `IFCPARAMETERVALUE(...)`) or an `IFCLENGTHMEASURE(...)` distance
+/// along the directrix.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum CurveMeasure {
+    Param(f64),
+    Length(f64),
+}
+
+/// Parse an optional `IfcCurveMeasureSelect` / `IfcParameterValue`
+/// attribute.
+fn curve_measure(arg: Option<&Value>) -> Result<Option<CurveMeasure>, GeometryError> {
+    match arg {
+        None | Some(Value::Unset) => Ok(None),
+        Some(Value::Typed { keyword, args }) => {
+            let v = args
+                .first()
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadCoordinate)?;
+            match keyword.as_str() {
+                "IFCLENGTHMEASURE" | "IFCNONNEGATIVELENGTHMEASURE" | "IFCPOSITIVELENGTHMEASURE" => {
+                    Ok(Some(CurveMeasure::Length(v)))
+                }
+                _ => Ok(Some(CurveMeasure::Param(v))),
+            }
+        }
+        Some(v) => Ok(Some(CurveMeasure::Param(
+            v.as_number().ok_or(GeometryError::BadCoordinate)?,
+        ))),
+    }
+}
+
+/// Resolve a directrix under start / end measures: parameter measures
+/// go through [`directrix_points_3d`] (conic angle / B-spline knot
+/// parameter); length measures trim the sampled run by distance along
+/// it.
+fn directrix_points_measured(
+    step: &StepFile,
+    id: u64,
+    start: Option<CurveMeasure>,
+    end: Option<CurveMeasure>,
+) -> Result<Vec<[f64; 3]>, GeometryError> {
+    let param = |m: Option<CurveMeasure>| match m {
+        Some(CurveMeasure::Param(p)) => Some(p),
+        _ => None,
+    };
+    let length = |m: Option<CurveMeasure>| match m {
+        Some(CurveMeasure::Length(l)) => Some(l),
+        _ => None,
+    };
+    let path = directrix_points_3d(step, id, param(start), param(end))?;
+    let (s0, s1) = (length(start), length(end));
+    if s0.is_none() && s1.is_none() {
+        return Ok(path);
+    }
+    // Cumulative arc length of the sampled run.
+    let mut cum = Vec::with_capacity(path.len());
+    let mut total = 0.0;
+    cum.push(0.0);
+    for w in path.windows(2) {
+        total += dist(w[0], w[1]);
+        cum.push(total);
+    }
+    let s0 = s0.unwrap_or(0.0).clamp(0.0, total);
+    let s1 = s1.unwrap_or(total).clamp(0.0, total);
+    if s1 <= s0 {
+        return Err(GeometryError::BadProfile);
+    }
+    let point_at = |s: f64| -> [f64; 3] {
+        let i = cum.partition_point(|&c| c < s).clamp(1, path.len() - 1);
+        let (a, b) = (path[i - 1], path[i]);
+        let seg = cum[i] - cum[i - 1];
+        let t = if seg > 0.0 {
+            (s - cum[i - 1]) / seg
+        } else {
+            0.0
+        };
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
+    let mut out = vec![point_at(s0)];
+    for (i, &c) in cum.iter().enumerate() {
+        if c > s0 && c < s1 {
+            push_point_3d(&mut out, path[i]);
+        }
+    }
+    push_point_3d(&mut out, point_at(s1));
+    Ok(out)
+}
+
+fn dist(a: [f64; 3], b: [f64; 3]) -> f64 {
+    ((a[0] - b[0]).powi(2) + (a[1] - b[1]).powi(2) + (a[2] - b[2]).powi(2)).sqrt()
+}
+
+/// Cap on `directrix points × profile points` for a directrix sweep
+/// (a hostile B-spline directrix times a dense composite profile).
+const MAX_SWEEP_SECTION_POINTS: usize = 4_000_000;
+
+/// How the profile +x axis is chosen along a directrix sweep.
+enum SweepReference<'a> {
+    Fixed([f64; 3]),
+    Surface(&'a surfaces::ElementarySurface),
+}
+
+fn directrix_swept_area_solid(
+    step: &StepFile,
+    keyword: &str,
+    args: &[Value],
+) -> Result<TriMesh, GeometryError> {
+    // SweptArea (0).
+    let profile_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadProfile)?;
+    let areas = profile_areas(step, profile_id)?;
+    // Directrix (2), StartParam (3), EndParam (4).
+    let directrix_id = args
+        .get(2)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let start = curve_measure(args.get(3))?;
+    let end = curve_measure(args.get(4))?;
+    let mut path = directrix_points_measured(step, directrix_id, start, end)?;
+    let same_point = |a: [f64; 3], b: [f64; 3]| {
+        let scale = a.iter().chain(b.iter()).fold(1.0f64, |m, c| m.max(c.abs()));
+        (a[0] - b[0]).abs() <= 1e-9 * scale
+            && (a[1] - b[1]).abs() <= 1e-9 * scale
+            && (a[2] - b[2]).abs() <= 1e-9 * scale
+    };
+    path.dedup_by(|a, b| same_point(*a, *b));
+    let closed = path.len() > 2 && same_point(path[0], path[path.len() - 1]);
+    if closed {
+        path.pop();
+    }
+    if path.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    // The reference (5): a direction or a surface.
+    let surface;
+    let reference = if keyword == "IFCSURFACECURVESWEPTAREASOLID" {
+        let sid = args
+            .get(5)
+            .and_then(Value::as_reference)
+            .ok_or(GeometryError::BadCoordinates)?;
+        surface = surfaces::ElementarySurface::from_id(step, sid)?;
+        SweepReference::Surface(&surface)
+    } else {
+        let d = direction(step, args.get(5))?
+            .and_then(normalise)
+            .ok_or(GeometryError::BadCoordinates)?;
+        SweepReference::Fixed(d)
+    };
+
+    let n_path = path.len();
+    let n_seg = if closed { n_path } else { n_path - 1 };
+    let mut seg_dirs: Vec<[f64; 3]> = Vec::with_capacity(n_seg);
+    for i in 0..n_seg {
+        let a = path[i];
+        let b = path[(i + 1) % n_path];
+        seg_dirs.push(
+            normalise([b[0] - a[0], b[1] - a[1], b[2] - a[2]]).ok_or(GeometryError::BadProfile)?,
+        );
+    }
+
+    let section_points: usize = areas.iter().map(ProfileArea::point_count).sum();
+    if section_points.saturating_mul(n_path) > MAX_SWEEP_SECTION_POINTS {
+        return Err(GeometryError::BadProfile);
+    }
+
+    // Per path point: the outgoing segment direction (the frame's z),
+    // the bisector plane normal, and the profile x / y axes.
+    struct Section {
+        centre: [f64; 3],
+        d_out: [f64; 3],
+        mitre: [f64; 3],
+        x: [f64; 3],
+        y: [f64; 3],
+    }
+    let mut sections: Vec<Section> = Vec::with_capacity(n_path);
+    for i in 0..n_path {
+        let (d_in, d_out) = if closed {
+            (seg_dirs[(i + n_seg - 1) % n_seg], seg_dirs[i % n_seg])
+        } else if i == 0 {
+            (seg_dirs[0], seg_dirs[0])
+        } else if i == n_path - 1 {
+            (seg_dirs[n_seg - 1], seg_dirs[n_seg - 1])
+        } else {
+            (seg_dirs[i - 1], seg_dirs[i])
+        };
+        let mitre = normalise([d_in[0] + d_out[0], d_in[1] + d_out[1], d_in[2] + d_out[2]])
+            .ok_or(GeometryError::BadProfile)?; // a 180° fold has no mitre plane
+        if dot_raw(mitre, d_out) <= 1e-9 {
+            return Err(GeometryError::BadProfile);
+        }
+        // Reference direction at this point, projected ⟂ d_out.
+        let r = match &reference {
+            SweepReference::Fixed(d) => *d,
+            SweepReference::Surface(s) => s.normal_at(path[i]).ok_or(GeometryError::BadProfile)?,
+        };
+        let rd = dot_raw(r, d_out);
+        let x = normalise([
+            r[0] - rd * d_out[0],
+            r[1] - rd * d_out[1],
+            r[2] - rd * d_out[2],
+        ])
+        .ok_or(GeometryError::BadProfile)?; // reference parallel to the tangent
+        let y = cross_raw(d_out, x);
+        sections.push(Section {
+            centre: path[i],
+            d_out,
+            mitre,
+            x,
+            y,
+        });
+    }
+
+    // Emit one closed sweep per profile area (composite profiles are the
+    // union of their components), merged.
+    let mut mesh = TriMesh::default();
+    for area in &areas {
+        let n = area.point_count();
+        let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n * n_path);
+        for s in &sections {
+            for ring in area.rings() {
+                for &[px, py] in ring {
+                    // Profile point in the plane ⟂ d_out …
+                    let w = [
+                        px * s.x[0] + py * s.y[0],
+                        px * s.x[1] + py * s.y[1],
+                        px * s.x[2] + py * s.y[2],
+                    ];
+                    // … projected onto the mitre plane along d_out.
+                    let k = -dot_raw(w, s.mitre) / dot_raw(s.d_out, s.mitre);
+                    positions.push([
+                        s.centre[0] + w[0] + k * s.d_out[0],
+                        s.centre[1] + w[1] + k * s.d_out[1],
+                        s.centre[2] + w[2] + k * s.d_out[2],
+                    ]);
+                }
+            }
+        }
+        let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(n * n_seg * 2);
+        for si in 0..n_seg {
+            let a = (si * n) as u32;
+            let b = (((si + 1) % n_path) * n) as u32;
+            let mut offset = 0u32;
+            for (ri, ring) in area.rings().enumerate() {
+                let k = ring.len();
+                for i in 0..k {
+                    let i_next = offset + ((i + 1) % k) as u32;
+                    let i = offset + i as u32;
+                    if ri == 0 {
+                        triangles.push([a + i, a + i_next, b + i_next]);
+                        triangles.push([a + i, b + i_next, b + i]);
+                    } else {
+                        triangles.push([a + i_next, a + i, b + i]);
+                        triangles.push([a + i_next, b + i, b + i_next]);
+                    }
+                }
+                offset += k as u32;
+            }
+        }
+        if !closed {
+            let cap = triangulate_profile(area)?;
+            let last = ((n_path - 1) * n) as u32;
+            for &[a, b, c] in &cap {
+                triangles.push([a, c, b]);
+                triangles.push([last + a, last + b, last + c]);
+            }
+        }
+        append_mesh(
+            &mut mesh,
+            TriMesh {
+                positions,
+                triangles,
+            },
+        );
+    }
+
+    // Position (1): re-places the whole solid.
+    if let Some(pos_id) = args.get(1).and_then(Value::as_reference) {
+        let xform = axis2_placement_3d(step, pos_id)?;
+        mesh.transform(&xform);
+    }
+    Ok(mesh)
 }
 
 // =====================================================================
@@ -5282,6 +5621,247 @@ mod tests {
         out
     }
 
+    /// Axis-aligned bounding box of a mesh.
+    fn bbox(m: &TriMesh) -> ([f64; 3], [f64; 3]) {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for p in &m.positions {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        (lo, hi)
+    }
+
+    fn assert_bbox(m: &TriMesh, lo: [f64; 3], hi: [f64; 3]) {
+        assert_bbox_tol(m, lo, hi, 1e-9);
+    }
+
+    /// Bounding-box pin with a tolerance — a polyline-sampled arc
+    /// directrix has its end sections ⟂ the end chords (not the exact
+    /// tangents) and mitred corners that overshoot the arc slightly.
+    fn assert_bbox_tol(m: &TriMesh, lo: [f64; 3], hi: [f64; 3], tol: f64) {
+        let (l, h) = bbox(m);
+        for k in 0..3 {
+            assert!((l[k] - lo[k]).abs() < tol, "min[{k}] {l:?} vs {lo:?}");
+            assert!((h[k] - hi[k]).abs() < tol, "max[{k}] {h:?} vs {hi:?}");
+        }
+    }
+
+    /// Every mesh edge is shared by exactly two triangles with opposite
+    /// direction (a closed, consistently oriented 2-manifold).
+    fn assert_watertight(m: &TriMesh) {
+        let mut edges: std::collections::HashMap<(u32, u32), i32> =
+            std::collections::HashMap::new();
+        for t in &m.triangles {
+            for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+                let key = if a < b { (a, b) } else { (b, a) };
+                *edges.entry(key).or_insert(0) += if a < b { 1 } else { -1 };
+            }
+        }
+        for (e, n) in &edges {
+            assert_eq!(*n, 0, "edge {e:?} is not paired with an opposite twin");
+        }
+    }
+
+    /// A 4 × 2 rectangle profile plus the X-direction, Y/Z references.
+    const RECT_AND_DIRS: &str = "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,2.);\n\
+        #2=IFCDIRECTION((0.,0.,1.));\n#3=IFCDIRECTION((0.,1.,0.));\n\
+        #4=IFCCARTESIANPOINT((0.,0.,0.));\n#5=IFCCARTESIANPOINT((5.,0.,0.));\n\
+        #6=IFCPOLYLINE((#4,#5));\n";
+
+    #[test]
+    fn fixed_reference_sweep_along_a_line_is_a_prism_with_the_reference_as_profile_x() {
+        // Profile +x follows the FixedReference (⟂ the tangent), +y is
+        // tangent × x: the 4-wide profile axis lands along the
+        // reference, the 2-high one along the third axis.
+        let f = parse(&format!(
+            "{RECT_AND_DIRS}\
+             #10=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,$,$,#2);\n\
+             #11=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,$,$,#3);\n\
+             #12=IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID(#1,$,#6,$,$,#2);"
+        ));
+        let z_ref = tessellate_item(&f, 10).unwrap();
+        assert_bbox(&z_ref, [0.0, -1.0, -2.0], [5.0, 1.0, 2.0]);
+        assert!((z_ref.signed_volume() - 40.0).abs() < 1e-9);
+        assert_watertight(&z_ref);
+        let y_ref = tessellate_item(&f, 11).unwrap();
+        assert_bbox(&y_ref, [0.0, -2.0, -1.0], [5.0, 2.0, 1.0]);
+        assert!((y_ref.signed_volume() - 40.0).abs() < 1e-9);
+        // The 4.3 directrix-derived subtype reads the same attributes.
+        assert_eq!(tessellate_item(&f, 12).unwrap(), z_ref);
+    }
+
+    #[test]
+    fn fixed_reference_sweep_mitres_polyline_corners_exactly() {
+        // An L-shaped path: two 5-long legs meeting at a right angle,
+        // reference +Z (⟂ the bend plane). The mitred prism volume is
+        // exactly area × path length, and the mesh is watertight.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n#5=IFCCARTESIANPOINT((5.,0.,0.));\n\
+             #6=IFCCARTESIANPOINT((5.,5.,0.));\n\
+             #7=IFCPOLYLINE((#4,#5,#6));\n\
+             #10=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#7,$,$,#2);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert!(
+            (m.signed_volume() - 40.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert_bbox(&m, [0.0, -1.0, -1.0], [6.0, 5.0, 1.0]);
+        assert_watertight(&m);
+    }
+
+    #[test]
+    fn fixed_reference_sweep_along_an_arc_follows_pappus() {
+        // A quarter-circle directrix of radius 10 with a centred 4 × 2
+        // profile: V = A · R · θ (the centroid rides the directrix);
+        // the inscribed polyline path is 0.07 % short.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCCIRCLE(#5,10.);\n\
+             #7=IFCCARTESIANPOINT((10.,0.,0.));\n#8=IFCCARTESIANPOINT((0.,10.,0.));\n\
+             #9=IFCTRIMMEDCURVE(#6,(#7),(#8),.T.,.CARTESIAN.);\n\
+             #10=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#9,$,$,#2);\n\
+             #11=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,IFCPARAMETERVALUE(0.),IFCPARAMETERVALUE(1.5707963267948966),#2);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        let exact = 8.0 * 10.0 * core::f64::consts::FRAC_PI_2;
+        let v = m.signed_volume();
+        assert!((v - exact).abs() / exact < 2e-3, "{v} vs {exact}");
+        assert_watertight(&m);
+        // Reference +Z → the 4-wide axis is vertical, the 2-high one
+        // radial: r ∈ [9, 11], z ∈ [−2, 2].
+        assert_bbox_tol(&m, [0.0, 0.0, -2.0], [11.0, 11.0, 2.0], 0.07);
+        for p in &m.positions {
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!(r > 9.0 - 0.01 && r < 11.0 + 0.01, "{p:?}");
+        }
+        // The same arc expressed as a full circle plus parameter trims.
+        let trimmed = tessellate_item(&f, 11).unwrap();
+        assert!((trimmed.signed_volume() - v).abs() < 1e-6);
+    }
+
+    #[test]
+    fn fixed_reference_sweep_around_a_closed_circle_is_a_ring() {
+        // A full-circle directrix wraps seamlessly: no caps, and the
+        // volume is A · 2πR (polygonal path).
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,2.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCCIRCLE(#5,10.);\n\
+             #10=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,$,$,#2);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_eq!(m.vertex_count(), 48 * 4);
+        assert_eq!(m.triangle_count(), 48 * 4 * 2);
+        assert_watertight(&m);
+        let n = CIRCLE_SEGMENTS as f64;
+        let path = 2.0 * n * 10.0 * (core::f64::consts::PI / n).sin();
+        assert!((m.signed_volume() - 8.0 * path).abs() < 1e-6);
+    }
+
+    #[test]
+    fn surface_curve_sweep_takes_the_reference_surface_normal() {
+        // Along a straight line on a plane whose normal is +Z the
+        // surface-curve sweep equals the fixed-reference sweep with +Z;
+        // around a circle on a coaxial cylinder the normal is radial,
+        // so the 4-wide profile axis goes radial (r ∈ [6, 14]) and the
+        // 2-high one vertical.
+        let f = parse(&format!(
+            "{RECT_AND_DIRS}\
+             #7=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #8=IFCPLANE(#7);\n\
+             #9=IFCCYLINDRICALSURFACE(#7,10.);\n\
+             #10=IFCSURFACECURVESWEPTAREASOLID(#1,$,#6,$,$,#8);\n\
+             #11=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,$,$,#2);\n\
+             #12=IFCCIRCLE(#7,10.);\n\
+             #13=IFCSURFACECURVESWEPTAREASOLID(#1,$,#12,$,$,#9);\n\
+             #14=IFCSPHERICALSURFACE(#7,10.);\n\
+             #15=IFCSURFACECURVESWEPTAREASOLID(#1,$,#12,$,$,#14);\n\
+             #16=IFCTOROIDALSURFACE(#7,7.,3.);\n\
+             #17=IFCSURFACECURVESWEPTAREASOLID(#1,$,#12,$,$,#16);\n\
+             #18=IFCBSPLINESURFACEWITHKNOTS(1,1,((#4,#4),(#4,#4)),.PLANE_SURF.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n\
+             #19=IFCSURFACECURVESWEPTAREASOLID(#1,$,#12,$,$,#18);"
+        ));
+        assert_eq!(
+            tessellate_item(&f, 10).unwrap(),
+            tessellate_item(&f, 11).unwrap()
+        );
+        let ring = tessellate_item(&f, 13).unwrap();
+        assert_bbox_tol(&ring, [-12.0, -12.0, -1.0], [12.0, 12.0, 1.0], 0.01);
+        for p in &ring.positions {
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!(r > 8.0 - 0.01 && r < 12.0 + 0.01, "{p:?}");
+        }
+        assert_watertight(&ring);
+        // On the equator of a sphere / the outer equator of a torus
+        // (major 7 + minor 3 = 10) the normal is the same outward radial.
+        for id in [15, 17] {
+            let other = tessellate_item(&f, id).unwrap();
+            assert_eq!(other.triangles, ring.triangles);
+            for (a, b) in other.positions.iter().zip(&ring.positions) {
+                assert!(dist(*a, *b) < 1e-9, "#{id}: {a:?} vs {b:?}");
+            }
+        }
+        // Other reference surfaces are surfaced by keyword.
+        assert_eq!(
+            tessellate_item(&f, 19).unwrap_err(),
+            GeometryError::Unsupported("IFCBSPLINESURFACEWITHKNOTS".to_string())
+        );
+    }
+
+    #[test]
+    fn directrix_sweep_length_measures_trim_along_the_path() {
+        // IFC 4.3 IfcCurveMeasureSelect: IFCLENGTHMEASURE trims by
+        // distance along the directrix; IFCPARAMETERVALUE on a polyline
+        // has no defined parameterisation and is refused.
+        let f = parse(&format!(
+            "{RECT_AND_DIRS}\
+             #10=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,IFCLENGTHMEASURE(1.),IFCLENGTHMEASURE(3.5),#2);\n\
+             #11=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,IFCPARAMETERVALUE(0.),IFCPARAMETERVALUE(1.),#2);\n\
+             #12=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,IFCLENGTHMEASURE(4.),IFCLENGTHMEASURE(2.),#2);"
+        ));
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_bbox(&m, [1.0, -1.0, -2.0], [3.5, 1.0, 2.0]);
+        assert!((m.signed_volume() - 20.0).abs() < 1e-9);
+        assert!(matches!(
+            tessellate_item(&f, 11).unwrap_err(),
+            GeometryError::Unsupported(k) if k == "IFCPOLYLINE(StartParam/EndParam)"
+        ));
+        assert_eq!(
+            tessellate_item(&f, 12).unwrap_err(),
+            GeometryError::BadProfile
+        );
+    }
+
+    #[test]
+    fn directrix_sweep_rejects_a_reference_along_the_tangent_and_applies_position() {
+        let f = parse(&format!(
+            "{RECT_AND_DIRS}\
+             #7=IFCDIRECTION((1.,0.,0.));\n\
+             #10=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#6,$,$,#7);\n\
+             #8=IFCCARTESIANPOINT((0.,0.,100.));\n\
+             #9=IFCAXIS2PLACEMENT3D(#8,$,$);\n\
+             #11=IFCFIXEDREFERENCESWEPTAREASOLID(#1,#9,#6,$,$,#2);"
+        ));
+        assert_eq!(
+            tessellate_item(&f, 10).unwrap_err(),
+            GeometryError::BadProfile
+        );
+        let m = tessellate_item(&f, 11).unwrap();
+        assert_bbox(&m, [0.0, -1.0, 98.0], [5.0, 1.0, 102.0]);
+    }
+
     #[test]
     fn nurbs_circle_profile_extrudes_like_a_circle_profile() {
         // The rational quadratic circle meshes at the IfcCircle density
@@ -5520,12 +6100,12 @@ mod tests {
 
     #[test]
     fn shape_representation_skips_unsupported_items() {
-        // A representation mixing a (still unsupported) surface-curve
-        // swept solid with a triangulated body still yields the body mesh.
+        // A representation mixing a (still unsupported) sectioned spine
+        // with a triangulated body still yields the body mesh.
         let f = parse(
             "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
              #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
-             #3=IFCSURFACECURVESWEPTAREASOLID(#9,#9,#9,#9,#9,#9);\n\
+             #3=IFCSECTIONEDSPINE(#9,(#9),(#9));\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#3,#2));",
         );
         let m = mesh_from_shape_representation(&f, 4).unwrap();
@@ -5535,13 +6115,13 @@ mod tests {
     #[test]
     fn all_unsupported_surfaces_keyword() {
         let f = parse(
-            "#3=IFCSURFACECURVESWEPTAREASOLID(#9,#9,#9,#9,#9,#9);\n\
+            "#3=IFCSECTIONEDSPINE(#9,(#9),(#9));\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','SweptSolid',(#3));",
         );
         let err = mesh_from_shape_representation(&f, 4).unwrap_err();
         assert_eq!(
             err,
-            GeometryError::Unsupported("IFCSURFACECURVESWEPTAREASOLID".to_string())
+            GeometryError::Unsupported("IFCSECTIONEDSPINE".to_string())
         );
     }
 

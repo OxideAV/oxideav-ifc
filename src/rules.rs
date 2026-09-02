@@ -183,7 +183,8 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
         | "IFCREVOLVEDAREASOLID"
         | "IFCREVOLVEDAREASOLIDTAPERED"
         | "IFCSURFACECURVESWEPTAREASOLID"
-        | "IFCFIXEDREFERENCESWEPTAREASOLID" => {
+        | "IFCFIXEDREFERENCESWEPTAREASOLID"
+        | "IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID" => {
             // IfcSweptAreaSolid.SweptAreaType: SweptArea.ProfileType = AREA.
             let swept = a.first().and_then(Value::as_reference);
             check(
@@ -231,6 +232,23 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                             .unwrap_or(1.0)
                     });
                     check("AxisDirectionInXY", dir_z.map(|z| z == 0.0));
+                }
+                "IFCSURFACECURVESWEPTAREASOLID"
+                | "IFCFIXEDREFERENCESWEPTAREASOLID"
+                | "IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID" => {
+                    // IfcDirectrixCurveSweptAreaSolid.DirectrixBounded:
+                    // both StartParam / EndParam (indices 3, 4), or a
+                    // conic / bounded Directrix (index 2).
+                    let directrix = a
+                        .get(2)
+                        .and_then(Value::as_reference)
+                        .and_then(|d| step.get(d));
+                    let bounded = a.get(3).is_some_and(|v| !v.is_unset())
+                        && a.get(4).is_some_and(|v| !v.is_unset());
+                    check(
+                        "DirectrixBounded",
+                        directrix.map(|d| bounded || is_conic_or_bounded(&d.keyword)),
+                    );
                 }
                 _ => {}
             }
@@ -544,7 +562,12 @@ mod tests {
              #32=IFCDIRECTION((0.,1.,0.));\n\
              #33=IFCAXIS1PLACEMENT(#34,$);\n#34=IFCCARTESIANPOINT((0.,0.,5.));\n\
              #40=IFCREVOLVEDAREASOLID(#1,$,#30,1.);\n\
-             #41=IFCREVOLVEDAREASOLID(#1,$,#33,1.);",
+             #41=IFCREVOLVEDAREASOLID(#1,$,#33,1.);\n\
+             #50=IFCCARTESIANPOINT((0.,0.,0.));\n#51=IFCLINE(#50,#52);\n\
+             #52=IFCVECTOR(#3,1.);\n#53=IFCPOLYLINE((#50,#50));\n\
+             #60=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#51,$,$,#4);\n\
+             #61=IFCFIXEDREFERENCESWEPTAREASOLID(#1,$,#51,IFCLENGTHMEASURE(0.),IFCLENGTHMEASURE(2.),#4);\n\
+             #62=IFCSURFACECURVESWEPTAREASOLID(#2,$,#53,$,$,#4);",
         );
         assert!(rules(&f, 10).is_empty());
         assert_eq!(rules(&f, 11), ["SweptAreaType", "ValidExtrusionDirection"]);
@@ -554,6 +577,9 @@ mod tests {
         assert_eq!(rules(&f, 15), ["CorrectProfileAssignment"]);
         assert!(rules(&f, 40).is_empty());
         assert_eq!(rules(&f, 41), ["AxisStartInXY", "AxisDirectionInXY"]);
+        assert_eq!(rules(&f, 60), ["DirectrixBounded"]);
+        assert!(rules(&f, 61).is_empty());
+        assert_eq!(rules(&f, 62), ["SweptAreaType"]);
     }
 
     #[test]
