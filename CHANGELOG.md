@@ -4,6 +4,16 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- Phase 3: B-spline curves — `IfcBSplineCurveWithKnots` /
+  `IfcRationalBSplineCurveWithKnots` (and the IFC 2x3 `IfcBezierCurve` /
+  `IfcRationalBezierCurve`) evaluate by de Boor over the expanded knot
+  vector as 2-D profile boundaries and 3-D directrices; swept-disk
+  `StartParam` / `EndParam` trim B-spline directrices in their own knot
+  parameter; WHERE rules `ConsistentBSpline`, `CorrespondingKnotLists`,
+  `SameNumOfWeightsAndPoints`, `WeightsGreaterZero`.
+
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 
 ### Other

@@ -32,6 +32,14 @@ fn num(args: &[Value], index: usize) -> Option<f64> {
     }
 }
 
+/// Integer attribute value, unwrapping a typed wrapper.
+fn int(v: &Value) -> Option<i64> {
+    match v {
+        Value::Typed { args, .. } => args.first().and_then(Value::as_integer),
+        other => other.as_integer(),
+    }
+}
+
 /// Run one rule body in its own `?` scope.
 fn evaluate(body: impl FnOnce() -> Option<bool>) -> Option<bool> {
     body()
@@ -271,6 +279,55 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 "DirectrixBounded",
                 directrix.map(|d| bounded || is_conic_or_bounded(&d.keyword)),
             );
+        }
+        // ---- B-spline curves ----
+        "IFCBSPLINECURVEWITHKNOTS" | "IFCRATIONALBSPLINECURVEWITHKNOTS" => {
+            // (Degree, ControlPointsList, CurveForm, ClosedCurve,
+            // SelfIntersect, KnotMultiplicities, Knots, KnotSpec
+            // [, WeightsData]).
+            let degree = a.first().and_then(int);
+            let cp_count = a.get(1).and_then(Value::as_list).map(<[Value]>::len);
+            let mults: Option<Vec<i64>> = a
+                .get(5)
+                .and_then(Value::as_list)
+                .map(|l| l.iter().filter_map(int).collect());
+            let knots: Option<Vec<f64>> = a.get(6).and_then(Value::as_list).map(|l| {
+                l.iter()
+                    .filter_map(|v| num(core::slice::from_ref(v), 0))
+                    .collect()
+            });
+            rule!(
+                "ConsistentBSpline",
+                crate::geometry::bspline::constraints_param_bspline(
+                    degree?,
+                    knots.as_ref()?.len(),
+                    cp_count? as i64 - 1,
+                    mults.as_ref()?,
+                    knots.as_ref()?,
+                )
+            );
+            rule!(
+                "CorrespondingKnotLists",
+                mults.as_ref()?.len() == knots.as_ref()?.len()
+                    && a.get(5).and_then(Value::as_list)?.len() == mults.as_ref()?.len()
+            );
+            if inst.keyword == "IFCRATIONALBSPLINECURVEWITHKNOTS" {
+                let weights: Option<Vec<f64>> = a.get(8).and_then(Value::as_list).map(|l| {
+                    l.iter()
+                        .filter_map(|v| num(core::slice::from_ref(v), 0))
+                        .collect()
+                });
+                rule!(
+                    "SameNumOfWeightsAndPoints",
+                    a.get(8).and_then(Value::as_list)?.len() == cp_count?
+                );
+                // IfcCurveWeightsPositive: every weight > 0.
+                rule!(
+                    "WeightsGreaterZero",
+                    weights.as_ref()?.len() == a.get(8).and_then(Value::as_list)?.len()
+                        && weights.as_ref()?.iter().all(|w| *w > 0.0)
+                );
+            }
         }
         // ---- Georeferencing ----
         "IFCMAPCONVERSION" | "IFCMAPCONVERSIONSCALED" => {
@@ -514,6 +571,30 @@ mod tests {
         assert_eq!(rules(&f, 11), ["InnerRadiusSize"]);
         assert_eq!(rules(&f, 12), ["DirectrixBounded"]);
         assert!(rules(&f, 13).is_empty());
+    }
+
+    #[test]
+    fn bspline_curve_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n#2=IFCCARTESIANPOINT((1.,0.));\n\
+             #3=IFCCARTESIANPOINT((1.,1.));\n\
+             #10=IFCBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.);\n\
+             #11=IFCBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,2),(0.,1.),.UNSPECIFIED.);\n\
+             #12=IFCBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.,2.),.UNSPECIFIED.);\n\
+             #13=IFCRATIONALBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.,(1.,0.5,1.));\n\
+             #14=IFCRATIONALBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.,(1.,-0.5));",
+        );
+        assert!(rules(&f, 10).is_empty());
+        assert_eq!(rules(&f, 11), ["ConsistentBSpline"]);
+        assert_eq!(
+            rules(&f, 12),
+            ["ConsistentBSpline", "CorrespondingKnotLists"]
+        );
+        assert!(rules(&f, 13).is_empty());
+        assert_eq!(
+            rules(&f, 14),
+            ["SameNumOfWeightsAndPoints", "WeightsGreaterZero"]
+        );
     }
 
     #[test]

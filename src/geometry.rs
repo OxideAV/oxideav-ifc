@@ -105,8 +105,11 @@
 //! circle / ellipse / line basis (Cartesian and parameter trims,
 //! `SenseAgreement`, `MasterRepresentation`, model plane-angle unit
 //! applied to parameter trims), `IfcArcIndex` three-point arc segments
-//! in `IfcIndexedPolyCurve`, full `IfcEllipse` boundaries, and
-//! `IfcCompositeCurve` chains with per-segment `SameSense`.
+//! in `IfcIndexedPolyCurve`, full `IfcEllipse` boundaries,
+//! `IfcCompositeCurve` chains with per-segment `SameSense`, and the
+//! B-spline family (`IfcBSplineCurveWithKnots`, its rational subtype,
+//! the IFC 2x3 Bézier curves — see the `bspline` submodule) in both the
+//! 2-D profile plane and as 3-D directrices.
 //!
 //! **`IfcSweptDiskSolid`** (and its `…Polygonal` subtype) sweeps a disk
 //! or annulus along a 3-D directrix (polyline, indexed poly-curve with
@@ -147,6 +150,7 @@
 use crate::parser::StepFile;
 use crate::value::Value;
 
+pub(crate) mod bspline;
 mod profiles;
 
 /// A flat, indexed triangle mesh in the local coordinate space of the
@@ -3061,9 +3065,27 @@ fn directrix_points_3d(
             .map(|i| conic.point_at(u1 + sweep * (i as f64) / (segments as f64)))
             .collect());
     }
+    if matches!(
+        inst.keyword.as_str(),
+        "IFCBSPLINECURVEWITHKNOTS"
+            | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+            | "IFCBEZIERCURVE"
+            | "IFCRATIONALBEZIERCURVE"
+    ) {
+        // A B-spline directrix carries its own knot parameterisation:
+        // the trim parameters select a sub-range of the domain.
+        let curve = bspline::BSplineCurve::from_instance(step, &inst.keyword, &inst.args)?;
+        let (d0, d1) = curve.domain();
+        let (t0, t1) = (start.unwrap_or(d0), end.unwrap_or(d1));
+        let mut out: Vec<[f64; 3]> = Vec::new();
+        for p in curve.sample_range(t0, t1) {
+            push_point_3d(&mut out, p);
+        }
+        return Ok(out);
+    }
     if start.is_some() || end.is_some() {
-        // Parameter-trimming a non-conic directrix needs that curve's
-        // own parameterisation — not modelled in this slice.
+        // Parameter-trimming any other non-conic directrix needs that
+        // curve's own parameterisation — not modelled in this slice.
         return Err(GeometryError::Unsupported(format!(
             "{}(StartParam/EndParam)",
             inst.keyword
@@ -3167,6 +3189,17 @@ fn curve_points_3d(step: &StepFile, id: u64, depth: usize) -> Result<Vec<[f64; 3
                 .collect())
         }
         "IFCTRIMMEDCURVE" => trimmed_curve_points_3d(step, &inst.args),
+        "IFCBSPLINECURVEWITHKNOTS"
+        | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+        | "IFCBEZIERCURVE"
+        | "IFCRATIONALBEZIERCURVE" => {
+            let curve = bspline::BSplineCurve::from_instance(step, &inst.keyword, &inst.args)?;
+            let mut out: Vec<[f64; 3]> = Vec::new();
+            for p in curve.sample() {
+                push_point_3d(&mut out, p);
+            }
+            Ok(out)
+        }
         "IFCCOMPOSITECURVE" => {
             let segments = inst
                 .args
@@ -3802,6 +3835,19 @@ fn curve_points_2d_depth(
         }
         "IFCTRIMMEDCURVE" => trimmed_curve_points_2d(step, &inst.args),
         "IFCCOMPOSITECURVE" => composite_curve_points_2d(step, &inst.args, depth),
+        // B-spline family (IFC4 …WithKnots, IFC 2x3 Bézier): evaluated
+        // by de Boor over the expanded knot vector, sampled per span.
+        "IFCBSPLINECURVEWITHKNOTS"
+        | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+        | "IFCBEZIERCURVE"
+        | "IFCRATIONALBEZIERCURVE" => {
+            let curve = bspline::BSplineCurve::from_instance(step, &inst.keyword, &inst.args)?;
+            let mut out: Vec<[f64; 2]> = Vec::new();
+            for p in curve.sample() {
+                push_point_2d(&mut out, [p[0], p[1]]);
+            }
+            Ok(out)
+        }
         "IFCINDEXEDPOLYCURVE" => {
             // IfcIndexedPolyCurve(Points : IfcCartesianPointList,
             // Segments : OPTIONAL LIST OF IfcSegmentIndexSelect,
@@ -5202,6 +5248,170 @@ mod tests {
 
     fn parse(data: &str) -> StepFile {
         parse_step(wrap(data).as_bytes()).expect("parse failed")
+    }
+
+    /// Nine-control-point rational quadratic B-spline: a full circle of
+    /// radius `r` as four exact quarter arcs (weights `1, √2/2` alternating,
+    /// knots `0..4` with end multiplicity 3, interior 2).
+    fn nurbs_circle(first_id: u64, r: f64) -> String {
+        let w = core::f64::consts::FRAC_1_SQRT_2;
+        let pts = [
+            (r, 0.0),
+            (r, r),
+            (0.0, r),
+            (-r, r),
+            (-r, 0.0),
+            (-r, -r),
+            (0.0, -r),
+            (r, -r),
+            (r, 0.0),
+        ];
+        let mut out = String::new();
+        for (i, (x, y)) in pts.iter().enumerate() {
+            out.push_str(&format!(
+                "#{}=IFCCARTESIANPOINT(({x:?},{y:?}));\n",
+                first_id + i as u64
+            ));
+        }
+        let refs: Vec<String> = (0..9).map(|i| format!("#{}", first_id + i)).collect();
+        out.push_str(&format!(
+            "#{}=IFCRATIONALBSPLINECURVEWITHKNOTS(2,({}),.CIRCULAR_ARC.,.T.,.F.,(3,2,2,2,3),(0.,1.,2.,3.,4.),.UNSPECIFIED.,(1.,{w:?},1.,{w:?},1.,{w:?},1.,{w:?},1.));\n",
+            first_id + 9,
+            refs.join(",")
+        ));
+        out
+    }
+
+    #[test]
+    fn nurbs_circle_profile_extrudes_like_a_circle_profile() {
+        // The rational quadratic circle meshes at the IfcCircle density
+        // (48 segments) and its extrusion volume matches π r² h to the
+        // polygon-inscription error.
+        let src = format!(
+            "{}#20=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#10);\n\
+             #21=IFCDIRECTION((0.,0.,1.));\n\
+             #22=IFCEXTRUDEDAREASOLID(#20,$,#21,3.);",
+            nurbs_circle(1, 2.0)
+        );
+        let f = parse(&src);
+        let m = tessellate_item(&f, 22).unwrap();
+        assert_eq!(m.vertex_count(), 96, "48-gon ring, top and bottom");
+        for p in &m.positions {
+            let r = (p[0] * p[0] + p[1] * p[1]).sqrt();
+            assert!((r - 2.0).abs() < 1e-9, "sample off the circle: {p:?}");
+        }
+        let exact = core::f64::consts::PI * 4.0 * 3.0;
+        let v = m.signed_volume();
+        assert!((v - exact).abs() / exact < 5e-3, "{v} vs {exact}");
+        assert!(v < exact, "inscribed polygon underestimates");
+    }
+
+    #[test]
+    fn bspline_directrix_sweeps_a_disk_with_parameter_trims() {
+        // A degree-1 B-spline directrix is its control polygon: the
+        // swept disk matches the IfcPolyline sweep exactly, and
+        // StartParam / EndParam trim to the curve's own knot domain.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((0.,0.,10.));\n\
+             #3=IFCBSPLINECURVEWITHKNOTS(1,(#1,#2),.POLYLINE_FORM.,.F.,.F.,(2,2),(0.,10.),.UNSPECIFIED.);\n\
+             #4=IFCPOLYLINE((#1,#2));\n\
+             #10=IFCSWEPTDISKSOLID(#3,1.,$,$,$);\n\
+             #11=IFCSWEPTDISKSOLID(#4,1.,$,$,$);\n\
+             #12=IFCSWEPTDISKSOLID(#3,1.,$,2.,7.);",
+        );
+        let a = tessellate_item(&f, 10).unwrap();
+        let b = tessellate_item(&f, 11).unwrap();
+        assert_eq!(a, b);
+        let trimmed = tessellate_item(&f, 12).unwrap();
+        assert!((trimmed.signed_volume() - a.signed_volume() / 2.0).abs() < 1e-9);
+        let zs: Vec<f64> = trimmed.positions.iter().map(|p| p[2]).collect();
+        assert!(zs
+            .iter()
+            .all(|z| (*z - 2.0).abs() < 1e-9 || (*z - 7.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn cubic_bspline_directrix_tube_volume_tracks_arc_length() {
+        // A cubic through a gentle S: the tube volume ≈ π r² × path
+        // length (straight-segment sweep of a slowly bending path).
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((20.,5.,0.));\n#4=IFCCARTESIANPOINT((30.,5.,0.));\n\
+             #5=IFCBSPLINECURVEWITHKNOTS(3,(#1,#2,#3,#4),.UNSPECIFIED.,.F.,.F.,(4,4),(0.,1.),.UNSPECIFIED.);\n\
+             #10=IFCSWEPTDISKSOLID(#5,0.5,$,$,$);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        // Path length from the sampled directrix.
+        let pts = curve_points_3d(&f, 5, 0).unwrap();
+        assert!(pts.len() >= 40, "{}", pts.len());
+        let len: f64 = pts
+            .windows(2)
+            .map(|w| {
+                ((w[1][0] - w[0][0]).powi(2)
+                    + (w[1][1] - w[0][1]).powi(2)
+                    + (w[1][2] - w[0][2]).powi(2))
+                .sqrt()
+            })
+            .sum();
+        assert!(len > 30.0 && len < 32.0, "{len}");
+        let n = CIRCLE_SEGMENTS as f64;
+        let disk = 0.5 * n * 0.25 * (2.0 * core::f64::consts::PI / n).sin();
+        let v = m.signed_volume();
+        assert!(
+            (v - disk * len).abs() / (disk * len) < 1e-2,
+            "{v} vs {}",
+            disk * len
+        );
+    }
+
+    #[test]
+    fn ifc2x3_bezier_profile_is_its_control_polygon_at_degree_one() {
+        // IfcBezierCurve (no knot list): degree 1 over four points is
+        // the closed triangle; the extrusion volume is area × depth.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.));\n#2=IFCCARTESIANPOINT((4.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,3.));\n\
+             #4=IFCBEZIERCURVE(1,(#1,#2,#3,#1),.POLYLINE_FORM.,.T.,.F.);\n\
+             #5=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#4);\n\
+             #6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,2.);\n\
+             #8=IFCRATIONALBEZIERCURVE(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(1.,2.,1.));\n\
+             #9=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#8);\n\
+             #10=IFCEXTRUDEDAREASOLID(#9,$,#6,2.);",
+        );
+        let m = tessellate_item(&f, 7).unwrap();
+        assert_eq!(m.vertex_count(), 6);
+        assert!((m.signed_volume() - 12.0).abs() < 1e-9);
+        // A rational quadratic Bézier from (0,0) to (0,3) pulled toward
+        // (4,0) stays inside its control triangle: closed by the
+        // extractor it encloses less than the triangle, more than
+        // nothing, and every sample lies in the triangle's bounding box.
+        let curved = tessellate_item(&f, 10).unwrap();
+        let v = curved.signed_volume();
+        assert!(v > 0.0 && v < 12.0, "{v}");
+        assert!(curved
+            .positions
+            .iter()
+            .all(|p| p[0] >= -1e-12 && p[0] <= 4.0 && p[1] >= -1e-12 && p[1] <= 3.0));
+    }
+
+    #[test]
+    fn malformed_bspline_is_rejected() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((1.,1.,0.));\n\
+             #4=IFCBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,2),(0.,1.),.UNSPECIFIED.);\n\
+             #5=IFCBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(1.,1.),.UNSPECIFIED.);\n\
+             #6=IFCRATIONALBSPLINECURVEWITHKNOTS(2,(#1,#2,#3),.UNSPECIFIED.,.F.,.F.,(3,3),(0.,1.),.UNSPECIFIED.,(1.,0.,1.));\n\
+             #7=IFCBEZIERCURVE(2,(#1,#2),.UNSPECIFIED.,.F.,.F.);",
+        );
+        for id in [4, 5, 6, 7] {
+            assert_eq!(
+                curve_points_3d(&f, id, 0).unwrap_err(),
+                GeometryError::BadProfile,
+                "#{id}"
+            );
+        }
     }
 
     #[test]

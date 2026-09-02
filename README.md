@@ -219,14 +219,24 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `MasterRepresentation` picks the authoritative dual-trim form,
   `SenseAgreement` the traversal direction), `IfcIndexedPolyCurve`
   with `IfcLineIndex` runs and three-point `IfcArcIndex` arcs
-  (circumscribed circle, mid-point disambiguated), and
-  `IfcCompositeCurve` chains with per-segment `SameSense` reversal.
+  (circumscribed circle, mid-point disambiguated),
+  `IfcCompositeCurve` chains with per-segment `SameSense` reversal, and
+  the **B-spline family** — `IfcBSplineCurveWithKnots` /
+  `IfcRationalBSplineCurveWithKnots` (IFC4+) and the IFC 2x3
+  `IfcBezierCurve` / `IfcRationalBezierCurve` — evaluated by de Boor's
+  recurrence in homogeneous coordinates over the expanded
+  `Knots` × `KnotMultiplicities` vector (the `IfcConstraintsParamBSpline`
+  invariants enforced, Bézier knots synthesised), sampled per knot span
+  at the circle density and capped in total (a rational quadratic
+  circle meshes exactly on the circle at 48 segments).
 * **`IfcSweptDiskSolid`** / `…Polygonal` sweeps a disk or annulus along
   a 3-D directrix (polyline, indexed poly-curve incl. 3-D arcs,
-  trimmed / full circle, composite): parallel-transported ring frames
-  with **exact elliptical mitre junctions** (a mitred polyline tube is
-  exactly area × length), `StartParam`/`EndParam` on conic directrices,
-  closed-path wrap, disk / annulus end caps, reversed inner walls.
+  trimmed / full circle, composite, B-spline): parallel-transported
+  ring frames with **exact elliptical mitre junctions** (a mitred
+  polyline tube is exactly area × length), `StartParam`/`EndParam` on
+  conic directrices (the angle) and B-spline directrices (their own
+  knot parameter), closed-path wrap, disk / annulus end caps, reversed
+  inner walls.
 * **`IfcSectionedSolidHorizontal`** (IFC 4.3 alignment solid) lofts
   profiles at `IfcAxis2PlacementLinear` distance-along stations
   (lateral / vertical offsets honoured, longitudinal rejected per the
@@ -317,8 +327,10 @@ of one instance (`None` when the entity has no transcribed rules),
 `model_where_rule_violations(step)` sweeps the model: the named /
 hollow / composite profiles, the swept area solids (`SweptAreaType`,
 `ValidExtrusionDirection`, the revolution-axis rules, tapered
-`CorrectProfileAssignment`), swept disk solids, `IfcMapConversion`
-and `IfcRigidOperation`.
+`CorrectProfileAssignment`), swept disk solids, B-spline curves
+(`ConsistentBSpline` via the transcribed `IfcConstraintsParamBSpline`,
+`CorrespondingKnotLists`, rational `SameNumOfWeightsAndPoints` /
+`WeightsGreaterZero`), `IfcMapConversion` and `IfcRigidOperation`.
 
 Still later in Phase 3: the directrix-swept area solids
 (`IfcSurfaceCurveSweptAreaSolid` / `IfcFixedReferenceSweptAreaSolid` —
