@@ -52,6 +52,10 @@ All notable changes to this project will be documented in this file.
   plane / cylinder / sphere / torus / B-spline bases (angle-unit-scaled
   parameters, `Usense` / `Vsense` wrap direction) + the trimmed-surface
   WHERE rules.
+- WHERE rules for `IfcAdvancedBrep(WithVoids)`, `IfcAdvancedFace`,
+  `IfcEdgeLoop`, `IfcOrientedEdge`, `IfcToroidalSurface`, the swept
+  surfaces and the B-spline surfaces (`IfcConstraintsParamBSpline` per
+  direction, weight rules).
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

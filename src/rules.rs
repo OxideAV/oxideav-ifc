@@ -326,6 +326,227 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 directrix.map(|d| bounded || is_conic_or_bounded(&d.keyword)),
             );
         }
+        // ---- Advanced Breps, faces, edges ----
+        "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => {
+            // (Outer[, Voids]); every face of every shell an IfcAdvancedFace.
+            let shell_faces_advanced = |shell: Option<u64>| -> Option<bool> {
+                let faces = step.get(shell?)?.args.first()?.as_list()?;
+                Some(
+                    faces
+                        .iter()
+                        .all(|f| keyword_of(step, f.as_reference()) == Some("IFCADVANCEDFACE")),
+                )
+            };
+            rule!(
+                "HasAdvancedFaces",
+                shell_faces_advanced(a.first().and_then(Value::as_reference))?
+            );
+            if inst.keyword == "IFCADVANCEDBREPWITHVOIDS" {
+                rule!(
+                    "VoidsHaveAdvancedFaces",
+                    a.get(1)
+                        .and_then(Value::as_list)?
+                        .iter()
+                        .all(|v| shell_faces_advanced(v.as_reference()) == Some(true))
+                );
+            }
+        }
+        "IFCADVANCEDFACE" => {
+            // (Bounds, FaceSurface, SameSense).
+            let bounds = a.first().and_then(Value::as_list);
+            // Every IfcEdgeLoop bound's oriented edges, as (element keyword,
+            // edge-geometry keyword) pairs.
+            let loop_edges = |only_loops: bool| -> Option<Vec<(Option<&str>, Option<&str>)>> {
+                let mut out = Vec::new();
+                for b in bounds? {
+                    let bound = step.get(b.as_reference()?)?;
+                    let lp = step.get(bound.args.first()?.as_reference()?)?;
+                    if lp.keyword != "IFCEDGELOOP" {
+                        if only_loops {
+                            continue;
+                        }
+                        continue;
+                    }
+                    for oe in lp.args.first()?.as_list()? {
+                        let oe = step.get(oe.as_reference()?)?;
+                        let element = oe.args.get(2).and_then(Value::as_reference);
+                        let el_kw = keyword_of(step, element);
+                        let geom_kw = element
+                            .and_then(|e| step.get(e))
+                            .filter(|e| e.keyword == "IFCEDGECURVE")
+                            .and_then(|e| {
+                                keyword_of(step, e.args.get(2).and_then(Value::as_reference))
+                            });
+                        out.push((el_kw, geom_kw));
+                    }
+                }
+                Some(out)
+            };
+            rule!(
+                "ApplicableEdgeCurves",
+                loop_edges(true)?.iter().all(|(_, g)| {
+                    matches!(
+                        g,
+                        Some(
+                            "IFCLINE"
+                                | "IFCCIRCLE"
+                                | "IFCELLIPSE"
+                                | "IFCPOLYLINE"
+                                | "IFCBSPLINECURVEWITHKNOTS"
+                                | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+                        )
+                    )
+                })
+            );
+            rule!(
+                "ApplicableSurface",
+                matches!(
+                    keyword_of(step, a.get(1).and_then(Value::as_reference)),
+                    Some(
+                        "IFCPLANE"
+                            | "IFCCYLINDRICALSURFACE"
+                            | "IFCSPHERICALSURFACE"
+                            | "IFCTOROIDALSURFACE"
+                            | "IFCSURFACEOFREVOLUTION"
+                            | "IFCSURFACEOFLINEAREXTRUSION"
+                            | "IFCBSPLINESURFACEWITHKNOTS"
+                            | "IFCRATIONALBSPLINESURFACEWITHKNOTS"
+                    )
+                )
+            );
+            rule!(
+                "RequiresEdgeCurve",
+                loop_edges(true)?
+                    .iter()
+                    .all(|(e, _)| *e == Some("IFCEDGECURVE"))
+            );
+        }
+        "IFCEDGELOOP" => {
+            // (EdgeList): IsClosed — first start :=: last end;
+            // IsContinuous (IfcLoopHeadToTail) — each end :=: next start.
+            // Oriented edges derive their ends from EdgeElement +
+            // Orientation.
+            let ends = |oe: &Value| -> Option<(u64, u64)> {
+                let oe = step.get(oe.as_reference()?)?;
+                let (el, forward) = if oe.keyword == "IFCORIENTEDEDGE" {
+                    (
+                        step.get(oe.args.get(2)?.as_reference()?)?,
+                        oe.args.get(3).and_then(Value::as_enum) != Some("F"),
+                    )
+                } else {
+                    (oe, true)
+                };
+                let s = el.args.first()?.as_reference()?;
+                let e = el.args.get(1)?.as_reference()?;
+                Some(if forward { (s, e) } else { (e, s) })
+            };
+            let list = a.first().and_then(Value::as_list);
+            rule!(
+                "IsClosed",
+                ends(list?.first()?)?.0 == ends(list?.last()?)?.1
+            );
+            rule!(
+                "IsContinuous",
+                list?.windows(2).all(|w| match (ends(&w[0]), ends(&w[1])) {
+                    (Some(p), Some(q)) => p.1 == q.0,
+                    _ => false,
+                })
+            );
+        }
+        "IFCORIENTEDEDGE" => {
+            rule!(
+                "EdgeElementNotOriented",
+                keyword_of(step, a.get(2).and_then(Value::as_reference))? != "IFCORIENTEDEDGE"
+            );
+        }
+        // ---- Surfaces ----
+        "IFCTOROIDALSURFACE" => {
+            rule!("MajorLargerMinor", num(a, 2)? < num(a, 1)?);
+        }
+        "IFCSURFACEOFREVOLUTION" | "IFCSURFACEOFLINEAREXTRUSION" => {
+            // IfcSweptSurface.SweptCurveType: SweptCurve.ProfileType = CURVE.
+            rule!(
+                "SweptCurveType",
+                step.get(a.first()?.as_reference()?)?
+                    .args
+                    .first()
+                    .and_then(Value::as_enum)?
+                    == "CURVE"
+            );
+            if inst.keyword == "IFCSURFACEOFLINEAREXTRUSION" {
+                rule!("DepthGreaterZero", num(a, 3)? > 0.0);
+            }
+        }
+        "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
+            // (UDegree, VDegree, ControlPointsList, SurfaceForm, UClosed,
+            // VClosed, SelfIntersect, UMultiplicities, VMultiplicities,
+            // UKnots, VKnots, KnotSpec[, WeightsData]).
+            let rows = a.get(2).and_then(Value::as_list);
+            let u_upper = rows.map(|r| r.len() as i64 - 1);
+            let v_upper = rows
+                .and_then(|r| r.first())
+                .and_then(Value::as_list)
+                .map(|r| r.len() as i64 - 1);
+            let ints = |i: usize| -> Option<Vec<i64>> {
+                a.get(i)
+                    .and_then(Value::as_list)
+                    .map(|l| l.iter().filter_map(int).collect())
+            };
+            let reals = |i: usize| -> Option<Vec<f64>> {
+                a.get(i).and_then(Value::as_list).map(|l| {
+                    l.iter()
+                        .filter_map(|v| num(core::slice::from_ref(v), 0))
+                        .collect()
+                })
+            };
+            let (um, vm, uk, vk) = (ints(7), ints(8), reals(9), reals(10));
+            rule!(
+                "CorrespondingULists",
+                um.as_ref()?.len() == uk.as_ref()?.len()
+            );
+            rule!(
+                "CorrespondingVLists",
+                vm.as_ref()?.len() == vk.as_ref()?.len()
+            );
+            rule!(
+                "UDirectionConstraints",
+                crate::geometry::bspline::constraints_param_bspline(
+                    a.first().and_then(int)?,
+                    uk.as_ref()?.len(),
+                    u_upper?,
+                    um.as_ref()?,
+                    uk.as_ref()?,
+                )
+            );
+            rule!(
+                "VDirectionConstraints",
+                crate::geometry::bspline::constraints_param_bspline(
+                    a.get(1).and_then(int)?,
+                    vk.as_ref()?.len(),
+                    v_upper?,
+                    vm.as_ref()?,
+                    vk.as_ref()?,
+                )
+            );
+            if inst.keyword == "IFCRATIONALBSPLINESURFACEWITHKNOTS" {
+                let weights = a.get(12).and_then(Value::as_list);
+                rule!(
+                    "CorrespondingWeightsDataLists",
+                    weights?.len() == rows?.len()
+                        && weights?.first()?.as_list()?.len() == rows?.first()?.as_list()?.len()
+                );
+                // IfcSurfaceWeightsPositive: every weight > 0.
+                rule!(
+                    "WeightValuesGreaterZero",
+                    weights?.iter().all(|row| {
+                        row.as_list().is_some_and(|r| {
+                            r.iter()
+                                .all(|w| num(core::slice::from_ref(w), 0).is_some_and(|w| w > 0.0))
+                        })
+                    })
+                );
+            }
+        }
         "IFCRECTANGULARTRIMMEDSURFACE" => {
             // (BasisSurface, U1, V1, U2, V2, Usense, Vsense).
             let (u1, v1, u2, v2) = (num(a, 1), num(a, 2), num(a, 3), num(a, 4));
@@ -684,6 +905,92 @@ mod tests {
         assert_eq!(rules(&f, 11), ["InnerRadiusSize"]);
         assert_eq!(rules(&f, 12), ["DirectrixBounded"]);
         assert!(rules(&f, 13).is_empty());
+    }
+
+    #[test]
+    fn advanced_brep_face_and_edge_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((1.,1.,0.));\n\
+             #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#2);\n#13=IFCVERTEXPOINT(#3);\n\
+             #20=IFCDIRECTION((1.,0.,0.));\n#21=IFCVECTOR(#20,1.);\n#22=IFCLINE(#1,#21);\n\
+             #23=IFCPOLYLINE((#1,#2));\n\
+             #30=IFCEDGECURVE(#11,#12,#22,.T.);\n#31=IFCEDGECURVE(#12,#13,#23,.T.);\n\
+             #32=IFCEDGECURVE(#13,#11,#22,.T.);\n#33=IFCEDGE(#13,#11);\n\
+             #34=IFCEDGECURVE(#13,#11,#5,.T.);\n#5=IFCTRIMMEDCURVE(#22,(#1),(#2),.T.,.CARTESIAN.);\n\
+             #40=IFCORIENTEDEDGE(*,*,#30,.T.);\n#41=IFCORIENTEDEDGE(*,*,#31,.T.);\n\
+             #42=IFCORIENTEDEDGE(*,*,#32,.T.);\n#43=IFCORIENTEDEDGE(*,*,#33,.T.);\n\
+             #44=IFCORIENTEDEDGE(*,*,#34,.T.);\n#45=IFCORIENTEDEDGE(*,*,#40,.T.);\n\
+             #50=IFCEDGELOOP((#40,#41,#42));\n\
+             #51=IFCEDGELOOP((#40,#41));\n\
+             #52=IFCEDGELOOP((#40,#42,#41));\n\
+             #53=IFCEDGELOOP((#40,#41,#43));\n\
+             #54=IFCEDGELOOP((#40,#41,#44));\n\
+             #60=IFCFACEOUTERBOUND(#50,.T.);\n#61=IFCFACEOUTERBOUND(#53,.T.);\n\
+             #62=IFCFACEOUTERBOUND(#54,.T.);\n\
+             #70=IFCAXIS2PLACEMENT3D(#1,$,$);\n#71=IFCPLANE(#70);\n\
+             #72=IFCCURVEBOUNDEDPLANE(#71,#23,$);\n\
+             #80=IFCADVANCEDFACE((#60),#71,.T.);\n\
+             #81=IFCADVANCEDFACE((#61),#71,.T.);\n\
+             #82=IFCADVANCEDFACE((#62),#72,.T.);\n\
+             #83=IFCFACE((#60));\n\
+             #90=IFCCLOSEDSHELL((#80));\n#91=IFCCLOSEDSHELL((#80,#83));\n\
+             #92=IFCADVANCEDBREP(#90);\n#93=IFCADVANCEDBREP(#91);\n\
+             #94=IFCADVANCEDBREPWITHVOIDS(#90,(#91));",
+        );
+        assert!(rules(&f, 50).is_empty());
+        assert_eq!(rules(&f, 51), ["IsClosed"]);
+        // Out of order: neither continuous nor (first start = last end) closed.
+        assert_eq!(rules(&f, 52), ["IsClosed", "IsContinuous"]);
+        assert!(rules(&f, 40).is_empty());
+        assert_eq!(rules(&f, 45), ["EdgeElementNotOriented"]);
+        assert!(rules(&f, 80).is_empty());
+        // A bare IfcEdge in the loop fails both edge rules.
+        assert_eq!(rules(&f, 81), ["ApplicableEdgeCurves", "RequiresEdgeCurve"]);
+        // A trimmed-curve edge geometry and a bounded-surface face surface.
+        assert_eq!(rules(&f, 82), ["ApplicableEdgeCurves", "ApplicableSurface"]);
+        assert!(rules(&f, 92).is_empty());
+        assert_eq!(rules(&f, 93), ["HasAdvancedFaces"]);
+        assert_eq!(rules(&f, 94), ["VoidsHaveAdvancedFaces"]);
+    }
+
+    #[test]
+    fn surface_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCTOROIDALSURFACE(#2,3.,1.);\n#4=IFCTOROIDALSURFACE(#2,1.,3.);\n\
+             #10=IFCCARTESIANPOINT((1.,0.));\n#11=IFCCARTESIANPOINT((1.,2.));\n\
+             #12=IFCPOLYLINE((#10,#11));\n#13=IFCARBITRARYOPENPROFILEDEF(.CURVE.,$,#12);\n\
+             #14=IFCARBITRARYOPENPROFILEDEF(.AREA.,$,#12);\n\
+             #15=IFCDIRECTION((0.,0.,1.));\n\
+             #20=IFCSURFACEOFLINEAREXTRUSION(#13,#2,#15,2.);\n\
+             #21=IFCSURFACEOFLINEAREXTRUSION(#14,#2,#15,0.);\n\
+             #22=IFCAXIS1PLACEMENT(#1,$);\n#23=IFCSURFACEOFREVOLUTION(#13,$,#22);\n\
+             #30=IFCCARTESIANPOINT((0.,0.,0.));\n\
+             #31=IFCBSPLINESURFACEWITHKNOTS(1,1,((#30,#30),(#30,#30)),.PLANE_SURF.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);\n\
+             #32=IFCBSPLINESURFACEWITHKNOTS(1,1,((#30,#30),(#30,#30)),.PLANE_SURF.,.F.,.F.,.F.,(2,1),(2,2),(0.,1.),(0.,1.,2.),.UNSPECIFIED.);\n\
+             #33=IFCRATIONALBSPLINESURFACEWITHKNOTS(1,1,((#30,#30),(#30,#30)),.PLANE_SURF.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.,((1.,1.),(1.,1.)));\n\
+             #34=IFCRATIONALBSPLINESURFACEWITHKNOTS(1,1,((#30,#30),(#30,#30)),.PLANE_SURF.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.,((1.),(1.,0.)));",
+        );
+        assert!(rules(&f, 3).is_empty());
+        assert_eq!(rules(&f, 4), ["MajorLargerMinor"]);
+        assert!(rules(&f, 20).is_empty());
+        assert_eq!(rules(&f, 21), ["SweptCurveType", "DepthGreaterZero"]);
+        assert!(rules(&f, 23).is_empty());
+        assert!(rules(&f, 31).is_empty());
+        assert_eq!(
+            rules(&f, 32),
+            [
+                "CorrespondingVLists",
+                "UDirectionConstraints",
+                "VDirectionConstraints"
+            ]
+        );
+        assert!(rules(&f, 33).is_empty());
+        assert_eq!(
+            rules(&f, 34),
+            ["CorrespondingWeightsDataLists", "WeightValuesGreaterZero"]
+        );
     }
 
     #[test]

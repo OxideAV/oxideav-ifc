@@ -424,7 +424,13 @@ of one instance (`None` when the entity has no transcribed rules),
 hollow / composite profiles, the swept area solids (`SweptAreaType`,
 `ValidExtrusionDirection`, the revolution-axis rules, tapered
 `CorrectProfileAssignment`, directrix-sweep `DirectrixBounded`), swept
-disk solids, B-spline curves
+disk solids, sectioned spines, advanced Breps / faces / edge loops /
+oriented edges (`HasAdvancedFaces`, `VoidsHaveAdvancedFaces`,
+`ApplicableEdgeCurves`, `ApplicableSurface`, `RequiresEdgeCurve`,
+`IsClosed`, `IsContinuous`, `EdgeElementNotOriented`), the toroidal /
+swept / B-spline surfaces (`MajorLargerMinor`, `SweptCurveType`,
+`DepthGreaterZero`, the knot-list and weight rules) and rectangular
+trimmed surfaces, B-spline curves
 (`ConsistentBSpline` via the transcribed `IfcConstraintsParamBSpline`,
 `CorrespondingKnotLists`, rational `SameNumOfWeightsAndPoints` /
 `WeightsGreaterZero`), `IfcMapConversion` and `IfcRigidOperation`.
