@@ -1,0 +1,11 @@
+ISO-10303-21;
+HEADER;
+FILE_DESCRIPTION((''),'2;1');
+FILE_NAME('t.ifc','2026-06-12T00:00:00',('a'),('o'),'p','s','auth');
+FILE_SCHEMA(('IFC4'));
+ENDSEC;
+DATA;
+#{}=IFCVERTEXPOINT(#{});
+
+ENDSEC;
+END-ISO-10303-21;

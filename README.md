@@ -411,6 +411,23 @@ Still later in Phase 3: `IfcSectionedSpine`, bounded-surface
 representation items (`IfcCurveBoundedPlane` / `IfcRectangularTrimmedSurface`
 outside a Brep), and non-convex mesh–mesh booleans.
 
+### Fuzzing
+
+`fuzz/` is a `cargo-fuzz` crate (its own workspace; needs a nightly
+toolchain) with the `tessellate` target: every instance of an
+arbitrary STEP file is run through `tessellate_item` under tight
+`StepLimits`, so the face-set / Brep / sweep / Boolean / curved-face
+paths must never panic or run away on hostile input. `fuzz/seeds/`
+holds the seed corpus (the STEP snippets of the geometry tests):
+
+```sh
+cd fuzz && cargo fuzz run tessellate seeds -- -max_total_time=300
+```
+
+Hostile-geometry work is bounded throughout: curve samples, B-spline
+control nets, sweep sections, per-face triangles, refinement rounds
+and the cross-face chord repair all carry hard caps.
+
 ## Phase 4 surface — semantic data layer
 
 The typed model resolves the definition / association relationships

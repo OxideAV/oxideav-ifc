@@ -193,7 +193,7 @@ struct Rect {
 }
 
 /// Largest number of triangles one face may produce.
-const MAX_FACE_TRIANGLES: usize = 400_000;
+const MAX_FACE_TRIANGLES: usize = 200_000;
 
 /// Largest number of subdivision rounds.
 const MAX_REFINE_ROUNDS: usize = 16;
@@ -1258,10 +1258,27 @@ pub(super) fn repair_t_junctions(triangles: &mut Vec<[u32; 3]>, pool: &VertexPoo
         }
         Some(inner.into_iter().map(|(_, id)| id).collect())
     };
+    // Whether all three vertices lie on one chord: such a triangle is
+    // collinear in 3-D (zero area) and would only re-fan forever.
+    let chord_of = |v: u32| on_chord.get(&v).map(|&(c, _)| c);
+    let all_on_one_chord = |t: &[u32; 3]| -> bool {
+        let c = chord_of(t[0])
+            .or_else(|| chord_of(t[1]))
+            .or_else(|| chord_of(t[2]));
+        match c {
+            Some(c) => t.iter().all(|&v| position_on(v, c).is_some()),
+            None => false,
+        }
+    };
     let mut out: Vec<[u32; 3]> = Vec::with_capacity(triangles.len());
     let mut stack: Vec<[u32; 3]> = core::mem::take(triangles);
-    let mut budget = stack.len() * 64 + 1024;
+    // Every split adds triangles; a hostile chord layout is bounded
+    // by this budget (the remainder is emitted unrepaired).
+    let mut budget = stack.len() * 8 + 65_536;
     while let Some(t) = stack.pop() {
+        if all_on_one_chord(&t) {
+            continue;
+        }
         let mut split = false;
         for i in 0..3 {
             let (x, y, z) = (t[i], t[(i + 1) % 3], t[(i + 2) % 3]);

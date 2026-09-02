@@ -1,0 +1,26 @@
+[package]
+name = "oxideav-ifc-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-ifc]
+path = ".."
+default-features = false
+
+[[bin]]
+name = "tessellate"
+path = "fuzz_targets/tessellate.rs"
+test = false
+doc = false
+bench = false
+
+# The fuzz crate is its own workspace root (it sits inside the
+# umbrella tree but is not a member of it).
+[workspace]
