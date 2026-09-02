@@ -137,3 +137,39 @@ fn non_geometry_id_is_unsupported() {
         Err(GeometryError::Unsupported(_))
     ));
 }
+
+const ADVANCED: &[u8] = include_bytes!("fixtures/synthetic-advanced-brep.ifc");
+
+/// Every edge of a closed mesh is shared by two opposite triangles.
+fn watertight(m: &TriMesh) -> bool {
+    let mut edges: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+    for t in &m.triangles {
+        for (a, b) in [(t[0], t[1]), (t[1], t[2]), (t[2], t[0])] {
+            let key = if a < b { (a, b) } else { (b, a) };
+            *edges.entry(key).or_insert(0) += if a < b { 1 } else { -1 };
+        }
+    }
+    edges.values().all(|n| *n == 0)
+}
+
+#[test]
+fn synthetic_advanced_model_bodies_are_watertight_solids() {
+    let f = parse_step(ADVANCED).expect("parse");
+    // (product definition shape id, expected volume, relative tolerance)
+    let pi = core::f64::consts::PI;
+    let cases = [
+        (54u64, 2.0 * pi, 5e-3),
+        (64, 4.0 / 3.0 * pi, 1.5e-2),
+        (74, 10.0 / 3.0 * (4.0 + 16.0 + 8.0), 1e-9),
+        (84, 8.0 * 10.0 * pi / 2.0, 5e-3),
+    ];
+    for (id, exact, tol) in cases {
+        let m = mesh_from_product_shape(&f, id).expect("product body");
+        assert!(watertight(&m), "#{id} not watertight");
+        let v = m.signed_volume();
+        assert!((v - exact).abs() / exact < tol, "#{id}: {v} vs {exact}");
+    }
+    // The cylinder's placement lands it at x = 100.
+    let t = placement_transform(&f, 51).unwrap();
+    assert_eq!(t.translation, [100.0, 0.0, 0.0]);
+}

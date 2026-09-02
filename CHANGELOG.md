@@ -44,6 +44,9 @@ All notable changes to this project will be documented in this file.
   a composite spine with sub-sections at the spine vertices) + its
   `CorrespondingSectionPositions` / `ConsistentProfileTypes` rules; the
   sectioned-solid loft is shared.
+- Synthetic fixture `tests/fixtures/synthetic-advanced-brep.ifc` (advanced
+  Breps, sectioned spine, directrix sweep as placed products) with decoder
+  and geometry tests.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

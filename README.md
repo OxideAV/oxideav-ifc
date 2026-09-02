@@ -420,6 +420,13 @@ Still later in Phase 3: bounded-surface representation items
 (`IfcCurveBoundedPlane` / `IfcRectangularTrimmedSurface` outside a Brep),
 `IfcSectionedSurface`, and non-convex mesh–mesh booleans.
 
+The synthetic fixture `tests/fixtures/synthetic-advanced-brep.ifc`
+(authored for this crate, IFC 4) places an advanced-Brep cylinder, a
+two-hemisphere sphere, a tapered sectioned spine and a fixed-reference
+arc sweep as four proxies on one storey; the decoder test pins their
+world-space bounding boxes and the geometry test their volumes and
+watertightness.
+
 ### Fuzzing
 
 `fuzz/` is a `cargo-fuzz` crate (its own workspace; needs a nightly

@@ -250,3 +250,68 @@ fn registry_decode_via_factory() {
     let scene = decoder.decode(TESS).expect("decode via factory");
     assert_eq!(scene.triangle_count(), 12);
 }
+
+/// A synthetic IFC 4 model authored for this crate: four proxies on one
+/// storey, each placed 100 units out along an axis — an advanced-Brep
+/// cylinder (curved side face), a sphere from two hemispherical
+/// advanced faces, a tapered `IfcSectionedSpine` and a fixed-reference
+/// arc sweep.
+const ADVANCED: &[u8] = include_bytes!("fixtures/synthetic-advanced-brep.ifc");
+
+#[test]
+fn decode_advanced_breps_and_directrix_sweeps_in_world_space() {
+    let mut decoder = make_decoder();
+    let scene = decoder
+        .decode(ADVANCED)
+        .expect("synthetic advanced model decodes");
+    // One primitive per product, named after it.
+    let named: Vec<String> = scene.nodes.iter().filter_map(|n| n.name.clone()).collect();
+    for want in ["Cylinder", "Sphere", "Spine", "Sweep"] {
+        assert!(
+            named.iter().any(|n| n == want),
+            "missing node {want}: {named:?}"
+        );
+    }
+    let bbox = |name: &str| -> ([f32; 3], [f32; 3]) {
+        let node = scene
+            .nodes
+            .iter()
+            .find(|n| n.name.as_deref() == Some(name))
+            .expect("node");
+        let mesh = &scene.meshes[node.mesh.expect("mesh").0 as usize];
+        let mut lo = [f32::INFINITY; 3];
+        let mut hi = [f32::NEG_INFINITY; 3];
+        for p in mesh.primitives.iter().flat_map(|p| p.positions.iter()) {
+            for k in 0..3 {
+                lo[k] = lo[k].min(p[k]);
+                hi[k] = hi[k].max(p[k]);
+            }
+        }
+        (lo, hi)
+    };
+    let close = |a: f32, b: f32| (a - b).abs() < 1e-3;
+    // Cylinder r = 1, z ∈ [0, 2] at (100, 0, 0).
+    let (lo, hi) = bbox("Cylinder");
+    assert!(
+        close(lo[0], 99.0) && close(hi[0], 101.0) && close(lo[2], 0.0) && close(hi[2], 2.0),
+        "{lo:?} {hi:?}"
+    );
+    // Unit sphere at (0, 100, 0): poles reached.
+    let (lo, hi) = bbox("Sphere");
+    assert!(
+        close(lo[1], 99.0) && close(hi[1], 101.0) && close(lo[2], -1.0) && close(hi[2], 1.0),
+        "{lo:?} {hi:?}"
+    );
+    // Tapered spine 2×2 → 4×4 over z ∈ [100, 110].
+    let (lo, hi) = bbox("Spine");
+    assert!(
+        close(lo[2], 100.0) && close(hi[2], 110.0) && close(lo[0], -2.0) && close(hi[0], 2.0),
+        "{lo:?} {hi:?}"
+    );
+    // Quarter-arc sweep of radius 10 with a 4-tall (reference +Z) profile at (−100, 0, 0).
+    let (lo, hi) = bbox("Sweep");
+    assert!(
+        close(lo[2], -2.0) && close(hi[2], 2.0) && lo[0] > -100.1 && hi[0] < -88.9,
+        "{lo:?} {hi:?}"
+    );
+}
