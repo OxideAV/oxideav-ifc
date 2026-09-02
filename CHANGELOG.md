@@ -47,6 +47,11 @@ All notable changes to this project will be documented in this file.
 - Synthetic fixture `tests/fixtures/synthetic-advanced-brep.ifc` (advanced
   Breps, sectioned spine, directrix sweep as placed products) with decoder
   and geometry tests.
+- Phase 3: bounded-surface representation items — `IfcCurveBoundedPlane`
+  (2-D or 3-D boundaries, holes) and `IfcRectangularTrimmedSurface` over
+  plane / cylinder / sphere / torus / B-spline bases (angle-unit-scaled
+  parameters, `Usense` / `Vsense` wrap direction) + the trimmed-surface
+  WHERE rules.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

@@ -203,7 +203,7 @@ impl ParamSurface {
     pub(super) fn from_id(step: &StepFile, id: u64) -> Result<Self, GeometryError> {
         let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
         match inst.keyword.as_str() {
-            "IFCCYLINDRICALSURFACE" | "IFCSPHERICALSURFACE" | "IFCTOROIDALSURFACE" => {
+            "IFCPLANE" | "IFCCYLINDRICALSURFACE" | "IFCSPHERICALSURFACE" | "IFCTOROIDALSURFACE" => {
                 Ok(Self::Elementary(ElementarySurface::from_id(step, id)?))
             }
             "IFCSURFACEOFREVOLUTION" | "IFCSURFACEOFLINEAREXTRUSION" => {
@@ -488,6 +488,28 @@ impl ParamSurface {
                 ([u, s], false)
             }
         }
+    }
+
+    /// Whether `u` / `v` are angles (scaled by the model's plane-angle
+    /// unit when given as `IfcParameterValue`s of a trimmed surface).
+    pub(super) fn angular(&self) -> (bool, bool) {
+        match self {
+            Self::Elementary(e) => match e.kind {
+                SurfaceKind::Plane => (false, false),
+                SurfaceKind::Cylinder { .. } => (true, false),
+                SurfaceKind::Sphere { .. } | SurfaceKind::Torus { .. } => (true, true),
+            },
+            Self::Revolution { .. } => (true, false),
+            Self::BSpline { .. } | Self::Extrusion { .. } => (false, false),
+        }
+    }
+
+    /// Whether the parameterisation is one the schema's parameter
+    /// values address directly (elementary and B-spline surfaces); the
+    /// sampled-profile surfaces use a sample-index parameter of their
+    /// own that no `IfcParameterValue` refers to.
+    pub(super) fn has_schema_parameters(&self) -> bool {
+        !matches!(self, Self::Revolution { .. } | Self::Extrusion { .. })
     }
 
     /// Where to split the parameter edge `a → b` (a fraction in

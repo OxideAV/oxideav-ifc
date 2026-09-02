@@ -326,6 +326,31 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 directrix.map(|d| bounded || is_conic_or_bounded(&d.keyword)),
             );
         }
+        "IFCRECTANGULARTRIMMEDSURFACE" => {
+            // (BasisSurface, U1, V1, U2, V2, Usense, Vsense).
+            let (u1, v1, u2, v2) = (num(a, 1), num(a, 2), num(a, 3), num(a, 4));
+            let sense = |i: usize| match a.get(i).and_then(Value::as_enum) {
+                Some("T") => Some(true),
+                Some("F") => Some(false),
+                _ => None,
+            };
+            let basis = keyword_of(step, a.first().and_then(Value::as_reference));
+            rule!("U1AndU2Different", u1? != u2?);
+            // Elementary non-plane bases and surfaces of revolution
+            // wrap, so any sense is compatible there.
+            let wraps = matches!(
+                basis,
+                Some(
+                    "IFCCYLINDRICALSURFACE"
+                        | "IFCSPHERICALSURFACE"
+                        | "IFCTOROIDALSURFACE"
+                        | "IFCSURFACEOFREVOLUTION"
+                )
+            );
+            rule!("UsenseCompatible", wraps || sense(5)? == (u2? > u1?));
+            rule!("V1AndV2Different", v1? != v2?);
+            rule!("VsenseCompatible", sense(6)? == (v2? > v1?));
+        }
         "IFCSECTIONEDSPINE" => {
             // (SpineCurve, CrossSections, CrossSectionPositions).
             let sections = a.get(1).and_then(Value::as_list);
@@ -659,6 +684,22 @@ mod tests {
         assert_eq!(rules(&f, 11), ["InnerRadiusSize"]);
         assert_eq!(rules(&f, 12), ["DirectrixBounded"]);
         assert!(rules(&f, 13).is_empty());
+    }
+
+    #[test]
+    fn rectangular_trimmed_surface_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCPLANE(#2);\n#4=IFCCYLINDRICALSURFACE(#2,1.);\n\
+             #10=IFCRECTANGULARTRIMMEDSURFACE(#3,0.,0.,3.,2.,.T.,.T.);\n\
+             #11=IFCRECTANGULARTRIMMEDSURFACE(#3,3.,0.,0.,2.,.T.,.T.);\n\
+             #12=IFCRECTANGULARTRIMMEDSURFACE(#4,3.,2.,0.,2.,.T.,.T.);\n\
+             #13=IFCRECTANGULARTRIMMEDSURFACE(#3,1.,0.,1.,2.,.T.,.T.);",
+        );
+        assert!(rules(&f, 10).is_empty());
+        assert_eq!(rules(&f, 11), ["UsenseCompatible"]);
+        assert_eq!(rules(&f, 12), ["V1AndV2Different", "VsenseCompatible"]);
+        assert_eq!(rules(&f, 13), ["U1AndU2Different", "UsenseCompatible"]);
     }
 
     #[test]

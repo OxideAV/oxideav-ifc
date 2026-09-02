@@ -162,10 +162,13 @@
 //! `IfcAxis2Placement3D`s along a composite spine, blending
 //! sub-sections at the spine vertices between placements.
 //!
+//! **Bounded surfaces** as representation items — `IfcCurveBoundedPlane`
+//! and `IfcRectangularTrimmedSurface` — mesh as open sheets.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): bounded-surface representation
-//! items, `IfcSectionedSurface`, and general mesh–mesh boolean
-//! subtraction / intersection.
+//! rather than silently dropped): `IfcCurveBoundedSurface`,
+//! `IfcSectionedSurface`, and general mesh–mesh boolean subtraction /
+//! intersection.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -329,6 +332,9 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         // Sectioned spine: profiles placed by explicit placements along
         // a composite spine curve and lofted.
         "IFCSECTIONEDSPINE" => sectioned_spine(step, &inst.args),
+        // Bounded surfaces as representation items (open sheets).
+        "IFCCURVEBOUNDEDPLANE" => curve_bounded_plane(step, &inst.args),
+        "IFCRECTANGULARTRIMMEDSURFACE" => rectangular_trimmed_surface(step, &inst.args),
         // Parametric CSG primitives (swept-disk digest §3) and the CSG
         // tree root wrapper.
         "IFCBLOCK"
@@ -3133,6 +3139,245 @@ fn directrix_swept_area_solid(
         mesh.transform(&xform);
     }
     Ok(mesh)
+}
+
+// =====================================================================
+// Bounded surfaces as representation items
+//
+// IfcCurveBoundedPlane(BasisSurface : IfcPlane, OuterBoundary : IfcCurve,
+//   InnerBoundaries : SET OF IfcCurve) — the plane region inside the
+//   outer boundary minus the inner ones. The boundary curves are read
+//   in the plane's own coordinate system when they are 2-D (the common
+//   authoring), and as 3-D curves lying on the plane otherwise; the
+//   sheet is triangulated hole-aware with its normal along the plane's
+//   local +z.
+// IfcRectangularTrimmedSurface(BasisSurface, U1, V1, U2, V2, Usense,
+//   Vsense) — the basis surface restricted to a parameter rectangle.
+//   The parameters address the basis surface's own parameterisation
+//   (the placement-implied one of the `surfaces` submodule: lengths
+//   along the plane's x / y, angles from the local +x axis for the
+//   cylinder / sphere / torus — scaled by the model's plane-angle
+//   unit — knot values for B-spline patches). `Usense` / `Vsense`
+//   FALSE runs a periodic parameter the other way round the axis
+//   (UsenseCompatible only fixes the sense to the value order on
+//   non-periodic bases); the sheet's normal follows the traversal
+//   senses. Sampled-profile bases (revolution / extrusion surfaces)
+//   carry no schema parameter and are refused.
+// =====================================================================
+
+/// The coordinate count of the first `IfcCartesianPoint` /
+/// `IfcCartesianPointList{2,3}D` a curve refers to (`None` if it has
+/// none within the nesting bound).
+fn curve_dimension(step: &StepFile, id: u64, depth: usize) -> Option<usize> {
+    if depth >= MAX_CURVE_DEPTH {
+        return None;
+    }
+    let inst = step.get(id)?;
+    match inst.keyword.as_str() {
+        "IFCCARTESIANPOINT" => inst
+            .args
+            .first()
+            .and_then(Value::as_list)
+            .map(<[Value]>::len),
+        "IFCCARTESIANPOINTLIST2D" => Some(2),
+        "IFCCARTESIANPOINTLIST3D" => Some(3),
+        _ => {
+            let mut refs = Vec::new();
+            for a in &inst.args {
+                a.collect_references(&mut refs);
+            }
+            refs.into_iter()
+                .find_map(|r| curve_dimension(step, r, depth + 1))
+        }
+    }
+}
+
+fn curve_bounded_plane(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let plane_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let plane = step
+        .get(plane_id)
+        .ok_or(GeometryError::MissingInstance(plane_id))?;
+    if plane.keyword != "IFCPLANE" {
+        return Err(GeometryError::Unsupported(plane.keyword.clone()));
+    }
+    let pos_id = plane
+        .args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let frame = axis2_placement_3d(step, pos_id)?;
+    let outer_id = args
+        .get(1)
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let inner_ids: Vec<u64> = match args.get(2) {
+        None | Some(Value::Unset) => Vec::new(),
+        Some(v) => v
+            .as_list()
+            .ok_or(GeometryError::BadCoordinates)?
+            .iter()
+            .filter_map(Value::as_reference)
+            .collect(),
+    };
+    // A boundary in the plane's 2-D system is lifted through the
+    // placement; a 3-D one is taken as authored.
+    let ring = |curve_id: u64| -> Result<Vec<[f64; 3]>, GeometryError> {
+        let pts = if curve_dimension(step, curve_id, 0) == Some(2) {
+            close_ring(curve_points_2d(step, curve_id)?)
+                .into_iter()
+                .map(|[x, y]| frame.apply([x, y, 0.0]))
+                .collect()
+        } else {
+            let mut pts = curve_points_3d(step, curve_id, 0)?;
+            if pts.len() > 1 && dist(pts[0], pts[pts.len() - 1]) <= 1e-9 {
+                pts.pop();
+            }
+            pts
+        };
+        if pts.len() < 3 {
+            return Err(GeometryError::BadProfile);
+        }
+        Ok(pts)
+    };
+    let mut positions: Vec<[f64; 3]> = Vec::new();
+    let mut add_loop = |pts: Vec<[f64; 3]>| -> Vec<(u32, [f64; 3])> {
+        let base = positions.len() as u32;
+        positions.extend_from_slice(&pts);
+        pts.into_iter()
+            .enumerate()
+            .map(|(i, p)| (base + i as u32, p))
+            .collect()
+    };
+    let mut outer = add_loop(ring(outer_id)?);
+    // Wind the outer loop counter-clockwise about the plane normal.
+    let n = newell_normal(&outer.iter().map(|&(_, p)| p).collect::<Vec<_>>());
+    if dot_raw(n, frame.cols[2]) < 0.0 {
+        outer.reverse();
+    }
+    let mut holes = Vec::with_capacity(inner_ids.len());
+    for id in inner_ids {
+        holes.push(add_loop(ring(id)?));
+    }
+    let mut triangles = Vec::new();
+    triangulate_face_3d(&outer, &holes, &mut triangles)?;
+    Ok(TriMesh {
+        positions,
+        triangles,
+    })
+}
+
+/// Cap on the grid cells of one rectangular trimmed surface.
+const MAX_TRIMMED_CELLS: usize = 262_144;
+
+fn rectangular_trimmed_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let basis_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let surface = surfaces::ParamSurface::from_id(step, basis_id)?;
+    if !surface.has_schema_parameters() {
+        let kw = step
+            .get(basis_id)
+            .map_or_else(String::new, |i| i.keyword.clone());
+        return Err(GeometryError::Unsupported(kw));
+    }
+    let param = |i: usize| -> Result<f64, GeometryError> {
+        match args.get(i) {
+            Some(Value::Typed { args, .. }) => args.first().and_then(Value::as_number),
+            Some(v) => v.as_number(),
+            None => None,
+        }
+        .filter(|v| v.is_finite())
+        .ok_or(GeometryError::BadCoordinate)
+    };
+    let (mut u1, mut v1, mut u2, mut v2) = (param(1)?, param(2)?, param(3)?, param(4)?);
+    let sense = |i: usize| !matches!(args.get(i).and_then(Value::as_enum), Some("F"));
+    let (usense, vsense) = (sense(5), sense(6));
+    // Angular parameters follow the model's plane-angle unit.
+    let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+    let (au, av) = surface.angular();
+    if au {
+        u1 *= angle_scale;
+        u2 *= angle_scale;
+    }
+    if av {
+        v1 *= angle_scale;
+        v2 *= angle_scale;
+    }
+    if u1 == u2 || v1 == v2 {
+        return Err(GeometryError::BadProfile);
+    }
+    // Traversal range: on a periodic parameter the sense picks which
+    // way round; on a bounded one the value order does.
+    let range = |a: f64, b: f64, forward: bool, period: Option<f64>| -> (f64, f64) {
+        match period {
+            Some(p) => {
+                if forward {
+                    let mut b = b;
+                    while b <= a {
+                        b += p;
+                    }
+                    (a, b)
+                } else {
+                    let mut b = b;
+                    while b >= a {
+                        b -= p;
+                    }
+                    (a, b)
+                }
+            }
+            None => (a, b),
+        }
+    };
+    let (ua, ub) = range(u1, u2, usense, surface.period_u());
+    let (va, vb) = range(v1, v2, vsense, surface.period_v());
+    let (step_u, step_v) = surface.step();
+    let cells = |a: f64, b: f64, st: Option<f64>| -> usize {
+        match st {
+            Some(s) if s > 0.0 => (((b - a).abs() / s).ceil() as usize).clamp(1, 4096),
+            _ => 1,
+        }
+    };
+    let (nu, nv) = (cells(ua, ub, step_u), cells(va, vb, step_v));
+    if nu.saturating_mul(nv) > MAX_TRIMMED_CELLS {
+        return Err(GeometryError::BadProfile);
+    }
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity((nu + 1) * (nv + 1));
+    for i in 0..=nu {
+        let u = ua + (ub - ua) * (i as f64) / (nu as f64);
+        for j in 0..=nv {
+            let v = va + (vb - va) * (j as f64) / (nv as f64);
+            positions.push(surface.eval([u, v]));
+        }
+    }
+    // Normal: ∂S/∂u' × ∂S/∂v' with u', v' running as traversed — the
+    // grid is laid out in traversal order, so its natural winding
+    // already carries both senses.
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(nu * nv * 2);
+    let idx = |i: usize, j: usize| (i * (nv + 1) + j) as u32;
+    for i in 0..nu {
+        for j in 0..nv {
+            let (a, b, c, d) = (idx(i, j), idx(i + 1, j), idx(i + 1, j + 1), idx(i, j + 1));
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+        }
+    }
+    // Drop triangles collapsed onto a pole / seam point.
+    triangles.retain(|t| {
+        let (p, q, r) = (
+            positions[t[0] as usize],
+            positions[t[1] as usize],
+            positions[t[2] as usize],
+        );
+        dist(p, q) > 0.0 && dist(q, r) > 0.0 && dist(r, p) > 0.0
+    });
+    Ok(TriMesh {
+        positions,
+        triangles,
+    })
 }
 
 // =====================================================================
@@ -7226,6 +7471,146 @@ mod tests {
             assert!(r > 9.0 - 0.05 && r < 11.0 + 0.05, "{p:?}");
             assert!(p[2].abs() <= 2.0 + 1e-9);
         }
+    }
+
+    /// Total triangle area of a mesh.
+    fn mesh_area(m: &TriMesh) -> f64 {
+        m.triangles
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (
+                    m.positions[t[0] as usize],
+                    m.positions[t[1] as usize],
+                    m.positions[t[2] as usize],
+                );
+                let n = cross_raw(
+                    [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                    [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                );
+                0.5 * dot_raw(n, n).sqrt()
+            })
+            .sum()
+    }
+
+    /// Area-weighted mean normal of a mesh (unnormalised).
+    fn mesh_normal_sum(m: &TriMesh) -> [f64; 3] {
+        let mut n = [0.0; 3];
+        for t in &m.triangles {
+            let (a, b, c) = (
+                m.positions[t[0] as usize],
+                m.positions[t[1] as usize],
+                m.positions[t[2] as usize],
+            );
+            let x = cross_raw(
+                [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+            );
+            for k in 0..3 {
+                n[k] += x[k];
+            }
+        }
+        n
+    }
+
+    #[test]
+    fn curve_bounded_plane_with_2d_and_3d_boundaries() {
+        // A 2 × 2 square with a circular hole, authored in the plane's
+        // 2-D system, on a plane whose normal is +Y (so the sheet lies
+        // in xz); and the same square as a 3-D polyline on the xy-plane.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCDIRECTION((0.,1.,0.));\n\
+             #3=IFCAXIS2PLACEMENT3D(#1,#2,$);\n#4=IFCPLANE(#3);\n\
+             #10=IFCCARTESIANPOINT((-1.,-1.));\n#11=IFCCARTESIANPOINT((1.,-1.));\n\
+             #12=IFCCARTESIANPOINT((1.,1.));\n#13=IFCCARTESIANPOINT((-1.,1.));\n\
+             #14=IFCPOLYLINE((#10,#11,#12,#13,#10));\n\
+             #15=IFCCARTESIANPOINT((0.,0.));\n#16=IFCAXIS2PLACEMENT2D(#15,$);\n\
+             #17=IFCCIRCLE(#16,0.5);\n\
+             #20=IFCCURVEBOUNDEDPLANE(#4,#14,(#17));\n\
+             #30=IFCAXIS2PLACEMENT3D(#1,$,$);\n#31=IFCPLANE(#30);\n\
+             #32=IFCCARTESIANPOINT((0.,0.,0.));\n#33=IFCCARTESIANPOINT((2.,0.,0.));\n\
+             #34=IFCCARTESIANPOINT((2.,3.,0.));\n#35=IFCCARTESIANPOINT((0.,3.,0.));\n\
+             #36=IFCPOLYLINE((#32,#33,#34,#35));\n\
+             #40=IFCCURVEBOUNDEDPLANE(#31,#36,$);\n\
+             #41=IFCPOLYLINE((#35,#34,#33,#32));\n\
+             #42=IFCCURVEBOUNDEDPLANE(#31,#41,());",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        let n = CIRCLE_SEGMENTS as f64;
+        let hole = 0.5 * n * 0.25 * (2.0 * core::f64::consts::PI / n).sin();
+        assert!(
+            (mesh_area(&m) - (4.0 - hole)).abs() < 1e-9,
+            "{}",
+            mesh_area(&m)
+        );
+        assert!(m.positions.iter().all(|p| p[1].abs() < 1e-12));
+        // Normal along the plane's +Y axis.
+        let ns = mesh_normal_sum(&m);
+        assert!(
+            ns[1] > 0.0 && ns[0].abs() < 1e-9 && ns[2].abs() < 1e-9,
+            "{ns:?}"
+        );
+        let m = tessellate_item(&f, 40).unwrap();
+        assert!((mesh_area(&m) - 6.0).abs() < 1e-9);
+        assert!(mesh_normal_sum(&m)[2] > 0.0);
+        // A clockwise-authored 3-D boundary is re-wound to the plane normal.
+        let r = tessellate_item(&f, 42).unwrap();
+        assert!((mesh_area(&r) - 6.0).abs() < 1e-9);
+        assert!(mesh_normal_sum(&r)[2] > 0.0);
+    }
+
+    #[test]
+    fn rectangular_trimmed_plane_and_cylinder() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCPLANE(#2);\n\
+             #10=IFCRECTANGULARTRIMMEDSURFACE(#3,0.,0.,3.,2.,.T.,.T.);\n\
+             #11=IFCRECTANGULARTRIMMEDSURFACE(#3,3.,0.,0.,2.,.F.,.T.);\n\
+             #20=IFCCYLINDRICALSURFACE(#2,1.);\n\
+             #21=IFCRECTANGULARTRIMMEDSURFACE(#20,0.,0.,1.5707963267948966,2.,.T.,.T.);\n\
+             #22=IFCRECTANGULARTRIMMEDSURFACE(#20,0.,0.,1.5707963267948966,2.,.F.,.T.);\n\
+             #30=IFCSPHERICALSURFACE(#2,1.);\n\
+             #31=IFCRECTANGULARTRIMMEDSURFACE(#30,0.,0.,6.283185307179586,1.5707963267948966,.T.,.T.);\n\
+             #40=IFCCARTESIANPOINT((1.,0.));\n#41=IFCCARTESIANPOINT((1.,2.));\n\
+             #42=IFCPOLYLINE((#40,#41));\n#43=IFCARBITRARYOPENPROFILEDEF(.CURVE.,$,#42);\n\
+             #47=IFCDIRECTION((0.,1.,0.));\n\
+             #44=IFCAXIS1PLACEMENT(#1,#47);\n#45=IFCSURFACEOFREVOLUTION(#43,$,#44);\n\
+             #46=IFCRECTANGULARTRIMMEDSURFACE(#45,0.,0.,1.,1.,.T.,.T.);",
+        );
+        let m = tessellate_item(&f, 10).unwrap();
+        assert_eq!(m.triangle_count(), 2);
+        assert!((mesh_area(&m) - 6.0).abs() < 1e-12);
+        assert!(mesh_normal_sum(&m)[2] > 0.0);
+        assert_bbox(&m, [0.0, 0.0, 0.0], [3.0, 2.0, 0.0]);
+        // U2 < U1 with Usense FALSE: the same rectangle, normal flipped.
+        let m = tessellate_item(&f, 11).unwrap();
+        assert!((mesh_area(&m) - 6.0).abs() < 1e-12);
+        assert!(mesh_normal_sum(&m)[2] < 0.0);
+        // Quarter cylinder: 12 chords × height 2, outward normal.
+        let n = CIRCLE_SEGMENTS as f64;
+        let quarter = 12.0 * 2.0 * 2.0 * (core::f64::consts::PI / n).sin();
+        let m = tessellate_item(&f, 21).unwrap();
+        assert!((mesh_area(&m) - quarter).abs() < 1e-9, "{}", mesh_area(&m));
+        assert!(m.positions.iter().all(|p| p[0] >= -1e-12 && p[1] >= -1e-12));
+        let ns = mesh_normal_sum(&m);
+        assert!(ns[0] > 0.0 && ns[1] > 0.0, "{ns:?}");
+        // Usense FALSE goes the long way round: three quarters.
+        let m = tessellate_item(&f, 22).unwrap();
+        assert!(
+            (mesh_area(&m) - 3.0 * quarter).abs() < 1e-9,
+            "{}",
+            mesh_area(&m)
+        );
+        // Northern hemisphere: the pole row collapses, area ≈ 2π.
+        let m = tessellate_item(&f, 31).unwrap();
+        let exact = 2.0 * core::f64::consts::PI;
+        let a = mesh_area(&m);
+        assert!(a < exact && (exact - a) / exact < 1e-2, "{a}");
+        assert!(m.positions.iter().all(|p| p[2] >= -1e-12));
+        // A sampled-profile basis carries no schema parameters.
+        assert_eq!(
+            tessellate_item(&f, 46).unwrap_err(),
+            GeometryError::Unsupported("IFCSURFACEOFREVOLUTION".to_string())
+        );
     }
 
     #[test]
