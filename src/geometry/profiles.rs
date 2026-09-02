@@ -243,6 +243,7 @@ pub(super) fn parameterised_ring(
 ) -> Result<Option<Vec<[f64; 2]>>, GeometryError> {
     let ring = match keyword {
         "IFCISHAPEPROFILEDEF" => i_shape(step, args)?,
+        "IFCASYMMETRICISHAPEPROFILEDEF" => asymmetric_i_shape(step, args)?,
         "IFCLSHAPEPROFILEDEF" => l_shape(step, args)?,
         "IFCTSHAPEPROFILEDEF" => t_shape(step, args)?,
         "IFCUSHAPEPROFILEDEF" => u_shape(step, args)?,
@@ -295,6 +296,81 @@ fn i_shape(step: &StepFile, args: &[Value]) -> Result<Vec<[f64; 2]>, GeometryErr
         corner(-hw, y_w, r1),
         corner(-hw, -y_w, r1),
         corner(-hb, -y_t, r2),
+    ])
+}
+
+/// `IfcAsymmetricIShapeProfileDef(…, BottomFlangeWidth, OverallDepth,
+/// WebThickness, BottomFlangeThickness, BottomFlangeFilletRadius,
+/// TopFlangeWidth, TopFlangeThickness, TopFlangeFilletRadius,
+/// BottomFlangeEdgeRadius, BottomFlangeSlope, TopFlangeEdgeRadius,
+/// TopFlangeSlope)` (IFC4 / 4.3 attribute order) — the I section with
+/// unequal flanges. Both flanges are centred on the web (the profile
+/// is symmetric about the y axis) and the contour is built in the
+/// bounding-box-centred frame of digest §0: width
+/// `max(BottomFlangeWidth, TopFlangeWidth)`, height `OverallDepth`.
+/// An omitted `TopFlangeThickness` reads as the bottom thickness
+/// (the entity page is not staged; this is the natural "equal unless
+/// stated" reading and is recorded here). Flange slopes tilt each
+/// flange's inner face about its own `width/4` station as for the
+/// symmetric I. The IFC 2x3 form (a subtype of `IfcIShapeProfileDef`
+/// carrying `OverallWidth, OverallDepth, WebThickness, FlangeThickness,
+/// FilletRadius, TopFlangeWidth, TopFlangeThickness,
+/// TopFlangeFilletRadius, CentreOfGravityInY`) is recognised by its
+/// 12-attribute layout: the base I attributes describe the bottom
+/// flange, `CentreOfGravityInY` is informational and ignored.
+fn asymmetric_i_shape(step: &StepFile, args: &[Value]) -> Result<Vec<[f64; 2]>, GeometryError> {
+    let ifc2x3 = args.len() == 12;
+    let bb = positive(args, 3)?;
+    let h = positive(args, 4)?;
+    let tw = positive(args, 5)?;
+    let tb = positive(args, 6)?;
+    let r_bf = radius(args, 7)?;
+    let bt = positive(args, 8)?;
+    let tt = match args.get(9).and_then(number) {
+        None => tb,
+        Some(v) if v > 0.0 && v.is_finite() => v,
+        Some(_) => return Err(GeometryError::BadProfile),
+    };
+    let r_tf = radius(args, 10)?;
+    let (r_be, kb, r_te, kt) = if ifc2x3 {
+        (0.0, 0.0, 0.0, 0.0)
+    } else {
+        (
+            radius(args, 11)?,
+            slope_tan(step, args, 12)?,
+            radius(args, 13)?,
+            slope_tan(step, args, 14)?,
+        )
+    };
+    // WHERE ValidWebThickness / ValidFlangeThickness /
+    // ValidBottomFilletRadius / ValidTopFilletRadius.
+    if tw >= bb || tw >= bt || tb + tt >= h || r_bf > (bb - tw) / 2.0 || r_tf > (bt - tw) / 2.0 {
+        return Err(GeometryError::BadProfile);
+    }
+    let hh = h / 2.0;
+    // Inner-face heights at the web and at each flange tip: thickness
+    // t(x) = t + (width/4 − x)·tan α measured from the outer face.
+    let yb_web = -hh + (tb + (bb / 4.0 - tw / 2.0) * kb);
+    let yb_tip = -hh + (tb + (bb / 4.0 - bb / 2.0) * kb);
+    let yt_web = hh - (tt + (bt / 4.0 - tw / 2.0) * kt);
+    let yt_tip = hh - (tt + (bt / 4.0 - bt / 2.0) * kt);
+    if yb_web >= yt_web || yb_tip <= -hh || yt_tip >= hh || yb_tip >= yt_tip {
+        return Err(GeometryError::BadProfile);
+    }
+    let (hb, ht, hw) = (bb / 2.0, bt / 2.0, tw / 2.0);
+    round_corners(&[
+        corner(-hb, -hh, 0.0),
+        corner(hb, -hh, 0.0),
+        corner(hb, yb_tip, r_be),
+        corner(hw, yb_web, r_bf),
+        corner(hw, yt_web, r_tf),
+        corner(ht, yt_tip, r_te),
+        corner(ht, hh, 0.0),
+        corner(-ht, hh, 0.0),
+        corner(-ht, yt_tip, r_te),
+        corner(-hw, yt_web, r_tf),
+        corner(-hw, yb_web, r_bf),
+        corner(-hb, yb_tip, r_be),
     ])
 }
 
@@ -654,6 +730,70 @@ mod tests {
             assert_eq!(
                 tessellate_item(&f, 3).unwrap_err(),
                 GeometryError::BadProfile
+            );
+        }
+    }
+
+    #[test]
+    fn asymmetric_i_shape_area_bbox_and_2x3_form() {
+        // Bottom flange 120 × 15, top flange 80 × 10, web 8 thick,
+        // depth 200: A = 120·15 + 80·10 + 8·175 = 4000, bbox 120 × 200
+        // centred.
+        let m = extrude(
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,$,80.,10.,$,$,$,$,$);",
+        );
+        assert_close(m.signed_volume(), 4000.0, 1e-9);
+        assert_centred(&m, 120.0, 200.0);
+        // Omitted top thickness reads as the bottom thickness.
+        let eq = extrude(
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,$,80.,$,$,$,$,$,$);",
+        );
+        assert_close(
+            eq.signed_volume(),
+            120.0 * 15.0 + 80.0 * 15.0 + 8.0 * 170.0,
+            1e-9,
+        );
+        // A wider top flange widens the bounding box.
+        let top = extrude(
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,80.,200.,8.,10.,$,120.,15.,$,$,$,$,$);",
+        );
+        assert_close(top.signed_volume(), 4000.0, 1e-9);
+        assert_centred(&top, 120.0, 200.0);
+        // Fillets add material, edge radii remove it.
+        let f = extrude(
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,6.,80.,10.,4.,$,$,$,$);",
+        );
+        assert!(f.signed_volume() > 4000.0);
+        let e = extrude(
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,$,80.,10.,$,3.,$,3.,$);",
+        );
+        assert!(e.signed_volume() < 4000.0);
+        // IFC 2x3 layout (12 attributes): the I base is the bottom flange.
+        let old =
+            extrude("#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,$,80.,10.,$,$);");
+        assert_close(old.signed_volume(), 4000.0, 1e-9);
+        assert_centred(&old, 120.0, 200.0);
+    }
+
+    #[test]
+    fn asymmetric_i_shape_where_rules_reject() {
+        for src in [
+            // Web wider than the top flange.
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,90.,15.,$,80.,10.,$,$,$,$,$);",
+            // Flanges thicker than the depth.
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,150.,$,80.,60.,$,$,$,$,$);",
+            // Bottom fillet past the half flange overhang.
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,60.,80.,10.,$,$,$,$,$);",
+            // Top fillet past the half flange overhang.
+            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,8.,15.,$,80.,10.,40.,$,$,$,$);",
+        ] {
+            let f = parse(&format!(
+                "{src}\n#2=IFCDIRECTION((0.,0.,1.));\n#3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);"
+            ));
+            assert_eq!(
+                crate::geometry::tessellate_item(&f, 3).unwrap_err(),
+                GeometryError::BadProfile,
+                "{src}"
             );
         }
     }

@@ -20,6 +20,9 @@ All notable changes to this project will be documented in this file.
   surface normal (plane, cylinder, sphere, torus), mitred corners,
   parameter or `IFCLENGTHMEASURE` trims, closed-path wrap; WHERE rule
   `DirectrixBounded` for the family.
+- Phase 3: `IfcAsymmetricIShapeProfileDef` (IFC4 / 4.3 and the IFC 2x3
+  12-attribute layout) with fillet / edge radii and flange slopes, plus
+  its four WHERE rules.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

@@ -150,8 +150,8 @@
 //! as parameters or `IFCLENGTHMEASURE` distances, and closed-path wrap.
 //!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): `IfcAsymmetricIShapeProfileDef`,
-//! advanced/curved breps (`IfcAdvancedBrep`, curved `IfcFaceSurface`),
+//! rather than silently dropped): advanced/curved breps
+//! (`IfcAdvancedBrep`, curved `IfcFaceSurface`), `IfcSectionedSpine`,
 //! and general mesh–mesh boolean subtraction / intersection.
 
 use crate::parser::StepFile;
@@ -6795,15 +6795,15 @@ mod tests {
 
     #[test]
     fn extruded_unsupported_profile_surfaces_keyword() {
-        // An asymmetric I profile is out of this slice → Unsupported(keyword).
+        // A centre-line profile is out of this slice → Unsupported(keyword).
         let f = parse(
-            "#1=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,3.,2.,1.,0.5,2.,$,$,$,$,$,$);\n\
+            "#1=IFCCENTERLINEPROFILEDEF(.AREA.,$,#9,2.);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
              #3=IFCEXTRUDEDAREASOLID(#1,$,#2,1.);",
         );
         assert_eq!(
             tessellate_item(&f, 3).unwrap_err(),
-            GeometryError::Unsupported("IFCASYMMETRICISHAPEPROFILEDEF".to_string())
+            GeometryError::Unsupported("IFCCENTERLINEPROFILEDEF".to_string())
         );
     }
 

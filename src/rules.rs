@@ -86,6 +86,34 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
             rule!("ValidFlangeThickness", 2.0 * tf? < h?);
             rule!("ValidWebThickness", tw? < b?);
         }
+        "IFCASYMMETRICISHAPEPROFILEDEF" if a.len() >= 15 => {
+            // (…, BottomFlangeWidth, OverallDepth, WebThickness,
+            // BottomFlangeThickness, BottomFlangeFilletRadius,
+            // TopFlangeWidth, TopFlangeThickness, TopFlangeFilletRadius, …).
+            let (bb, h, tw, tb, bt) = (num(a, 3), num(a, 4), num(a, 5), num(a, 6), num(a, 8));
+            rule!(
+                "ValidBottomFilletRadius",
+                match num(a, 7) {
+                    None => true,
+                    Some(r) => r <= (bb? - tw?) / 2.0,
+                },
+            );
+            rule!(
+                "ValidFlangeThickness",
+                match num(a, 9) {
+                    None => true,
+                    Some(tt) => tb? + tt < h?,
+                },
+            );
+            rule!(
+                "ValidTopFilletRadius",
+                match num(a, 10) {
+                    None => true,
+                    Some(r) => r <= (bt? - tw?) / 2.0,
+                },
+            );
+            rule!("ValidWebThickness", tw? < bb? && tw? < bt?);
+        }
         "IFCLSHAPEPROFILEDEF" => {
             let (h, w, t) = (num(a, 3), num(a, 4), num(a, 5));
             rule!(
@@ -474,6 +502,7 @@ mod tests {
         let f = parse(
             "#1=IFCISHAPEPROFILEDEF(.AREA.,$,$,100.,200.,100.,150.,60.,$,$);\n\
              #2=IFCLSHAPEPROFILEDEF(.AREA.,$,$,100.,60.,80.,$,$,$);\n\
+             #10=IFCASYMMETRICISHAPEPROFILEDEF(.AREA.,$,$,120.,200.,130.,150.,60.,80.,60.,40.,$,$,$,$);\n\
              #3=IFCTSHAPEPROFILEDEF(.AREA.,$,$,120.,80.,90.,130.,$,$,$,$,$);\n\
              #4=IFCUSHAPEPROFILEDEF(.AREA.,$,$,100.,50.,60.,50.,$,$,$);\n\
              #5=IFCZSHAPEPROFILEDEF(.AREA.,$,$,100.,40.,6.,50.,$,$);\n\
@@ -508,8 +537,17 @@ mod tests {
             ["ValidInnerRadius", "ValidOuterRadius", "ValidWallThickness"]
         );
         assert_eq!(rules(&f, 9), ["WR1"]);
+        assert_eq!(
+            rules(&f, 10),
+            [
+                "ValidBottomFilletRadius",
+                "ValidFlangeThickness",
+                "ValidTopFilletRadius",
+                "ValidWebThickness"
+            ]
+        );
         let all = model_where_rule_violations(&f);
-        assert_eq!(all.len(), 17);
+        assert_eq!(all.len(), 21);
         assert_eq!(all[0].id, 1);
         assert_eq!(all[0].entity, "IFCISHAPEPROFILEDEF");
     }

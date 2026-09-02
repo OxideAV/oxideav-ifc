@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I/L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps and non-convex mesh–mesh booleans later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation), face/shell surface models, swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; advanced (curved) breps and non-convex mesh–mesh booleans later |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
@@ -196,10 +196,13 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   (`WallThickness` inset, inner / outer fillet radii rounded),
   `IfcCircleProfileDef` / `IfcCircleHollowProfileDef` (48-segment
   circles / annuli), `IfcEllipseProfileDef`, the **named parameterised
-  sections** `IfcIShapeProfileDef` / `IfcLShapeProfileDef` /
-  `IfcTShapeProfileDef` / `IfcUShapeProfileDef` / `IfcZShapeProfileDef`
-  / `IfcCShapeProfileDef` / `IfcRoundedRectangleProfileDef` /
-  `IfcTrapeziumProfileDef` (contours built centred on the profile's
+  sections** `IfcIShapeProfileDef` / `IfcAsymmetricIShapeProfileDef`
+  (unequal flanges centred on the web; IFC4 and the 12-attribute IFC 2x3
+  layout; an omitted `TopFlangeThickness` reads as the bottom one) /
+  `IfcLShapeProfileDef` / `IfcTShapeProfileDef` / `IfcUShapeProfileDef`
+  / `IfcZShapeProfileDef` / `IfcCShapeProfileDef` /
+  `IfcRoundedRectangleProfileDef` / `IfcTrapeziumProfileDef` (contours
+  built centred on the profile's
   bounding box per the parameterised-profiles digest — Z overall width
   `2·FlangeWidth − WebThickness`, trapezium centred on its
   `BottomXDim × YDim` rectangle — with tangent-arc fillet / edge radii
@@ -355,9 +358,9 @@ disk solids, B-spline curves
 `CorrespondingKnotLists`, rational `SameNumOfWeightsAndPoints` /
 `WeightsGreaterZero`), `IfcMapConversion` and `IfcRigidOperation`.
 
-Still later in Phase 3: `IfcAsymmetricIShapeProfileDef`, advanced
-(curved) breps (`IfcAdvancedBrep` / curved `IfcFaceSurface`),
-`IfcSectionedSpine`, and non-convex mesh–mesh booleans.
+Still later in Phase 3: advanced (curved) breps (`IfcAdvancedBrep` /
+curved `IfcFaceSurface`), `IfcSectionedSpine`, and non-convex
+mesh–mesh booleans.
 
 ## Phase 4 surface — semantic data layer
 
