@@ -40,6 +40,10 @@ All notable changes to this project will be documented in this file.
   the cross-face chord repair drops chord-collinear triangles and carries a
   split budget (a fuzz-found 6-million-triangle blow-up on a corrupted torus
   Brep).
+- Phase 3: `IfcSectionedSpine` (profiles at explicit placements lofted along
+  a composite spine with sub-sections at the spine vertices) + its
+  `CorrespondingSectionPositions` / `ConsistentProfileTypes` rules; the
+  sectioned-solid loft is shared.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

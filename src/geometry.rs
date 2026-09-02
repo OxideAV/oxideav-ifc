@@ -158,10 +158,14 @@
 //! revolved / extruded face surfaces) the parameter-space trimmer of
 //! the `trim` submodule.
 //!
+//! **`IfcSectionedSpine`** lofts profiles placed by explicit
+//! `IfcAxis2Placement3D`s along a composite spine, blending
+//! sub-sections at the spine vertices between placements.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): `IfcSectionedSpine`, bounded-surface
-//! representation items, and general mesh–mesh boolean subtraction /
-//! intersection.
+//! rather than silently dropped): bounded-surface representation
+//! items, `IfcSectionedSurface`, and general mesh–mesh boolean
+//! subtraction / intersection.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -322,6 +326,9 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         }
         // Sectioned solid: profiles lofted at stations along a directrix.
         "IFCSECTIONEDSOLIDHORIZONTAL" => sectioned_solid_horizontal(step, &inst.args),
+        // Sectioned spine: profiles placed by explicit placements along
+        // a composite spine curve and lofted.
+        "IFCSECTIONEDSPINE" => sectioned_spine(step, &inst.args),
         // Parametric CSG primitives (swept-disk digest §3) and the CSG
         // tree root wrapper.
         "IFCBLOCK"
@@ -3317,22 +3324,67 @@ fn sectioned_solid_horizontal(step: &StepFile, args: &[Value]) -> Result<TriMesh
         );
     }
 
-    // Vertex layout: per station, the concatenated rings (outer first,
-    // then holes) — the same order as ProfileArea::rings, so a profile
-    // cap triangulation indexes directly.
-    let per_station: usize = station_rings[0].iter().map(Vec::len).sum();
+    loft_station_rings(
+        &station_rings,
+        &first_area.ok_or(GeometryError::BadProfile)?,
+        &last_area.ok_or(GeometryError::BadProfile)?,
+    )
+}
+
+/// Rotate unit direction `a` toward `b` by the fraction `t` of the
+/// angle between them (about `a × b`); anti-parallel or degenerate
+/// inputs fall back to the linear blend.
+fn slerp_dir(a: [f64; 3], b: [f64; 3], t: f64) -> [f64; 3] {
+    let (Some(a), Some(b)) = (normalise(a), normalise(b)) else {
+        return a;
+    };
+    let axis = cross_raw(a, b);
+    let sin = dot_raw(axis, axis).sqrt();
+    let cos = dot_raw(a, b).clamp(-1.0, 1.0);
+    if sin <= 1e-12 {
+        return [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ];
+    }
+    rotate_about_axis(a, [0.0; 3], axis, sin.atan2(cos) * t)
+}
+
+/// Stitch a run of realised section rings into a closed loft: walls
+/// between consecutive stations ring by ring (hole walls wound inward),
+/// the first section's cap facing backward and the last one's forward.
+///
+/// `station_rings[s][r]` is ring `r` (outer first, then holes — the
+/// [`ProfileArea::rings`] order, so `first_cap` / `last_cap`
+/// triangulations index the concatenated rings directly) of station
+/// `s`; every station must share the ring structure.
+fn loft_station_rings(
+    station_rings: &[Vec<Vec<[f64; 3]>>],
+    first_cap: &ProfileArea,
+    last_cap: &ProfileArea,
+) -> Result<TriMesh, GeometryError> {
+    if station_rings.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    let ring_lens: Vec<usize> = station_rings[0].iter().map(Vec::len).collect();
+    if station_rings.iter().any(|rings| {
+        rings.len() != ring_lens.len() || rings.iter().zip(&ring_lens).any(|(r, &k)| r.len() != k)
+    }) {
+        return Err(GeometryError::BadProfile);
+    }
+    // Vertex layout: per station, the concatenated rings.
+    let per_station: usize = ring_lens.iter().sum();
     let mut positions: Vec<[f64; 3]> = Vec::with_capacity(per_station * station_rings.len());
-    for rings in &station_rings {
+    for rings in station_rings {
         for ring in rings {
             positions.extend_from_slice(ring);
         }
     }
-    let ring_lens: Vec<usize> = station_rings[0].iter().map(Vec::len).collect();
 
     let mut triangles: Vec<[u32; 3]> = Vec::new();
     // Walls between consecutive stations, ring by ring (hole walls
-    // wound inward). Rings are CCW about the +tangent-ish loft axis
-    // (lateral × up = tangent's horizontal direction).
+    // wound inward). Rings are CCW about the loft axis.
     for s in 0..(station_rings.len() - 1) {
         let a0 = (s * per_station) as u32;
         let b0 = ((s + 1) * per_station) as u32;
@@ -3355,13 +3407,19 @@ fn sectioned_solid_horizontal(step: &StepFile, args: &[Value]) -> Result<TriMesh
     }
     // End caps: the first station's profile triangulation reversed
     // (faces backward), the last station's forward.
-    let first_cap = triangulate_profile(&first_area.ok_or(GeometryError::BadProfile)?)?;
-    for &[a, b, c] in &first_cap {
+    let cap = triangulate_profile(first_cap)?;
+    if cap.iter().flatten().any(|&i| i as usize >= per_station) {
+        return Err(GeometryError::BadProfile);
+    }
+    for &[a, b, c] in &cap {
         triangles.push([a, c, b]);
     }
-    let last_cap = triangulate_profile(&last_area.ok_or(GeometryError::BadProfile)?)?;
+    let cap = triangulate_profile(last_cap)?;
+    if cap.iter().flatten().any(|&i| i as usize >= per_station) {
+        return Err(GeometryError::BadProfile);
+    }
     let base = ((station_rings.len() - 1) * per_station) as u32;
-    for &[a, b, c] in &last_cap {
+    for &[a, b, c] in &cap {
         triangles.push([base + a, base + b, base + c]);
     }
 
@@ -3369,6 +3427,228 @@ fn sectioned_solid_horizontal(step: &StepFile, args: &[Value]) -> Result<TriMesh
         positions,
         triangles,
     })
+}
+
+// =====================================================================
+// IfcSectionedSpine (SpineCurve, CrossSections, CrossSectionPositions)
+//
+// EXPRESS (IFC 2x3 / 4 / 4.3 alike): a composite spine curve, ≥ 2
+// profiles, and one IfcAxis2Placement3D per profile; WHERE
+// CorrespondingSectionPositions (equal counts), ConsistentProfileTypes,
+// SpineCurveDim (3-D spine). Each profile is placed by its own
+// placement (profile xy-plane → placement frame) and consecutive
+// sections are lofted. To follow a curved spine between two authored
+// placements, a sub-section is inserted at every spine vertex strictly
+// between the placements' stations (their origins projected onto the
+// sampled spine), blending the profile rings, the placement offset
+// from the spine and the frame axes linearly — the same expansion the
+// IFC 4.3 sectioned solid uses for its distance-along stations.
+// =====================================================================
+
+fn sectioned_spine(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let spine_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let sections = args
+        .get(1)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadProfile)?;
+    let placements = args
+        .get(2)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+    if sections.len() != placements.len() || sections.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    let spine = curve_points_3d(step, spine_id, 0)?;
+    if spine.len() < 2 {
+        return Err(GeometryError::BadProfile);
+    }
+    let mut cumulative: Vec<f64> = Vec::with_capacity(spine.len());
+    let mut total = 0.0;
+    cumulative.push(0.0);
+    for w in spine.windows(2) {
+        total += dist(w[0], w[1]);
+        cumulative.push(total);
+    }
+    // Nearest spine point to `p`: (distance-along, point).
+    let project = |p: [f64; 3]| -> (f64, [f64; 3]) {
+        let mut best = (f64::INFINITY, 0.0, spine[0]);
+        for (i, w) in spine.windows(2).enumerate() {
+            let d = [w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]];
+            let len2 = dot_raw(d, d);
+            let f = if len2 > 0.0 {
+                (dot_raw([p[0] - w[0][0], p[1] - w[0][1], p[2] - w[0][2]], d) / len2)
+                    .clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let q = [w[0][0] + d[0] * f, w[0][1] + d[1] * f, w[0][2] + d[2] * f];
+            let dd = dist(p, q);
+            if dd < best.0 {
+                best = (
+                    dd,
+                    cumulative[i] + (cumulative[i + 1] - cumulative[i]) * f,
+                    q,
+                );
+            }
+        }
+        (best.1, best.2)
+    };
+    let point_at = |s: f64| -> [f64; 3] {
+        let i = cumulative
+            .partition_point(|&c| c < s)
+            .clamp(1, spine.len() - 1);
+        let (a, b) = (spine[i - 1], spine[i]);
+        let seg = cumulative[i] - cumulative[i - 1];
+        let t = if seg > 0.0 {
+            (s - cumulative[i - 1]) / seg
+        } else {
+            0.0
+        };
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
+
+    struct Station {
+        dist: f64,
+        offset: [f64; 3],
+        x: [f64; 3],
+        z: [f64; 3],
+        rings: Vec<Vec<[f64; 2]>>,
+    }
+    let mut authored: Vec<Station> = Vec::with_capacity(sections.len());
+    let mut first_area: Option<ProfileArea> = None;
+    let mut last_area: Option<ProfileArea> = None;
+    for (si, (sec, pl)) in sections.iter().zip(placements).enumerate() {
+        let profile_id = sec.as_reference().ok_or(GeometryError::BadProfile)?;
+        let area = profile_area(step, profile_id)?;
+        let pl_id = pl.as_reference().ok_or(GeometryError::BadCoordinates)?;
+        let frame = axis2_placement_3d(step, pl_id)?;
+        let (dist_along, on_spine) = project(frame.translation);
+        let rings: Vec<Vec<[f64; 2]>> = area.rings().cloned().collect();
+        if let Some(prev) = authored.last() {
+            if prev.rings.len() != rings.len()
+                || prev
+                    .rings
+                    .iter()
+                    .zip(&rings)
+                    .any(|(a, b)| a.len() != b.len())
+                || dist_along <= prev.dist
+            {
+                return Err(GeometryError::BadProfile);
+            }
+        }
+        authored.push(Station {
+            dist: dist_along,
+            offset: [
+                frame.translation[0] - on_spine[0],
+                frame.translation[1] - on_spine[1],
+                frame.translation[2] - on_spine[2],
+            ],
+            x: frame.cols[0],
+            z: frame.cols[2],
+            rings,
+        });
+        if si == 0 {
+            first_area = Some(area);
+        } else {
+            last_area = Some(area);
+        }
+    }
+    let section_points: usize = authored[0].rings.iter().map(Vec::len).sum();
+    if section_points.saturating_mul(spine.len() + authored.len()) > MAX_SWEEP_SECTION_POINTS {
+        return Err(GeometryError::BadProfile);
+    }
+
+    // Expand with sub-stations at the spine vertices between authored
+    // stations.
+    let lerp3 = |a: [f64; 3], b: [f64; 3], t: f64| {
+        [
+            a[0] + (b[0] - a[0]) * t,
+            a[1] + (b[1] - a[1]) * t,
+            a[2] + (b[2] - a[2]) * t,
+        ]
+    };
+    let mut expanded: Vec<Station> = Vec::new();
+    for w in 0..(authored.len() - 1) {
+        let (a, b) = (&authored[w], &authored[w + 1]);
+        let blend = |t: f64| -> Station {
+            Station {
+                dist: a.dist + t * (b.dist - a.dist),
+                offset: lerp3(a.offset, b.offset, t),
+                x: slerp_dir(a.x, b.x, t),
+                z: slerp_dir(a.z, b.z, t),
+                rings: a
+                    .rings
+                    .iter()
+                    .zip(&b.rings)
+                    .map(|(ra, rb)| {
+                        ra.iter()
+                            .zip(rb)
+                            .map(|(pa, pb)| {
+                                [pa[0] + t * (pb[0] - pa[0]), pa[1] + t * (pb[1] - pa[1])]
+                            })
+                            .collect()
+                    })
+                    .collect(),
+            }
+        };
+        expanded.push(blend(0.0));
+        for &c in &cumulative {
+            if c > a.dist + 1e-12 && c < b.dist - 1e-12 {
+                expanded.push(blend((c - a.dist) / (b.dist - a.dist)));
+            }
+        }
+    }
+    {
+        let last = authored.last().expect("≥ 2 stations checked above");
+        expanded.push(Station {
+            dist: last.dist,
+            offset: last.offset,
+            x: last.x,
+            z: last.z,
+            rings: last.rings.clone(),
+        });
+    }
+
+    // Realise the rings: origin = spine point + blended offset, axes
+    // re-orthonormalised from the blended z / x (IfcBuildAxes).
+    let mut station_rings: Vec<Vec<Vec<[f64; 3]>>> = Vec::with_capacity(expanded.len());
+    for st in &expanded {
+        let p = point_at(st.dist);
+        let origin = [
+            p[0] + st.offset[0],
+            p[1] + st.offset[1],
+            p[2] + st.offset[2],
+        ];
+        let [x, y, _z] = build_axes(normalise(st.z), normalise(st.x));
+        station_rings.push(
+            st.rings
+                .iter()
+                .map(|ring| {
+                    ring.iter()
+                        .map(|&[px, py]| {
+                            [
+                                origin[0] + px * x[0] + py * y[0],
+                                origin[1] + px * x[1] + py * y[1],
+                                origin[2] + px * x[2] + py * y[2],
+                            ]
+                        })
+                        .collect()
+                })
+                .collect(),
+        );
+    }
+    loft_station_rings(
+        &station_rings,
+        &first_area.ok_or(GeometryError::BadProfile)?,
+        &last_area.ok_or(GeometryError::BadProfile)?,
+    )
 }
 
 /// Resolve an `IfcAxis2PlacementLinear` station to `(distance-along,
@@ -6860,6 +7140,94 @@ mod tests {
         );
     }
 
+    /// A sectioned spine along the straight composite spine
+    /// (0,0,0)→(0,0,10) with `bottom` / `top` profiles placed at z = 0
+    /// and z = 10 (axis +Z, ref +X).
+    fn straight_spine(bottom: &str, top: &str) -> String {
+        format!(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((0.,0.,10.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n#4=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#3);\n\
+             #5=IFCCOMPOSITECURVE((#4),.F.);\n\
+             #6=IFCAXIS2PLACEMENT3D(#1,$,$);\n#7=IFCAXIS2PLACEMENT3D(#2,$,$);\n\
+             #10={bottom}\n#11={top}\n\
+             #20=IFCSECTIONEDSPINE(#5,(#10,#11),(#6,#7));"
+        )
+    }
+
+    #[test]
+    fn sectioned_spine_straight_prism_and_frustum() {
+        let f = parse(&straight_spine(
+            "IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);",
+            "IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);",
+        ));
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_watertight(&m);
+        assert!(
+            (m.signed_volume() - 40.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert_bbox(&m, [-1.0, -1.0, 0.0], [1.0, 1.0, 10.0]);
+        // A 2×2 → 4×4 loft is the frustum h/3·(A₁ + A₂ + √(A₁A₂)).
+        let f = parse(&straight_spine(
+            "IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);",
+            "IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);",
+        ));
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_watertight(&m);
+        let frustum = 10.0 / 3.0 * (4.0 + 16.0 + 8.0);
+        assert!(
+            (m.signed_volume() - frustum).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        // Mismatched ring structure (hollow vs solid) is refused.
+        let f = parse(&straight_spine(
+            "IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);",
+            "IFCRECTANGLEHOLLOWPROFILEDEF(.AREA.,$,$,4.,4.,0.5,$,$);",
+        ));
+        assert_eq!(
+            tessellate_item(&f, 20).unwrap_err(),
+            GeometryError::BadProfile
+        );
+    }
+
+    #[test]
+    fn sectioned_spine_follows_a_curved_spine_between_placements() {
+        // A quarter-circle spine of radius 10 in the xy-plane with a
+        // centred 4 × 2 section at each end, the frames tangent to the
+        // arc: sub-sections at every spine vertex make the loft follow
+        // the arc (Pappus: V = A·R·π/2 up to the chord error plus the
+        // tilt of the vertex sections against their straight prisms,
+        // ~0.3 % at the circle density), instead of a straight jump
+        // between the two placements.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCCIRCLE(#2,10.);\n\
+             #4=IFCCARTESIANPOINT((10.,0.,0.));\n#5=IFCCARTESIANPOINT((0.,10.,0.));\n\
+             #6=IFCTRIMMEDCURVE(#3,(#4),(#5),.T.,.CARTESIAN.);\n\
+             #7=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#6);\n#8=IFCCOMPOSITECURVE((#7),.F.);\n\
+             #10=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,2.);\n\
+             #11=IFCDIRECTION((0.,1.,0.));\n#12=IFCDIRECTION((0.,0.,1.));\n\
+             #13=IFCAXIS2PLACEMENT3D(#4,#11,#12);\n\
+             #14=IFCDIRECTION((-1.,0.,0.));\n\
+             #15=IFCAXIS2PLACEMENT3D(#5,#14,#12);\n\
+             #20=IFCSECTIONEDSPINE(#8,(#10,#10),(#13,#15));",
+        );
+        let m = tessellate_item(&f, 20).unwrap();
+        assert_watertight(&m);
+        let exact = 8.0 * 10.0 * core::f64::consts::FRAC_PI_2;
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 5e-3, "{v} vs {exact}");
+        // 13 stations (the 12 arc chords) × 4 ring points.
+        assert_eq!(m.vertex_count(), 13 * 4);
+        for p in &m.positions {
+            let r = p[0].hypot(p[1]);
+            assert!(r > 9.0 - 0.05 && r < 11.0 + 0.05, "{p:?}");
+            assert!(p[2].abs() <= 2.0 + 1e-9);
+        }
+    }
+
     #[test]
     fn nurbs_circle_profile_extrudes_like_a_circle_profile() {
         // The rational quadratic circle meshes at the IfcCircle density
@@ -7098,12 +7466,12 @@ mod tests {
 
     #[test]
     fn shape_representation_skips_unsupported_items() {
-        // A representation mixing a (still unsupported) sectioned spine
-        // with a triangulated body still yields the body mesh.
+        // A representation mixing a (still unsupported) sectioned
+        // surface with a triangulated body still yields the body mesh.
         let f = parse(
             "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
              #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
-             #3=IFCSECTIONEDSPINE(#9,(#9),(#9));\n\
+             #3=IFCSECTIONEDSURFACE(#9,(#9),(#9));\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','Tessellation',(#3,#2));",
         );
         let m = mesh_from_shape_representation(&f, 4).unwrap();
@@ -7113,13 +7481,13 @@ mod tests {
     #[test]
     fn all_unsupported_surfaces_keyword() {
         let f = parse(
-            "#3=IFCSECTIONEDSPINE(#9,(#9),(#9));\n\
+            "#3=IFCSECTIONEDSURFACE(#9,(#9),(#9));\n\
              #4=IFCSHAPEREPRESENTATION(#8,'Body','SweptSolid',(#3));",
         );
         let err = mesh_from_shape_representation(&f, 4).unwrap_err();
         assert_eq!(
             err,
-            GeometryError::Unsupported("IFCSECTIONEDSPINE".to_string())
+            GeometryError::Unsupported("IFCSECTIONEDSURFACE".to_string())
         );
     }
 

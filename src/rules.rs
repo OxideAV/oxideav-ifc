@@ -326,6 +326,30 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 directrix.map(|d| bounded || is_conic_or_bounded(&d.keyword)),
             );
         }
+        "IFCSECTIONEDSPINE" => {
+            // (SpineCurve, CrossSections, CrossSectionPositions).
+            let sections = a.get(1).and_then(Value::as_list);
+            let positions = a.get(2).and_then(Value::as_list);
+            rule!(
+                "CorrespondingSectionPositions",
+                sections?.len() == positions?.len()
+            );
+            let first_type = sections.and_then(|ps| {
+                let p = step.get(ps.first()?.as_reference()?)?;
+                p.args.first().and_then(Value::as_enum)
+            });
+            check(
+                "ConsistentProfileTypes",
+                sections.map(|ps| {
+                    ps.iter().all(|p| {
+                        p.as_reference()
+                            .and_then(|pid| step.get(pid))
+                            .and_then(|i| i.args.first().and_then(Value::as_enum))
+                            == first_type
+                    })
+                }),
+            );
+        }
         // ---- B-spline curves ----
         "IFCBSPLINECURVEWITHKNOTS" | "IFCRATIONALBSPLINECURVEWITHKNOTS" => {
             // (Degree, ControlPointsList, CurveForm, ClosedCurve,
@@ -635,6 +659,21 @@ mod tests {
         assert_eq!(rules(&f, 11), ["InnerRadiusSize"]);
         assert_eq!(rules(&f, 12), ["DirectrixBounded"]);
         assert!(rules(&f, 13).is_empty());
+    }
+
+    #[test]
+    fn sectioned_spine_rules() {
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
+             #2=IFCRECTANGLEPROFILEDEF(.CURVE.,$,$,2.,4.);\n\
+             #3=IFCCARTESIANPOINT((0.,0.,0.));\n#4=IFCAXIS2PLACEMENT3D(#3,$,$);\n\
+             #10=IFCSECTIONEDSPINE(#9,(#1,#1),(#4,#4));\n\
+             #11=IFCSECTIONEDSPINE(#9,(#1,#1),(#4));\n\
+             #12=IFCSECTIONEDSPINE(#9,(#1,#2),(#4,#4));",
+        );
+        assert!(rules(&f, 10).is_empty());
+        assert_eq!(rules(&f, 11), ["CorrespondingSectionPositions"]);
+        assert_eq!(rules(&f, 12), ["ConsistentProfileTypes"]);
     }
 
     #[test]
