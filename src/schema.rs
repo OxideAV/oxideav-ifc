@@ -866,6 +866,226 @@ pub const SCHEMA: &[EntitySchema] = &[
             "FixedReference"
         ]),
     },
+    // ---- Curved-Brep / surface / B-spline slice (Phase 3 r455) ----
+    EntitySchema {
+        keyword: "IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID",
+        kind: EntityKind::Geometry,
+        // IFC 4.3 subtype of IfcFixedReferenceSweptAreaSolid, no new attributes.
+        attrs: chain!(&[
+            "SweptArea",
+            "Position",
+            "Directrix",
+            "StartParam",
+            "EndParam",
+            "FixedReference"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCASYMMETRICISHAPEPROFILEDEF",
+        kind: EntityKind::Geometry,
+        // IfcParameterizedProfileDef(3) + 12 (IFC4 / 4.3 layout).
+        attrs: chain!(&[
+            "ProfileType",
+            "ProfileName",
+            "Position",
+            "BottomFlangeWidth",
+            "OverallDepth",
+            "WebThickness",
+            "BottomFlangeThickness",
+            "BottomFlangeFilletRadius",
+            "TopFlangeWidth",
+            "TopFlangeThickness",
+            "TopFlangeFilletRadius",
+            "BottomFlangeEdgeRadius",
+            "BottomFlangeSlope",
+            "TopFlangeEdgeRadius",
+            "TopFlangeSlope"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCSECTIONEDSPINE",
+        kind: EntityKind::Geometry,
+        // IfcSectionedSpine(SpineCurve, CrossSections, CrossSectionPositions).
+        attrs: chain!(&["SpineCurve", "CrossSections", "CrossSectionPositions"]),
+    },
+    EntitySchema {
+        keyword: "IFCADVANCEDBREP",
+        kind: EntityKind::Geometry,
+        // IfcManifoldSolidBrep(Outer).
+        attrs: chain!(&["Outer"]),
+    },
+    EntitySchema {
+        keyword: "IFCADVANCEDBREPWITHVOIDS",
+        kind: EntityKind::Geometry,
+        // IfcManifoldSolidBrep(1) + Voids.
+        attrs: chain!(&["Outer", "Voids"]),
+    },
+    EntitySchema {
+        keyword: "IFCFACESURFACE",
+        kind: EntityKind::Geometry,
+        // IfcFace(Bounds) + FaceSurface, SameSense.
+        attrs: chain!(&["Bounds", "FaceSurface", "SameSense"]),
+    },
+    EntitySchema {
+        keyword: "IFCADVANCEDFACE",
+        kind: EntityKind::Geometry,
+        // IfcFaceSurface(3), no new attributes.
+        attrs: chain!(&["Bounds", "FaceSurface", "SameSense"]),
+    },
+    EntitySchema {
+        keyword: "IFCEDGELOOP",
+        kind: EntityKind::Geometry,
+        // IfcEdgeLoop(EdgeList).
+        attrs: chain!(&["EdgeList"]),
+    },
+    EntitySchema {
+        keyword: "IFCEDGE",
+        kind: EntityKind::Geometry,
+        // IfcEdge(EdgeStart, EdgeEnd).
+        attrs: chain!(&["EdgeStart", "EdgeEnd"]),
+    },
+    EntitySchema {
+        keyword: "IFCEDGECURVE",
+        kind: EntityKind::Geometry,
+        // IfcEdge(2) + EdgeGeometry, SameSense.
+        attrs: chain!(&["EdgeStart", "EdgeEnd", "EdgeGeometry", "SameSense"]),
+    },
+    EntitySchema {
+        keyword: "IFCORIENTEDEDGE",
+        kind: EntityKind::Geometry,
+        // IfcEdge(2, derived `*` on the wire) + EdgeElement, Orientation.
+        attrs: chain!(&["EdgeStart", "EdgeEnd", "EdgeElement", "Orientation"]),
+    },
+    EntitySchema {
+        keyword: "IFCSUBEDGE",
+        kind: EntityKind::Geometry,
+        // IfcEdge(2) + ParentEdge.
+        attrs: chain!(&["EdgeStart", "EdgeEnd", "ParentEdge"]),
+    },
+    EntitySchema {
+        keyword: "IFCVERTEXPOINT",
+        kind: EntityKind::Geometry,
+        // IfcVertexPoint(VertexGeometry).
+        attrs: chain!(&["VertexGeometry"]),
+    },
+    EntitySchema {
+        keyword: "IFCPLANE",
+        kind: EntityKind::Geometry,
+        // IfcElementarySurface(Position).
+        attrs: chain!(&["Position"]),
+    },
+    EntitySchema {
+        keyword: "IFCCYLINDRICALSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcElementarySurface(1) + Radius.
+        attrs: chain!(&["Position", "Radius"]),
+    },
+    EntitySchema {
+        keyword: "IFCSPHERICALSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcElementarySurface(1) + Radius.
+        attrs: chain!(&["Position", "Radius"]),
+    },
+    EntitySchema {
+        keyword: "IFCTOROIDALSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcElementarySurface(1) + MajorRadius, MinorRadius.
+        attrs: chain!(&["Position", "MajorRadius", "MinorRadius"]),
+    },
+    EntitySchema {
+        keyword: "IFCSURFACEOFREVOLUTION",
+        kind: EntityKind::Geometry,
+        // IfcSweptSurface(SweptCurve, Position) + AxisPosition.
+        attrs: chain!(&["SweptCurve", "Position", "AxisPosition"]),
+    },
+    EntitySchema {
+        keyword: "IFCSURFACEOFLINEAREXTRUSION",
+        kind: EntityKind::Geometry,
+        // IfcSweptSurface(2) + ExtrudedDirection, Depth.
+        attrs: chain!(&["SweptCurve", "Position", "ExtrudedDirection", "Depth"]),
+    },
+    EntitySchema {
+        keyword: "IFCBSPLINECURVEWITHKNOTS",
+        kind: EntityKind::Geometry,
+        // IfcBSplineCurve(5) + KnotMultiplicities, Knots, KnotSpec.
+        attrs: chain!(&[
+            "Degree",
+            "ControlPointsList",
+            "CurveForm",
+            "ClosedCurve",
+            "SelfIntersect",
+            "KnotMultiplicities",
+            "Knots",
+            "KnotSpec"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCRATIONALBSPLINECURVEWITHKNOTS",
+        kind: EntityKind::Geometry,
+        // IfcBSplineCurveWithKnots(8) + WeightsData.
+        attrs: chain!(&[
+            "Degree",
+            "ControlPointsList",
+            "CurveForm",
+            "ClosedCurve",
+            "SelfIntersect",
+            "KnotMultiplicities",
+            "Knots",
+            "KnotSpec",
+            "WeightsData"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCBSPLINESURFACEWITHKNOTS",
+        kind: EntityKind::Geometry,
+        // IfcBSplineSurface(7) + UMultiplicities, VMultiplicities, UKnots, VKnots, KnotSpec.
+        attrs: chain!(&[
+            "UDegree",
+            "VDegree",
+            "ControlPointsList",
+            "SurfaceForm",
+            "UClosed",
+            "VClosed",
+            "SelfIntersect",
+            "UMultiplicities",
+            "VMultiplicities",
+            "UKnots",
+            "VKnots",
+            "KnotSpec"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCRATIONALBSPLINESURFACEWITHKNOTS",
+        kind: EntityKind::Geometry,
+        // IfcBSplineSurfaceWithKnots(12) + WeightsData.
+        attrs: chain!(&[
+            "UDegree",
+            "VDegree",
+            "ControlPointsList",
+            "SurfaceForm",
+            "UClosed",
+            "VClosed",
+            "SelfIntersect",
+            "UMultiplicities",
+            "VMultiplicities",
+            "UKnots",
+            "VKnots",
+            "KnotSpec",
+            "WeightsData"
+        ]),
+    },
+    EntitySchema {
+        keyword: "IFCCURVEBOUNDEDPLANE",
+        kind: EntityKind::Geometry,
+        // IfcCurveBoundedPlane(BasisSurface, OuterBoundary, InnerBoundaries).
+        attrs: chain!(&["BasisSurface", "OuterBoundary", "InnerBoundaries"]),
+    },
+    EntitySchema {
+        keyword: "IFCRECTANGULARTRIMMEDSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcRectangularTrimmedSurface(BasisSurface, U1, V1, U2, V2, Usense, Vsense).
+        attrs: chain!(&["BasisSurface", "U1", "V1", "U2", "V2", "Usense", "Vsense"]),
+    },
     // ---- Boolean results / half spaces ----
     EntitySchema {
         keyword: "IFCBOOLEANRESULT",
@@ -3056,6 +3276,31 @@ mod tests {
             ("IFCREVOLVEDAREASOLIDTAPERED", 5),
             ("IFCSURFACECURVESWEPTAREASOLID", 6),
             ("IFCFIXEDREFERENCESWEPTAREASOLID", 6),
+            ("IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID", 6),
+            ("IFCASYMMETRICISHAPEPROFILEDEF", 15),
+            ("IFCSECTIONEDSPINE", 3),
+            ("IFCADVANCEDBREP", 1),
+            ("IFCADVANCEDBREPWITHVOIDS", 2),
+            ("IFCFACESURFACE", 3),
+            ("IFCADVANCEDFACE", 3),
+            ("IFCEDGELOOP", 1),
+            ("IFCEDGE", 2),
+            ("IFCEDGECURVE", 4),
+            ("IFCORIENTEDEDGE", 4),
+            ("IFCSUBEDGE", 3),
+            ("IFCVERTEXPOINT", 1),
+            ("IFCPLANE", 1),
+            ("IFCCYLINDRICALSURFACE", 2),
+            ("IFCSPHERICALSURFACE", 2),
+            ("IFCTOROIDALSURFACE", 3),
+            ("IFCSURFACEOFREVOLUTION", 3),
+            ("IFCSURFACEOFLINEAREXTRUSION", 4),
+            ("IFCBSPLINECURVEWITHKNOTS", 8),
+            ("IFCRATIONALBSPLINECURVEWITHKNOTS", 9),
+            ("IFCBSPLINESURFACEWITHKNOTS", 12),
+            ("IFCRATIONALBSPLINESURFACEWITHKNOTS", 13),
+            ("IFCCURVEBOUNDEDPLANE", 3),
+            ("IFCRECTANGULARTRIMMEDSURFACE", 7),
         ];
         for (kw, want) in lens {
             assert_eq!(

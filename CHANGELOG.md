@@ -56,6 +56,8 @@ All notable changes to this project will be documented in this file.
   `IfcEdgeLoop`, `IfcOrientedEdge`, `IfcToroidalSurface`, the swept
   surfaces and the B-spline surfaces (`IfcConstraintsParamBSpline` per
   direction, weight rules).
+- Typed schema entries (Phase 2) for the curved-Brep / surface / B-spline
+  / sectioned-spine / bounded-surface entities and the asymmetric I profile.
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 
