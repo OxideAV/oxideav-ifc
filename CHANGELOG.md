@@ -27,6 +27,12 @@ All notable changes to this project will be documented in this file.
   (line, unbounded conic, any bounded curve) / `IfcEdge` / `IfcSubedge`
   over `IfcVertexPoint`s, edge runs shared between faces; `IfcAdvancedBrep`
   / `IfcAdvancedBrepWithVoids` with planar `IfcAdvancedFace`s tessellate.
+- Phase 3: curved advanced faces — `IfcCylindricalSurface`,
+  `IfcSphericalSurface`, `IfcToroidalSurface`, `IfcBSplineSurfaceWithKnots`
+  / `IfcRationalBSplineSurfaceWithKnots` face surfaces trimmed in parameter
+  space (loop inversion + continuous unwrapping, period-image clipping to a
+  fundamental rectangle with seam / pole edges, hole-aware ear clipping,
+  midpoint refinement, parameter welding, cross-face chord repair).
 
 ## [0.0.2](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.1...v0.0.2) - 2026-08-30
 

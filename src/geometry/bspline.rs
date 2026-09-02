@@ -1,5 +1,5 @@
-//! B-spline curves — the `IfcBSplineCurve` family evaluated by de
-//! Boor's recurrence.
+//! B-spline curves and surfaces — the `IfcBSplineCurve` /
+//! `IfcBSplineSurface` families evaluated by de Boor's recurrence.
 //!
 //! The EXPRESS text (`IFC4X3_ADD2.exp`, identical in `IFC4_ADD2.exp`)
 //! carries the data: `Degree`, the control-point list, the distinct
@@ -32,6 +32,9 @@ use crate::value::Value;
 /// Upper bound on the samples one curve run may produce (a hostile knot
 /// list with thousands of spans is clamped to this density).
 const MAX_CURVE_SAMPLES: usize = 4096;
+
+/// Upper bound on the samples per surface direction.
+const MAX_SURFACE_SAMPLES_PER_DIR: usize = 256;
 
 /// Upper bound on the control points (or knots / weights) one curve or
 /// surface may carry — a hostile list past this is rejected outright.
@@ -422,6 +425,218 @@ fn homogenise(
     }
 }
 
+/// A B-spline (or NURBS) surface ready for evaluation.
+#[derive(Debug, Clone)]
+pub(super) struct BSplineSurface {
+    u_degree: usize,
+    v_degree: usize,
+    /// `points[i][j]`: homogeneous control point at (u index i, v index j).
+    points: Vec<Vec<[f64; 4]>>,
+    u_knots: Vec<f64>,
+    v_knots: Vec<f64>,
+    /// `UClosed` / `VClosed` as authored.
+    pub(super) u_closed: Option<bool>,
+    pub(super) v_closed: Option<bool>,
+}
+
+impl BSplineSurface {
+    /// Build from an `IfcBSplineSurfaceWithKnots` /
+    /// `IfcRationalBSplineSurfaceWithKnots` instance.
+    ///
+    /// Attribute order: `IfcBSplineSurface(UDegree, VDegree,
+    /// ControlPointsList, SurfaceForm, UClosed, VClosed, SelfIntersect)`,
+    /// `…WithKnots(UMultiplicities, VMultiplicities, UKnots, VKnots,
+    /// KnotSpec)`, `IfcRational…(WeightsData)`.
+    pub(super) fn from_instance(
+        step: &StepFile,
+        keyword: &str,
+        args: &[Value],
+    ) -> Result<Self, GeometryError> {
+        if keyword != "IFCBSPLINESURFACEWITHKNOTS"
+            && keyword != "IFCRATIONALBSPLINESURFACEWITHKNOTS"
+        {
+            return Err(GeometryError::Unsupported(keyword.to_string()));
+        }
+        let deg = |i: usize| -> Result<usize, GeometryError> {
+            let d = args
+                .get(i)
+                .and_then(|v| match v {
+                    Value::Typed { args, .. } => args.first().and_then(Value::as_integer),
+                    other => other.as_integer(),
+                })
+                .ok_or(GeometryError::BadProfile)?;
+            if !(1..=32).contains(&d) {
+                return Err(GeometryError::BadProfile);
+            }
+            Ok(d as usize)
+        };
+        let (u_degree, v_degree) = (deg(0)?, deg(1)?);
+        let rows = args
+            .get(2)
+            .and_then(Value::as_list)
+            .ok_or(GeometryError::BadProfile)?;
+        if rows.len() < 2 || rows.len() > MAX_CONTROL_POINTS {
+            return Err(GeometryError::BadProfile);
+        }
+        let mut control: Vec<Vec<[f64; 3]>> = Vec::with_capacity(rows.len());
+        let mut total = 0usize;
+        for row in rows {
+            let cols = row.as_list().ok_or(GeometryError::BadProfile)?;
+            if cols.len() < 2 {
+                return Err(GeometryError::BadProfile);
+            }
+            total += cols.len();
+            if total > MAX_CONTROL_POINTS {
+                return Err(GeometryError::BadProfile);
+            }
+            let mut r = Vec::with_capacity(cols.len());
+            for p in cols {
+                r.push(cartesian_point(step, Some(p))?);
+            }
+            control.push(r);
+        }
+        let v_count = control[0].len();
+        if control.iter().any(|r| r.len() != v_count) {
+            return Err(GeometryError::BadProfile);
+        }
+        let logical = |i: usize| match args.get(i).and_then(Value::as_enum) {
+            Some("T") => Some(true),
+            Some("F") => Some(false),
+            _ => None,
+        };
+        let (u_closed, v_closed) = (logical(4), logical(5));
+        let u_mults = integer_list(args.get(7))?;
+        let v_mults = integer_list(args.get(8))?;
+        let u_knot_values = number_list(args.get(9))?;
+        let v_knot_values = number_list(args.get(10))?;
+        let u_knots = expand_knots(u_degree, control.len(), &u_knot_values, &u_mults)?;
+        let v_knots = expand_knots(v_degree, v_count, &v_knot_values, &v_mults)?;
+        let weights: Option<Vec<Vec<f64>>> = if keyword == "IFCRATIONALBSPLINESURFACEWITHKNOTS" {
+            let wrows = args
+                .get(12)
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadProfile)?;
+            if wrows.len() != control.len() {
+                return Err(GeometryError::BadProfile);
+            }
+            let mut w = Vec::with_capacity(wrows.len());
+            for r in wrows {
+                w.push(number_list(Some(r))?);
+            }
+            Some(w)
+        } else {
+            None
+        };
+        let mut points = Vec::with_capacity(control.len());
+        for (i, row) in control.iter().enumerate() {
+            points.push(homogenise(row, weights.as_ref().map(|w| w[i].as_slice()))?);
+        }
+        Ok(Self {
+            u_degree,
+            v_degree,
+            points,
+            u_knots,
+            v_knots,
+            u_closed,
+            v_closed,
+        })
+    }
+
+    /// The `u` parameter domain.
+    pub(super) fn u_domain(&self) -> (f64, f64) {
+        let n = self.points.len() - 1;
+        (self.u_knots[self.u_degree], self.u_knots[n + 1])
+    }
+
+    /// The `v` parameter domain.
+    pub(super) fn v_domain(&self) -> (f64, f64) {
+        let m = self.points[0].len() - 1;
+        (self.v_knots[self.v_degree], self.v_knots[m + 1])
+    }
+
+    /// The surface point at `(u, v)` (clamped to the domain): de Boor
+    /// along `v` for every control row, then along `u`.
+    pub(super) fn point_at(&self, u: f64, v: f64) -> [f64; 3] {
+        let (u0, u1) = self.u_domain();
+        let (v0, v1) = self.v_domain();
+        let (u, v) = (u.clamp(u0, u1), v.clamp(v0, v1));
+        let column: Vec<[f64; 4]> = self
+            .points
+            .iter()
+            .map(|row| de_boor(&self.v_knots, self.v_degree, row, v))
+            .collect();
+        dehomogenise(de_boor(&self.u_knots, self.u_degree, &column, u))
+    }
+
+    /// Sampling parameters along `u`: distinct knots plus interior
+    /// samples per span (at most [`MAX_SURFACE_SAMPLES_PER_DIR`]).
+    pub(super) fn u_samples(&self, per_span: usize) -> Vec<f64> {
+        let (a, b) = self.u_domain();
+        let n = self.points.len() - 1;
+        samples_over(&self.u_knots[self.u_degree..=n + 1], a, b, per_span)
+    }
+
+    /// Sampling parameters along `v` (see [`Self::u_samples`]).
+    pub(super) fn v_samples(&self, per_span: usize) -> Vec<f64> {
+        let (a, b) = self.v_domain();
+        let m = self.points[0].len() - 1;
+        samples_over(&self.v_knots[self.v_degree..=m + 1], a, b, per_span)
+    }
+
+    /// The surface partial derivatives at `(u, v)` by central
+    /// differences (used by the parametric inverse's Newton steps).
+    pub(super) fn partials(&self, u: f64, v: f64) -> ([f64; 3], [f64; 3]) {
+        let (u0, u1) = self.u_domain();
+        let (v0, v1) = self.v_domain();
+        let hu = (u1 - u0) * 1e-6;
+        let hv = (v1 - v0) * 1e-6;
+        let (ua, ub) = ((u - hu).max(u0), (u + hu).min(u1));
+        let (va, vb) = ((v - hv).max(v0), (v + hv).min(v1));
+        let pu0 = self.point_at(ua, v);
+        let pu1 = self.point_at(ub, v);
+        let pv0 = self.point_at(u, va);
+        let pv1 = self.point_at(u, vb);
+        let du = (ub - ua).max(f64::MIN_POSITIVE);
+        let dv = (vb - va).max(f64::MIN_POSITIVE);
+        (
+            [
+                (pu1[0] - pu0[0]) / du,
+                (pu1[1] - pu0[1]) / du,
+                (pu1[2] - pu0[2]) / du,
+            ],
+            [
+                (pv1[0] - pv0[0]) / dv,
+                (pv1[1] - pv0[1]) / dv,
+                (pv1[2] - pv0[2]) / dv,
+            ],
+        )
+    }
+}
+
+/// Evenly sample each distinct-knot span of `knots` (restricted to
+/// `[a, b]`) with `per_span` interior steps, capped per direction.
+fn samples_over(knots: &[f64], a: f64, b: f64, per_span: usize) -> Vec<f64> {
+    let mut breaks: Vec<f64> = vec![a];
+    for &k in knots {
+        if k > a && k < b && breaks.last().is_some_and(|&p| k > p) {
+            breaks.push(k);
+        }
+    }
+    breaks.push(b);
+    let spans = breaks.len() - 1;
+    let per_span = per_span
+        .max(1)
+        .min(MAX_SURFACE_SAMPLES_PER_DIR.div_ceil(spans).max(1));
+    let mut out = Vec::with_capacity(spans * per_span + 1);
+    for w in breaks.windows(2) {
+        for i in 0..per_span {
+            out.push(w[0] + (w[1] - w[0]) * (i as f64) / (per_span as f64));
+        }
+    }
+    out.push(b);
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +720,32 @@ mod tests {
             assert!((r - 1.0).abs() < 1e-12, "{p:?}");
         }
         assert!(c.sample().len() >= 5);
+    }
+
+    #[test]
+    fn bilinear_surface_interpolates() {
+        let rows = [
+            [[0.0, 0.0, 0.0], [0.0, 1.0, 0.0]],
+            [[1.0, 0.0, 0.0], [1.0, 1.0, 2.0]],
+        ];
+        let s = BSplineSurface {
+            u_degree: 1,
+            v_degree: 1,
+            points: rows
+                .iter()
+                .map(|r| homogenise(&r[..], None).unwrap())
+                .collect(),
+            u_knots: expand_knots(1, 2, &[0.0, 1.0], &[2, 2]).unwrap(),
+            v_knots: expand_knots(1, 2, &[0.0, 1.0], &[2, 2]).unwrap(),
+            u_closed: Some(false),
+            v_closed: Some(false),
+        };
+        let p = s.point_at(0.5, 0.5);
+        assert!((p[0] - 0.5).abs() < 1e-12 && (p[1] - 0.5).abs() < 1e-12);
+        assert!((p[2] - 0.5).abs() < 1e-12);
+        assert_eq!(s.point_at(1.0, 1.0), [1.0, 1.0, 2.0]);
+        let (su, sv) = s.partials(0.5, 0.5);
+        assert!((su[0] - 1.0).abs() < 1e-6 && (sv[1] - 1.0).abs() < 1e-6);
     }
 
     #[test]

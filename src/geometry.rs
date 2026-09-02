@@ -153,11 +153,13 @@
 //! as parameters or `IFCLENGTHMEASURE` distances, and closed-path wrap.
 //!
 //! `IfcAdvancedBrep` / `IfcAdvancedBrepWithVoids` follow the same
-//! shell walk; their `IfcAdvancedFace`s tessellate when planar.
+//! shell walk; planar `IfcAdvancedFace`s take the polygon path and
+//! curved ones (cylindrical / spherical / toroidal / B-spline face
+//! surfaces) the parameter-space trimmer of the `trim` submodule.
 //!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): curved advanced faces (cylindrical /
-//! spherical / toroidal / B-spline / swept surfaces),
+//! rather than silently dropped): swept-surface faces
+//! (`IfcSurfaceOfRevolution` / `IfcSurfaceOfLinearExtrusion`),
 //! `IfcSectionedSpine`, and general mesh–mesh boolean subtraction /
 //! intersection.
 
@@ -167,6 +169,7 @@ use crate::value::Value;
 pub(crate) mod bspline;
 mod profiles;
 mod surfaces;
+mod trim;
 
 /// A flat, indexed triangle mesh in the local coordinate space of the
 /// representation item it was extracted from.
@@ -2039,6 +2042,14 @@ struct VertexPool {
     /// `EdgeStart → EdgeEnd` direction: the two faces sharing an edge
     /// reuse one vertex run, which keeps the Brep watertight.
     edge_runs: std::collections::HashMap<u64, Vec<(u32, [f64; 3])>>,
+    /// Vertices curved-face trimming inserted on loop chords: chord
+    /// `(a, b)` (mesh ids, `a < b`) → `(fraction from a, vertex)`.
+    chord_points: std::collections::HashMap<(u32, u32), Vec<(f64, u32)>>,
+    /// Welding of chord points by `(a, b, quantised t)`.
+    chord_weld: std::collections::HashMap<(u32, u32, i64), u32>,
+    /// Welding of surface-evaluated points by `(surface instance,
+    /// quantised parameters)`.
+    param_weld: std::collections::HashMap<(u64, i64, i64), u32>,
 }
 
 impl VertexPool {
@@ -2047,6 +2058,9 @@ impl VertexPool {
             positions: Vec::new(),
             index_of: std::collections::HashMap::new(),
             edge_runs: std::collections::HashMap::new(),
+            chord_points: std::collections::HashMap::new(),
+            chord_weld: std::collections::HashMap::new(),
+            param_weld: std::collections::HashMap::new(),
         }
     }
 
@@ -2094,6 +2108,7 @@ fn faceted_brep(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryErro
             connected_face_set(step, shell_id, &mut pool, &mut triangles)?;
         }
     }
+    trim::repair_t_junctions(&mut triangles, &pool);
     Ok(TriMesh {
         positions: pool.positions,
         triangles,
@@ -2118,6 +2133,7 @@ fn surface_model(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryErr
         let shell_id = shell.as_reference().ok_or(GeometryError::BadCoordinates)?;
         connected_face_set(step, shell_id, &mut pool, &mut triangles)?;
     }
+    trim::repair_t_junctions(&mut triangles, &pool);
     Ok(TriMesh {
         positions: pool.positions,
         triangles,
@@ -5291,12 +5307,13 @@ fn face(
     // IfcFace (and the IfcFaceSurface / IfcAdvancedFace subtypes) carry
     // Bounds at index 0; IfcFaceSurface adds FaceSurface (1) and
     // SameSense (2) *after* it, so the index is stable.
+    // A curved FaceSurface (anything but an IfcPlane) routes the loops
+    // through the parameter-space trimmer; `SameSense` (index 2) then
+    // decides which side of the surface normal is outward.
+    let mut curved: Option<(u64, bool)> = None;
     match inst.keyword.as_str() {
-        "IFCFACE" | "IFCFACESURFACE" => {}
-        "IFCADVANCEDFACE" => {
-            // ApplicableSurface: an elementary, swept or B-spline
-            // surface. A planar advanced face takes the polygon path
-            // below; curved surfaces are a later slice.
+        "IFCFACE" => {}
+        "IFCFACESURFACE" | "IFCADVANCEDFACE" => {
             let sid = inst
                 .args
                 .get(1)
@@ -5304,7 +5321,8 @@ fn face(
                 .ok_or(GeometryError::BadCoordinates)?;
             let surface = step.get(sid).ok_or(GeometryError::MissingInstance(sid))?;
             if surface.keyword != "IFCPLANE" {
-                return Err(GeometryError::Unsupported(surface.keyword.clone()));
+                let same_sense = !matches!(inst.args.get(2).and_then(Value::as_enum), Some("F"));
+                curved = Some((sid, same_sense));
             }
         }
         other => return Err(GeometryError::Unsupported(other.to_string())),
@@ -5377,6 +5395,21 @@ fn face(
             hole.reverse();
         }
         holes.push(hole);
+    }
+
+    if let Some((sid, same_sense)) = curved {
+        let surface = surfaces::ParamSurface::from_id(step, sid)?;
+        let to_loop = |l: &[(u32, [f64; 3])]| -> Vec<trim::LoopVertex> {
+            l.iter()
+                .map(|&(id, p)| trim::LoopVertex { id, p })
+                .collect()
+        };
+        let mut loops: Vec<Vec<trim::LoopVertex>> = Vec::with_capacity(holes.len() + 1);
+        loops.push(to_loop(&outer));
+        for h in &holes {
+            loops.push(to_loop(h));
+        }
+        return trim::tessellate_curved_face(&surface, sid, &loops, same_sense, pool, triangles);
     }
 
     triangulate_face_3d(&outer, &holes, triangles)
@@ -5913,9 +5946,23 @@ mod tests {
                 *edges.entry(key).or_insert(0) += if a < b { 1 } else { -1 };
             }
         }
-        for (e, n) in &edges {
-            assert_eq!(*n, 0, "edge {e:?} is not paired with an opposite twin");
-        }
+        let mut bad: Vec<String> = edges
+            .iter()
+            .filter(|(_, n)| **n != 0)
+            .map(|(e, n)| {
+                format!(
+                    "edge {e:?} ({:?} → {:?}) count {n}",
+                    m.positions[e.0 as usize], m.positions[e.1 as usize]
+                )
+            })
+            .collect();
+        bad.sort();
+        assert!(
+            bad.is_empty(),
+            "{} unpaired edges, e.g.\n{}",
+            bad.len(),
+            bad[..bad.len().min(12)].join("\n")
+        );
     }
 
     /// A 4 × 2 rectangle profile plus the X-direction, Y/Z references.
@@ -6383,19 +6430,282 @@ mod tests {
         assert!((hi[0] - 6.0).abs() < 1e-9 && lo[0].abs() < 1e-9);
     }
 
+    /// A closed cylinder r = 1, z ∈ [0, 2]: the side is one
+    /// IfcAdvancedFace on an IfcCylindricalSurface bounded by the two
+    /// full-circle edge curves, the caps are planar advanced faces on
+    /// the same circles.
+    const CYLINDER_BREP: &str = "#1=IFCCARTESIANPOINT((1.,0.,0.));\n#2=IFCCARTESIANPOINT((1.,0.,2.));\n\
+        #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#2);\n\
+        #20=IFCCARTESIANPOINT((0.,0.,0.));\n#21=IFCAXIS2PLACEMENT3D(#20,$,$);\n\
+        #22=IFCCIRCLE(#21,1.);\n\
+        #23=IFCCARTESIANPOINT((0.,0.,2.));\n#24=IFCAXIS2PLACEMENT3D(#23,$,$);\n\
+        #25=IFCCIRCLE(#24,1.);\n\
+        #30=IFCEDGECURVE(#11,#11,#22,.T.);\n#31=IFCEDGECURVE(#12,#12,#25,.T.);\n\
+        #40=IFCORIENTEDEDGE(*,*,#30,.T.);\n#41=IFCEDGELOOP((#40));\n#42=IFCFACEOUTERBOUND(#41,.T.);\n\
+        #43=IFCORIENTEDEDGE(*,*,#31,.F.);\n#44=IFCEDGELOOP((#43));\n#45=IFCFACEBOUND(#44,.T.);\n\
+        #46=IFCCYLINDRICALSURFACE(#21,1.);\n#47=IFCADVANCEDFACE((#42,#45),#46,.T.);\n\
+        #50=IFCPLANE(#21);\n\
+        #51=IFCORIENTEDEDGE(*,*,#30,.F.);\n#52=IFCEDGELOOP((#51));\n#53=IFCFACEOUTERBOUND(#52,.T.);\n\
+        #54=IFCADVANCEDFACE((#53),#50,.F.);\n\
+        #55=IFCORIENTEDEDGE(*,*,#31,.T.);\n#56=IFCEDGELOOP((#55));\n#57=IFCFACEOUTERBOUND(#56,.T.);\n\
+        #58=IFCPLANE(#24);\n#59=IFCADVANCEDFACE((#57),#58,.T.);\n\
+        #60=IFCCLOSEDSHELL((#47,#54,#59));\n#61=IFCADVANCEDBREP(#60);\n";
+
     #[test]
-    fn advanced_face_on_a_curved_surface_is_unsupported_for_now() {
+    fn advanced_brep_cylinder_side_face_is_watertight() {
+        let f = parse(CYLINDER_BREP);
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        let exact = core::f64::consts::PI * 2.0;
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 5e-3, "{v} vs {exact}");
+        // Every vertex sits on the cylinder or a cap rim.
+        for p in &m.positions {
+            let r = p[0].hypot(p[1]);
+            assert!((r - 1.0).abs() < 1e-9, "{p:?}");
+            assert!(p[2] >= -1e-12 && p[2] <= 2.0 + 1e-12);
+        }
+        assert_bbox_tol(&m, [-1.0, -1.0, 0.0], [1.0, 1.0, 2.0], 1e-9);
+    }
+
+    #[test]
+    fn advanced_brep_cylinder_with_inconsistent_flags_still_meshes() {
+        // SameSense FALSE on the side with the loops as authored: the
+        // region would be empty, so the trimmer retries flipped and the
+        // solid still closes with outward normals.
+        let src = CYLINDER_BREP.replace(
+            "#47=IFCADVANCEDFACE((#42,#45),#46,.T.);",
+            "#47=IFCADVANCEDFACE((#42,#45),#46,.F.);",
+        );
+        let f = parse(&src);
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        assert!(m.signed_volume() > 6.0);
+    }
+
+    #[test]
+    fn advanced_brep_sphere_from_two_hemispheres() {
+        // Two advanced faces on one IfcSphericalSurface split by the
+        // equator circle: the poles are welded, the seam closes.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((1.,0.,0.));\n#11=IFCVERTEXPOINT(#1);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n#21=IFCAXIS2PLACEMENT3D(#20,$,$);\n\
+             #22=IFCCIRCLE(#21,1.);\n#30=IFCEDGECURVE(#11,#11,#22,.T.);\n\
+             #46=IFCSPHERICALSURFACE(#21,1.);\n\
+             #40=IFCORIENTEDEDGE(*,*,#30,.T.);\n#41=IFCEDGELOOP((#40));\n#42=IFCFACEOUTERBOUND(#41,.T.);\n\
+             #47=IFCADVANCEDFACE((#42),#46,.T.);\n\
+             #50=IFCORIENTEDEDGE(*,*,#30,.F.);\n#51=IFCEDGELOOP((#50));\n#52=IFCFACEOUTERBOUND(#51,.T.);\n\
+             #53=IFCADVANCEDFACE((#52),#46,.T.);\n\
+             #60=IFCCLOSEDSHELL((#47,#53));\n#61=IFCADVANCEDBREP(#60);",
+        );
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        let exact = 4.0 / 3.0 * core::f64::consts::PI;
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 1.5e-2, "{v} vs {exact}");
+        for p in &m.positions {
+            let r = (p[0] * p[0] + p[1] * p[1] + p[2] * p[2]).sqrt();
+            assert!((r - 1.0).abs() < 1e-9, "{p:?}");
+        }
+        let (lo, hi) = bbox(&m);
+        assert!(
+            (hi[2] - 1.0).abs() < 1e-9 && (lo[2] + 1.0).abs() < 1e-9,
+            "poles reached"
+        );
+    }
+
+    #[test]
+    fn advanced_brep_torus_from_two_halves() {
+        // Major 3, minor 1, split by the circles z = ±1 (radius 3) into
+        // the outer and inner half tubes; both parameters wrap.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((3.,0.,1.));\n#2=IFCCARTESIANPOINT((3.,0.,-1.));\n\
+             #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#2);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,0.));\n#21=IFCAXIS2PLACEMENT3D(#20,$,$);\n\
+             #23=IFCCARTESIANPOINT((0.,0.,1.));\n#24=IFCAXIS2PLACEMENT3D(#23,$,$);\n\
+             #25=IFCCIRCLE(#24,3.);\n\
+             #26=IFCCARTESIANPOINT((0.,0.,-1.));\n#27=IFCAXIS2PLACEMENT3D(#26,$,$);\n\
+             #28=IFCCIRCLE(#27,3.);\n\
+             #30=IFCEDGECURVE(#11,#11,#25,.T.);\n#31=IFCEDGECURVE(#12,#12,#28,.T.);\n\
+             #46=IFCTOROIDALSURFACE(#21,3.,1.);\n\
+             #40=IFCORIENTEDEDGE(*,*,#31,.T.);\n#41=IFCEDGELOOP((#40));\n#42=IFCFACEOUTERBOUND(#41,.T.);\n\
+             #43=IFCORIENTEDEDGE(*,*,#30,.F.);\n#44=IFCEDGELOOP((#43));\n#45=IFCFACEBOUND(#44,.T.);\n\
+             #47=IFCADVANCEDFACE((#42,#45),#46,.T.);\n\
+             #50=IFCORIENTEDEDGE(*,*,#30,.T.);\n#51=IFCEDGELOOP((#50));\n#52=IFCFACEOUTERBOUND(#51,.T.);\n\
+             #53=IFCORIENTEDEDGE(*,*,#31,.F.);\n#54=IFCEDGELOOP((#53));\n#55=IFCFACEBOUND(#54,.T.);\n\
+             #56=IFCADVANCEDFACE((#52,#55),#46,.T.);\n\
+             #60=IFCCLOSEDSHELL((#47,#56));\n#61=IFCADVANCEDBREP(#60);",
+        );
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        let exact = 2.0 * core::f64::consts::PI.powi(2) * 3.0;
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 1.5e-2, "{v} vs {exact}");
+        for p in &m.positions {
+            let rho = p[0].hypot(p[1]);
+            let d = ((rho - 3.0).powi(2) + p[2] * p[2]).sqrt();
+            assert!((d - 1.0).abs() < 1e-9, "{p:?}");
+        }
+    }
+
+    #[test]
+    fn advanced_brep_quarter_cylinder_wedge_is_exact() {
+        // A quarter-cylinder wedge (r = 1, h = 1): the side face is a
+        // non-winding loop on the cylinder (two arcs + two generators),
+        // the other four faces are planar.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,1.,0.));\n#4=IFCCARTESIANPOINT((0.,0.,1.));\n\
+             #5=IFCCARTESIANPOINT((1.,0.,1.));\n#6=IFCCARTESIANPOINT((0.,1.,1.));\n\
+             #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#2);\n#13=IFCVERTEXPOINT(#3);\n\
+             #14=IFCVERTEXPOINT(#4);\n#15=IFCVERTEXPOINT(#5);\n#16=IFCVERTEXPOINT(#6);\n\
+             #20=IFCAXIS2PLACEMENT3D(#1,$,$);\n#21=IFCCIRCLE(#20,1.);\n\
+             #22=IFCAXIS2PLACEMENT3D(#4,$,$);\n#23=IFCCIRCLE(#22,1.);\n\
+             #24=IFCDIRECTION((1.,0.,0.));\n#25=IFCVECTOR(#24,1.);\n#26=IFCLINE(#1,#25);\n\
+             #30=IFCEDGECURVE(#12,#13,#21,.T.);\n\
+             #31=IFCEDGECURVE(#15,#16,#23,.T.);\n\
+             #32=IFCEDGECURVE(#11,#12,#26,.T.);\n#33=IFCEDGECURVE(#11,#13,#26,.T.);\n\
+             #34=IFCEDGECURVE(#14,#15,#26,.T.);\n#35=IFCEDGECURVE(#14,#16,#26,.T.);\n\
+             #36=IFCEDGECURVE(#12,#15,#26,.T.);\n#37=IFCEDGECURVE(#13,#16,#26,.T.);\n\
+             #38=IFCEDGECURVE(#11,#14,#26,.T.);\n\
+             #40=IFCORIENTEDEDGE(*,*,#30,.T.);\n#41=IFCORIENTEDEDGE(*,*,#37,.T.);\n\
+             #42=IFCORIENTEDEDGE(*,*,#31,.F.);\n#43=IFCORIENTEDEDGE(*,*,#36,.F.);\n\
+             #44=IFCEDGELOOP((#40,#41,#42,#43));\n#45=IFCFACEOUTERBOUND(#44,.T.);\n\
+             #46=IFCCYLINDRICALSURFACE(#20,1.);\n#47=IFCADVANCEDFACE((#45),#46,.T.);\n\
+             #50=IFCORIENTEDEDGE(*,*,#33,.T.);\n#51=IFCORIENTEDEDGE(*,*,#30,.F.);\n\
+             #52=IFCORIENTEDEDGE(*,*,#32,.F.);\n#53=IFCEDGELOOP((#50,#51,#52));\n\
+             #54=IFCFACEOUTERBOUND(#53,.T.);\n#55=IFCPLANE(#20);\n#56=IFCADVANCEDFACE((#54),#55,.F.);\n\
+             #60=IFCORIENTEDEDGE(*,*,#34,.T.);\n#61=IFCORIENTEDEDGE(*,*,#31,.T.);\n\
+             #62=IFCORIENTEDEDGE(*,*,#35,.F.);\n#63=IFCEDGELOOP((#60,#61,#62));\n\
+             #64=IFCFACEOUTERBOUND(#63,.T.);\n#65=IFCPLANE(#22);\n#66=IFCADVANCEDFACE((#64),#65,.T.);\n\
+             #70=IFCORIENTEDEDGE(*,*,#32,.T.);\n#71=IFCORIENTEDEDGE(*,*,#36,.T.);\n\
+             #72=IFCORIENTEDEDGE(*,*,#34,.F.);\n#73=IFCORIENTEDEDGE(*,*,#38,.F.);\n\
+             #74=IFCEDGELOOP((#70,#71,#72,#73));\n#75=IFCFACEOUTERBOUND(#74,.T.);\n\
+             #76=IFCDIRECTION((0.,-1.,0.));\n#77=IFCAXIS2PLACEMENT3D(#1,#76,$);\n#78=IFCPLANE(#77);\n\
+             #79=IFCADVANCEDFACE((#75),#78,.T.);\n\
+             #80=IFCORIENTEDEDGE(*,*,#38,.T.);\n#81=IFCORIENTEDEDGE(*,*,#35,.T.);\n\
+             #82=IFCORIENTEDEDGE(*,*,#37,.F.);\n#83=IFCORIENTEDEDGE(*,*,#33,.F.);\n\
+             #84=IFCEDGELOOP((#80,#81,#82,#83));\n#85=IFCFACEOUTERBOUND(#84,.T.);\n\
+             #86=IFCDIRECTION((-1.,0.,0.));\n#87=IFCAXIS2PLACEMENT3D(#1,#86,$);\n#88=IFCPLANE(#87);\n\
+             #89=IFCADVANCEDFACE((#85),#88,.T.);\n\
+             #90=IFCCLOSEDSHELL((#47,#56,#66,#79,#89));\n#91=IFCADVANCEDBREP(#90);",
+        );
+        let m = tessellate_item(&f, 91).unwrap();
+        assert_watertight(&m);
+        // Between the inscribed 12-segment prism (the caps and arcs)
+        // and the exact wedge: the side's interior refinement points
+        // sit on the true cylinder between the arc samples.
+        let n = CIRCLE_SEGMENTS as f64;
+        let sector = 12.0 * 0.5 * (2.0 * core::f64::consts::PI / n).sin();
+        let v = m.signed_volume();
+        assert!(
+            v >= sector - 1e-9 && v <= core::f64::consts::FRAC_PI_4,
+            "{v}"
+        );
+        for p in &m.positions {
+            let r = p[0].hypot(p[1]);
+            assert!(r <= 1.0 + 1e-9 && p[0] >= -1e-9 && p[1] >= -1e-9, "{p:?}");
+        }
+        // 6 corners + 11 interior arc samples on each arc, plus the
+        // side's interior points.
+        assert!(m.vertex_count() >= 6 + 22);
+    }
+
+    #[test]
+    fn advanced_brep_with_a_bspline_top_face_repairs_shared_chords() {
+        // The unit cube with its top face on a bilinear B-spline patch:
+        // the patch subdivides its straight boundary chords, and the
+        // planar side faces are re-split along them.
+        let src = cube_advanced_brep().replace(
+            "#214=IFCPLANE(#213);",
+            "#214=IFCBSPLINESURFACEWITHKNOTS(1,1,((#5,#8),(#6,#7)),.PLANE_SURF.,.F.,.F.,.F.,(2,2),(2,2),(0.,1.),(0.,1.),.UNSPECIFIED.);",
+        );
+        assert_ne!(src, cube_advanced_brep());
+        let f = parse(&src);
+        let m = tessellate_item(&f, 301).unwrap();
+        assert_watertight(&m);
+        assert!(
+            (m.signed_volume() - 1.0).abs() < 1e-9,
+            "{}",
+            m.signed_volume()
+        );
+        assert!(m.vertex_count() > 8 + 4 * 23);
+        assert_bbox(&m, [0.0; 3], [1.0; 3]);
+    }
+
+    #[test]
+    fn bspline_surface_face_bulges_within_its_control_hull() {
+        // A biquadratic patch over [0,2]×[0,2] with its centre control
+        // point raised: the face area exceeds the flat 4, every vertex
+        // stays inside the control hull, and a rational variant with
+        // unit weights matches it.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((0.,1.,0.));\n\
+             #3=IFCCARTESIANPOINT((0.,2.,0.));\n#4=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #5=IFCCARTESIANPOINT((1.,1.,2.));\n#6=IFCCARTESIANPOINT((1.,2.,0.));\n\
+             #7=IFCCARTESIANPOINT((2.,0.,0.));\n#8=IFCCARTESIANPOINT((2.,1.,0.));\n\
+             #9=IFCCARTESIANPOINT((2.,2.,0.));\n\
+             #10=IFCBSPLINESURFACEWITHKNOTS(2,2,((#1,#2,#3),(#4,#5,#6),(#7,#8,#9)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(3,3),(0.,1.),(0.,1.),.UNSPECIFIED.);\n\
+             #11=IFCVERTEXPOINT(#1);\n#12=IFCVERTEXPOINT(#3);\n#13=IFCVERTEXPOINT(#9);\n#14=IFCVERTEXPOINT(#7);\n\
+             #20=IFCDIRECTION((1.,0.,0.));\n#21=IFCVECTOR(#20,1.);\n#22=IFCLINE(#1,#21);\n\
+             #30=IFCEDGECURVE(#11,#12,#22,.T.);\n#31=IFCEDGECURVE(#12,#13,#22,.T.);\n\
+             #32=IFCEDGECURVE(#13,#14,#22,.T.);\n#33=IFCEDGECURVE(#14,#11,#22,.T.);\n\
+             #40=IFCORIENTEDEDGE(*,*,#30,.F.);\n#41=IFCORIENTEDEDGE(*,*,#31,.F.);\n\
+             #42=IFCORIENTEDEDGE(*,*,#32,.F.);\n#43=IFCORIENTEDEDGE(*,*,#33,.F.);\n\
+             #44=IFCEDGELOOP((#43,#42,#41,#40));\n#45=IFCFACEOUTERBOUND(#44,.T.);\n\
+             #46=IFCADVANCEDFACE((#45),#10,.T.);\n#47=IFCOPENSHELL((#46));\n\
+             #48=IFCSHELLBASEDSURFACEMODEL((#47));\n\
+             #50=IFCRATIONALBSPLINESURFACEWITHKNOTS(2,2,((#1,#2,#3),(#4,#5,#6),(#7,#8,#9)),.UNSPECIFIED.,.F.,.F.,.F.,(3,3),(3,3),(0.,1.),(0.,1.),.UNSPECIFIED.,((1.,1.,1.),(1.,1.,1.),(1.,1.,1.)));\n\
+             #51=IFCADVANCEDFACE((#45),#50,.T.);\n#52=IFCOPENSHELL((#51));\n\
+             #53=IFCSHELLBASEDSURFACEMODEL((#52));",
+        );
+        let m = tessellate_item(&f, 48).unwrap();
+        let area: f64 = m
+            .triangles
+            .iter()
+            .map(|t| {
+                let (a, b, c) = (
+                    m.positions[t[0] as usize],
+                    m.positions[t[1] as usize],
+                    m.positions[t[2] as usize],
+                );
+                let ab = [b[0] - a[0], b[1] - a[1], b[2] - a[2]];
+                let ac = [c[0] - a[0], c[1] - a[1], c[2] - a[2]];
+                let n = cross_raw(ab, ac);
+                0.5 * dot_raw(n, n).sqrt()
+            })
+            .sum();
+        assert!(area > 4.5 && area < 8.0, "{area}");
+        let (lo, hi) = bbox(&m);
+        assert!(
+            lo[2] >= -1e-9 && hi[2] <= 2.0 && hi[2] > 0.4,
+            "{lo:?} {hi:?}"
+        );
+        assert!(m.triangle_count() > 500);
+        let r = tessellate_item(&f, 53).unwrap();
+        assert_eq!(r.triangle_count(), m.triangle_count());
+        for (a, b) in r.positions.iter().zip(&m.positions) {
+            assert!(dist(*a, *b) < 1e-9);
+        }
+    }
+
+    #[test]
+    fn advanced_face_on_a_swept_surface_is_unsupported_for_now() {
         let f = parse(
             "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
-             #3=IFCCYLINDRICALSURFACE(#2,1.);\n\
-             #4=IFCVERTEXPOINT(#1);\n#5=IFCEDGE(#4,#4);\n#6=IFCORIENTEDEDGE(*,*,#5,.T.);\n\
-             #7=IFCEDGELOOP((#6));\n#8=IFCFACEOUTERBOUND(#7,.T.);\n\
+             #3=IFCSURFACEOFLINEAREXTRUSION(#9,#2,#9,1.);\n\
+             #4=IFCVERTEXPOINT(#1);\n#12=IFCCARTESIANPOINT((1.,0.,0.));\n\
+             #13=IFCCARTESIANPOINT((0.,1.,0.));\n#14=IFCVERTEXPOINT(#12);\n#15=IFCVERTEXPOINT(#13);\n\
+             #5=IFCEDGE(#4,#14);\n#16=IFCEDGE(#14,#15);\n#17=IFCEDGE(#15,#4);\n\
+             #6=IFCORIENTEDEDGE(*,*,#5,.T.);\n#18=IFCORIENTEDEDGE(*,*,#16,.T.);\n\
+             #19=IFCORIENTEDEDGE(*,*,#17,.T.);\n\
+             #7=IFCEDGELOOP((#6,#18,#19));\n#8=IFCFACEOUTERBOUND(#7,.T.);\n\
              #9=IFCADVANCEDFACE((#8),#3,.T.);\n#10=IFCCLOSEDSHELL((#9));\n\
              #11=IFCADVANCEDBREP(#10);",
         );
         assert_eq!(
             tessellate_item(&f, 11).unwrap_err(),
-            GeometryError::Unsupported("IFCCYLINDRICALSURFACE".to_string())
+            GeometryError::Unsupported("IFCSURFACEOFLINEAREXTRUSION".to_string())
         );
     }
 
