@@ -4,6 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.2...v0.0.3) - 2026-09-02
+
+### Other
+
+- curved advanced Brep as a Boolean clipping operand (half-space cut stays watertight at half volume)
+- typed entries for the curved-Brep / surface / B-spline / sectioned-spine / bounded-surface entities + IfcAsymmetricIShapeProfileDef
+- WHERE rules for advanced Breps, faces, edge loops, oriented edges, toroidal / swept / B-spline surfaces
+- Phase 3 bounded surfaces as items: IfcCurveBoundedPlane + IfcRectangularTrimmedSurface
+- synthetic advanced-Brep fixture — placed cylinder / sphere / sectioned spine / arc sweep decode with world bboxes, watertight volumes
+- Phase 3: IfcSectionedSpine — profiles at explicit placements lofted along a composite spine
+- tessellate target + seed corpus; bound the cross-face chord repair
+- Phase 3 swept-surface faces: IfcSurfaceOfRevolution / IfcSurfaceOfLinearExtrusion as FaceSurface
+- Phase 3 curved advanced Breps: cylindrical / spherical / toroidal / B-spline faces trimmed in parameter space
+- Phase 3 edge loops + planar advanced Breps: IfcEdgeLoop / IfcOrientedEdge / IfcEdgeCurve / IfcSubedge over IfcVertexPoints
+- Phase 3: IfcAsymmetricIShapeProfileDef (IFC4 + 2x3 layouts) with its WHERE rules
+- Phase 3 directrix sweeps: IfcFixedReferenceSweptAreaSolid + IfcSurfaceCurveSweptAreaSolid
+- Phase 3 B-spline curves: IfcBSplineCurveWithKnots / rational / 2x3 Bézier as profile boundaries and directrices
+
 ### Added
 
 - Phase 3: B-spline curves — `IfcBSplineCurveWithKnots` /
