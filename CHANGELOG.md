@@ -14,6 +14,18 @@ All notable changes to this project will be documented in this file.
   with coplanar handling, seams stitched watertight; `mesh_boolean` /
   `BooleanOperator` are public. The convex-tool-only shortcut is gone
   (a plain `IfcHalfSpaceSolid` keeps the direct plane split).
+- Phase 3: `IfcCurveBoundedSurface` with p-curve boundaries —
+  `IfcPcurve` reference curves in the basis surface's parameter space,
+  `IfcSurfaceCurve` / `IfcIntersectionCurve` / `IfcSeamCurve` (p-curve on
+  the basis, else the 3-D curve inverted), `IfcCompositeCurveOnSurface`
+  / `IfcBoundaryCurve` / `IfcOuterBoundaryCurve` chains, `ImplicitOuter`
+  over bounded and periodic bases; meshed by the parameter-space
+  trimmer (loops as authored, winding through the seam). WHERE rules for
+  p-curves, surface curves and composite curves on surfaces; typed
+  schema entries for the family.
+- The parameter-space trimmer's perimeter-runner test now only
+  considers chains whose every segment lies along a rectangle side (a
+  chord between two perimeter points crosses the interior).
 
 - Phase 3: B-spline curves — `IfcBSplineCurveWithKnots` /
   `IfcRationalBSplineCurveWithKnots` (and the IFC 2x3 `IfcBezierCurve` /

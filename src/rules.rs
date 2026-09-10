@@ -572,6 +572,70 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
             rule!("V1AndV2Different", v1? != v2?);
             rule!("VsenseCompatible", sense(6)? == (v2? > v1?));
         }
+        // ---- Curves on surfaces ----
+        "IFCPCURVE" => {
+            // (BasisSurface, ReferenceCurve).
+            rule!(
+                "DimIs2D",
+                crate::geometry::curve_dimension(step, a.get(1)?.as_reference()?, 0)? == 2
+            );
+        }
+        "IFCSURFACECURVE" | "IFCINTERSECTIONCURVE" | "IFCSEAMCURVE" => {
+            // (Curve3D, AssociatedGeometry, MasterRepresentation).
+            let curve = a.first().and_then(Value::as_reference);
+            rule!(
+                "CurveIs3D",
+                crate::geometry::curve_dimension(step, curve?, 0)? == 3
+            );
+            rule!("CurveIsNotPcurve", keyword_of(step, curve)? != "IFCPCURVE");
+            if inst.keyword != "IFCSURFACECURVE" {
+                let pcurves = a.get(1).and_then(Value::as_list);
+                rule!("TwoPCurves", pcurves?.len() == 2);
+                let bases: Option<Vec<u64>> = pcurves.map(|ps| {
+                    ps.iter()
+                        .filter_map(|p| pcurve_basis(step, p.as_reference()?))
+                        .collect()
+                });
+                if inst.keyword == "IFCSEAMCURVE" {
+                    rule!("SameSurface", {
+                        let b = bases?;
+                        b.len() == 2 && b[0] == b[1]
+                    });
+                } else {
+                    rule!("DistinctSurfaces", {
+                        let b = bases?;
+                        b.len() == 2 && b[0] != b[1]
+                    });
+                }
+            }
+        }
+        "IFCCOMPOSITECURVEONSURFACE" | "IFCBOUNDARYCURVE" | "IFCOUTERBOUNDARYCURVE" => {
+            // (Segments, SelfIntersect). SameSurface: the segments'
+            // parent curves share a basis surface (the transcribed
+            // IfcGetBasisSurface intersection); IsClosed (boundary
+            // curves): the last segment's Transition is not
+            // DISCONTINUOUS (the derived ClosedCurve).
+            let segments = a.first().and_then(Value::as_list);
+            rule!("SameSurface", {
+                let segs = segments?;
+                let mut common: Option<Vec<u64>> = None;
+                for seg in segs {
+                    let parent = step.get(seg.as_reference()?)?.args.get(2)?.as_reference()?;
+                    let bases = basis_surfaces(step, parent, 0);
+                    common = Some(match common {
+                        None => bases,
+                        Some(c) => c.into_iter().filter(|b| bases.contains(b)).collect(),
+                    });
+                }
+                !common?.is_empty()
+            });
+            if inst.keyword != "IFCCOMPOSITECURVEONSURFACE" {
+                rule!("IsClosed", {
+                    let last = step.get(segments?.last()?.as_reference()?)?;
+                    last.args.first()?.as_enum()? != "DISCONTINUOUS"
+                });
+            }
+        }
         "IFCSECTIONEDSPINE" => {
             // (SpineCurve, CrossSections, CrossSectionPositions).
             let sections = a.get(1).and_then(Value::as_list);
@@ -703,6 +767,56 @@ fn is_parameterised(keyword: &str) -> bool {
             | "IFCUSHAPEPROFILEDEF"
             | "IFCZSHAPEPROFILEDEF"
     )
+}
+
+/// The `BasisSurface` of an `IfcPcurve`.
+fn pcurve_basis(step: &StepFile, id: u64) -> Option<u64> {
+    let inst = step.get(id)?;
+    if inst.keyword != "IFCPCURVE" {
+        return None;
+    }
+    inst.args.first()?.as_reference()
+}
+
+/// The transcribed `IfcGetBasisSurface`: the surfaces a curve-on-
+/// surface lies on — a p-curve's basis, a surface curve's associated
+/// p-curve bases, the intersection over a composite's segments.
+fn basis_surfaces(step: &StepFile, id: u64, depth: usize) -> Vec<u64> {
+    if depth > 32 {
+        return Vec::new();
+    }
+    let Some(inst) = step.get(id) else {
+        return Vec::new();
+    };
+    match inst.keyword.as_str() {
+        "IFCPCURVE" => pcurve_basis(step, id).into_iter().collect(),
+        "IFCSURFACECURVE" | "IFCINTERSECTIONCURVE" | "IFCSEAMCURVE" => inst
+            .args
+            .get(1)
+            .and_then(Value::as_list)
+            .map(|ps| {
+                ps.iter()
+                    .filter_map(|p| pcurve_basis(step, p.as_reference()?))
+                    .collect()
+            })
+            .unwrap_or_default(),
+        "IFCCOMPOSITECURVEONSURFACE" | "IFCBOUNDARYCURVE" | "IFCOUTERBOUNDARYCURVE" => {
+            let mut common: Option<Vec<u64>> = None;
+            for seg in inst.args.first().and_then(Value::as_list).unwrap_or(&[]) {
+                let parent = seg
+                    .as_reference()
+                    .and_then(|sid| step.get(sid))
+                    .and_then(|s| s.args.get(2).and_then(Value::as_reference));
+                let bases = parent.map_or_else(Vec::new, |p| basis_surfaces(step, p, depth + 1));
+                common = Some(match common {
+                    None => bases,
+                    Some(c) => c.into_iter().filter(|b| bases.contains(b)).collect(),
+                });
+            }
+            common.unwrap_or_default()
+        }
+        _ => Vec::new(),
+    }
 }
 
 /// `IfcConic` or `IfcBoundedCurve` subtypes — the curves whose extent
@@ -1007,6 +1121,46 @@ mod tests {
         assert_eq!(rules(&f, 11), ["UsenseCompatible"]);
         assert_eq!(rules(&f, 12), ["V1AndV2Different", "VsenseCompatible"]);
         assert_eq!(rules(&f, 13), ["U1AndU2Different", "UsenseCompatible"]);
+    }
+
+    #[test]
+    fn curve_on_surface_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCPLANE(#2);\n#4=IFCCYLINDRICALSURFACE(#2,1.);\n\
+             #5=IFCCARTESIANPOINT((0.,0.));\n#6=IFCCARTESIANPOINT((1.,0.));\n\
+             #7=IFCPOLYLINE((#5,#6));\n#8=IFCPOLYLINE((#1,#1));\n\
+             #10=IFCPCURVE(#3,#7);\n#11=IFCPCURVE(#3,#8);\n#12=IFCPCURVE(#4,#7);\n\
+             #20=IFCCIRCLE(#2,1.);\n\
+             #21=IFCSURFACECURVE(#20,(#10),.CURVE3D.);\n\
+             #22=IFCSURFACECURVE(#7,(#10),.CURVE3D.);\n\
+             #23=IFCSURFACECURVE(#10,(#10),.CURVE3D.);\n\
+             #24=IFCSEAMCURVE(#20,(#10,#11),.CURVE3D.);\n\
+             #25=IFCSEAMCURVE(#20,(#10,#12),.CURVE3D.);\n\
+             #26=IFCINTERSECTIONCURVE(#20,(#10,#12),.CURVE3D.);\n\
+             #27=IFCINTERSECTIONCURVE(#20,(#10),.CURVE3D.);\n\
+             #30=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#10);\n\
+             #31=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#12);\n\
+             #32=IFCCOMPOSITECURVESEGMENT(.DISCONTINUOUS.,.T.,#10);\n\
+             #40=IFCOUTERBOUNDARYCURVE((#30,#30),.F.);\n\
+             #41=IFCBOUNDARYCURVE((#30,#31),.F.);\n\
+             #42=IFCBOUNDARYCURVE((#30,#32),.F.);\n\
+             #43=IFCCOMPOSITECURVEONSURFACE((#30,#32),.F.);",
+        );
+        assert!(rules(&f, 10).is_empty());
+        assert_eq!(rules(&f, 11), ["DimIs2D"]);
+        assert!(rules(&f, 21).is_empty());
+        assert_eq!(rules(&f, 22), ["CurveIs3D"]);
+        // A p-curve's Dim is its basis surface's (3): only the type rule.
+        assert_eq!(rules(&f, 23), ["CurveIsNotPcurve"]);
+        assert!(rules(&f, 24).is_empty());
+        assert_eq!(rules(&f, 25), ["SameSurface"]);
+        assert!(rules(&f, 26).is_empty());
+        assert_eq!(rules(&f, 27), ["TwoPCurves", "DistinctSurfaces"]);
+        assert!(rules(&f, 40).is_empty());
+        assert_eq!(rules(&f, 41), ["SameSurface"]);
+        assert_eq!(rules(&f, 42), ["IsClosed"]);
+        assert!(rules(&f, 43).is_empty());
     }
 
     #[test]

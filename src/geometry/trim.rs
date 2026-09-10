@@ -211,8 +211,137 @@ pub(super) fn tessellate_curved_face(
     triangles: &mut Vec<[u32; 3]>,
 ) -> Result<(), GeometryError> {
     let uv_loops = parameter_loops(surface, loops)?;
-    // First attempt with the schema orientation; retry flipped when the
-    // region comes out empty (inconsistent flags in the file).
+    mesh_parameter_loops(
+        surface,
+        surface_key,
+        uv_loops,
+        same_sense,
+        [false, false],
+        pool,
+        triangles,
+    )
+}
+
+/// Mesh a region of `surface` bounded by loops given directly in its
+/// parameter space (`IfcCurveBoundedSurface` with p-curve boundaries):
+/// the outer loop counter-clockwise, holes clockwise, the region on
+/// every loop's left; the sheet's normal is `∂S/∂u × ∂S/∂v`.
+///
+/// Parameter loops are taken as authored — a p-curve is *the* curve in
+/// parameter space, so no unwrapping is applied — except that a loop
+/// whose last vertex is the period image of its first (a boundary that
+/// winds around a periodic direction and closes through the seam) drops
+/// that vertex and records the winding as its closing shift. Loop
+/// vertices are evaluated on the surface and welded by parameter with
+/// the grid vertices of the refinement, so period images and poles are
+/// single mesh vertices.
+pub(super) fn tessellate_parameter_face(
+    surface: &ParamSurface,
+    surface_key: u64,
+    loops: &[Vec<Uv>],
+    pool: &mut VertexPool,
+    triangles: &mut Vec<[u32; 3]>,
+) -> Result<(), GeometryError> {
+    let (period_u, period_v) = (surface.period_u(), surface.period_v());
+    let mut uv_loops: Vec<ULoop> = Vec::with_capacity(loops.len());
+    for l in loops {
+        // Drop consecutive duplicates (exact parameter repeats).
+        let mut pts: Vec<Uv> = Vec::with_capacity(l.len());
+        for &uv in l {
+            if !uv.iter().all(|c| c.is_finite()) {
+                return Err(GeometryError::BadCoordinate);
+            }
+            if pts.last().is_some_and(|p: &Uv| p == &uv) {
+                continue;
+            }
+            pts.push(uv);
+        }
+        // A closing vertex equal to the first (raw or as a period
+        // image) is implied by the loop; its shift is the winding.
+        let mut wrap: Uv = [0.0, 0.0];
+        if pts.len() > 1 {
+            let (f, l) = (pts[0], pts[pts.len() - 1]);
+            let same = |a: f64, b: f64, period: Option<f64>| match period {
+                Some(p) => ((a - b) / p - ((a - b) / p).round()).abs() < 1e-9,
+                None => (a - b).abs() <= 1e-12 * a.abs().max(b.abs()).max(1.0),
+            };
+            if same(f[0], l[0], period_u) && same(f[1], l[1], period_v) {
+                wrap = [l[0] - f[0], l[1] - f[1]];
+                pts.pop();
+            }
+        }
+        let n = pts.len();
+        if n < 3 && (n < 2 || (wrap[0] == 0.0 && wrap[1] == 0.0)) {
+            return Err(GeometryError::BadProfile);
+        }
+        // Pool vertices welded by parameter (shared with the grid
+        // vertices `mesh_piece` later evaluates).
+        let ids: Vec<u32> = pts
+            .iter()
+            .map(|&uv| {
+                let (ku, kv) = surface.weld_key(uv);
+                let key = (surface_key, ku, kv);
+                match pool.param_weld.get(&key) {
+                    Some(&id) => id,
+                    None => {
+                        let id = pool.push_raw(surface.eval(uv));
+                        pool.param_weld.insert(key, id);
+                        id
+                    }
+                }
+            })
+            .collect();
+        // No chords: a lone sheet shares no edge with a neighbouring
+        // face, so points inserted on a loop edge are evaluated on the
+        // surface (and weld by parameter) instead of being interpolated
+        // on the 3-D chord — which also keeps a loop edge running
+        // between two parameter images of one welded vertex (a seam)
+        // from collapsing.
+        let verts: Vec<PVert> = (0..n)
+            .map(|i| PVert::Loop {
+                id: ids[i],
+                uv: pts[i],
+                prev: ids[i],
+                next: ids[i],
+            })
+            .collect();
+        uv_loops.push(ULoop { verts, wrap });
+    }
+    // An outer loop spanning a whole period has edges on the seam;
+    // the fundamental rectangle is then centred on it instead.
+    let spans = |k: usize, period: Option<f64>| -> bool {
+        match (period, uv_loops.first()) {
+            (Some(p), Some(l)) => {
+                let (lo, hi) = l.bbox();
+                hi[k] - lo[k] >= p * (1.0 - 1e-9)
+            }
+            _ => false,
+        }
+    };
+    let centre_seam = [spans(0, period_u), spans(1, period_v)];
+    mesh_parameter_loops(
+        surface,
+        surface_key,
+        uv_loops,
+        true,
+        centre_seam,
+        pool,
+        triangles,
+    )
+}
+
+/// Orient, clip to the fundamental rectangle, and mesh the parameter
+/// loops; retried with the opposite orientation when the region comes
+/// out empty (inconsistent flags in the file).
+fn mesh_parameter_loops(
+    surface: &ParamSurface,
+    surface_key: u64,
+    uv_loops: Vec<ULoop>,
+    same_sense: bool,
+    centre_seam: [bool; 2],
+    pool: &mut VertexPool,
+    triangles: &mut Vec<[u32; 3]>,
+) -> Result<(), GeometryError> {
     for attempt in 0..2 {
         let reversed = (!same_sense) ^ (attempt == 1);
         let mut oriented: Vec<ULoop> = uv_loops.clone();
@@ -221,7 +350,7 @@ pub(super) fn tessellate_curved_face(
                 l.reverse(surface.period_u(), surface.period_v());
             }
         }
-        let rect = fundamental_rect(surface, &oriented);
+        let rect = fundamental_rect(surface, &oriented, centre_seam);
         let pieces = clip_to_rect(&oriented, &rect, surface.period_u(), surface.period_v());
         // Net region area: outer pieces minus their holes.
         let area: f64 = pieces
@@ -352,7 +481,7 @@ fn unwrap_near(x: f64, reference: f64, period: f64) -> f64 {
 /// The rectangle the loops are clipped to: one period in a periodic
 /// direction, the surface's fixed extent otherwise, or the loops' own
 /// range (a cylinder's height is whatever the loops span).
-fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop]) -> Rect {
+fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop], centre_seam: [bool; 2]) -> Rect {
     let mut lo = [f64::INFINITY; 2];
     let mut hi = [f64::NEG_INFINITY; 2];
     for l in loops {
@@ -365,8 +494,11 @@ fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop]) -> Rect {
     let (u0, u1) = match (surface.period_u(), surface.u_extent()) {
         (Some(p), _) => {
             // Anchor the seam at the outer loop's lowest u so a loop
-            // that does not wind is not cut at all.
+            // that does not wind is not cut at all — or half a period
+            // away when the outer loop spans the whole period (its
+            // edges would otherwise lie on the seam itself).
             let a = loops.first().map_or(0.0, |l| l.bbox().0[0]);
+            let a = if centre_seam[0] { a - 0.5 * p } else { a };
             (a, a + p)
         }
         (None, Some(e)) => e,
@@ -375,6 +507,7 @@ fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop]) -> Rect {
     let (v0, v1) = match (surface.period_v(), surface.v_extent()) {
         (Some(p), _) => {
             let a = loops.first().map_or(0.0, |l| l.bbox().0[1]);
+            let a = if centre_seam[1] { a - 0.5 * p } else { a };
             (a, a + p)
         }
         (None, Some(e)) => e,
@@ -479,7 +612,14 @@ fn clip_to_rect(
     // period image of a loop that bounds the region from the other
     // side): it contributes nothing here.
     chains.retain(|c| {
-        if !c.verts.iter().all(|v| on_perimeter(rect, v.uv())) {
+        // Only a chain whose every segment runs along a perimeter side
+        // (consecutive vertices on a common side) is a perimeter runner;
+        // a chord between two perimeter points crosses the interior.
+        let runs_along = c
+            .verts
+            .windows(2)
+            .all(|w| perimeter_sides(rect, w[0].uv()) & perimeter_sides(rect, w[1].uv()) != 0);
+        if !runs_along {
             return true;
         }
         let mut advance = 0.0;
@@ -769,6 +909,27 @@ fn close_chain(mut verts: Vec<PVert>, rect: &Rect, chains: &mut Vec<Chain>) {
         closed_start,
         closed_end,
     });
+}
+
+/// The rectangle sides a parameter point lies on, as a bit set
+/// (bottom 1, right 2, top 4, left 8); zero for an interior point.
+fn perimeter_sides(rect: &Rect, p: Uv) -> u8 {
+    let size = (rect.u1 - rect.u0).abs().max((rect.v1 - rect.v0).abs());
+    let eps = 1e-9 * size;
+    let mut sides = 0u8;
+    if (p[1] - rect.v0).abs() <= eps {
+        sides |= 1;
+    }
+    if (p[0] - rect.u1).abs() <= eps {
+        sides |= 2;
+    }
+    if (p[1] - rect.v1).abs() <= eps {
+        sides |= 4;
+    }
+    if (p[0] - rect.u0).abs() <= eps {
+        sides |= 8;
+    }
+    sides
 }
 
 /// Whether a parameter point lies on the rectangle boundary.

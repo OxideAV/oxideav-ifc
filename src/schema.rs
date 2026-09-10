@@ -1086,6 +1086,50 @@ pub const SCHEMA: &[EntitySchema] = &[
         // IfcRectangularTrimmedSurface(BasisSurface, U1, V1, U2, V2, Usense, Vsense).
         attrs: chain!(&["BasisSurface", "U1", "V1", "U2", "V2", "Usense", "Vsense"]),
     },
+    EntitySchema {
+        keyword: "IFCCURVEBOUNDEDSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcCurveBoundedSurface(BasisSurface, Boundaries, ImplicitOuter).
+        attrs: chain!(&["BasisSurface", "Boundaries", "ImplicitOuter"]),
+    },
+    EntitySchema {
+        keyword: "IFCPCURVE",
+        kind: EntityKind::Geometry,
+        // IfcPcurve(BasisSurface, ReferenceCurve).
+        attrs: chain!(&["BasisSurface", "ReferenceCurve"]),
+    },
+    EntitySchema {
+        keyword: "IFCCOMPOSITECURVEONSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcCompositeCurve(Segments, SelfIntersect); BasisSurface is derived.
+        attrs: chain!(&["Segments", "SelfIntersect"]),
+    },
+    EntitySchema {
+        keyword: "IFCBOUNDARYCURVE",
+        kind: EntityKind::Geometry,
+        attrs: chain!(&["Segments", "SelfIntersect"]),
+    },
+    EntitySchema {
+        keyword: "IFCOUTERBOUNDARYCURVE",
+        kind: EntityKind::Geometry,
+        attrs: chain!(&["Segments", "SelfIntersect"]),
+    },
+    EntitySchema {
+        keyword: "IFCSURFACECURVE",
+        kind: EntityKind::Geometry,
+        // IfcSurfaceCurve(Curve3D, AssociatedGeometry, MasterRepresentation).
+        attrs: chain!(&["Curve3D", "AssociatedGeometry", "MasterRepresentation"]),
+    },
+    EntitySchema {
+        keyword: "IFCINTERSECTIONCURVE",
+        kind: EntityKind::Geometry,
+        attrs: chain!(&["Curve3D", "AssociatedGeometry", "MasterRepresentation"]),
+    },
+    EntitySchema {
+        keyword: "IFCSEAMCURVE",
+        kind: EntityKind::Geometry,
+        attrs: chain!(&["Curve3D", "AssociatedGeometry", "MasterRepresentation"]),
+    },
     // ---- Boolean results / half spaces ----
     EntitySchema {
         keyword: "IFCBOOLEANRESULT",
@@ -3301,6 +3345,10 @@ mod tests {
             ("IFCRATIONALBSPLINESURFACEWITHKNOTS", 13),
             ("IFCCURVEBOUNDEDPLANE", 3),
             ("IFCRECTANGULARTRIMMEDSURFACE", 7),
+            ("IFCCURVEBOUNDEDSURFACE", 3),
+            ("IFCPCURVE", 2),
+            ("IFCOUTERBOUNDARYCURVE", 2),
+            ("IFCSEAMCURVE", 3),
         ];
         for (kw, want) in lens {
             assert_eq!(

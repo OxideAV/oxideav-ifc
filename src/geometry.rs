@@ -161,9 +161,13 @@
 //! **Bounded surfaces** as representation items — `IfcCurveBoundedPlane`
 //! and `IfcRectangularTrimmedSurface` — mesh as open sheets.
 //!
+//! **`IfcCurveBoundedSurface`** meshes a region of any parameterised
+//! basis surface bounded by p-curves (`IfcPcurve` / `IfcSurfaceCurve`
+//! chains in `IfcBoundaryCurve`s) through the same trimmer, with an
+//! implicit outer boundary at the surface's parameter extents.
+//!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): `IfcCurveBoundedSurface` and
-//! `IfcSectionedSurface`.
+//! rather than silently dropped): `IfcSectionedSurface`.
 
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -333,6 +337,7 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         // Bounded surfaces as representation items (open sheets).
         "IFCCURVEBOUNDEDPLANE" => curve_bounded_plane(step, &inst.args),
         "IFCRECTANGULARTRIMMEDSURFACE" => rectangular_trimmed_surface(step, &inst.args),
+        "IFCCURVEBOUNDEDSURFACE" => curve_bounded_surface(step, &inst.args),
         // Parametric CSG primitives (swept-disk digest §3) and the CSG
         // tree root wrapper.
         "IFCBLOCK"
@@ -3085,7 +3090,7 @@ fn directrix_swept_area_solid(
 /// The coordinate count of the first `IfcCartesianPoint` /
 /// `IfcCartesianPointList{2,3}D` a curve refers to (`None` if it has
 /// none within the nesting bound).
-fn curve_dimension(step: &StepFile, id: u64, depth: usize) -> Option<usize> {
+pub(crate) fn curve_dimension(step: &StepFile, id: u64, depth: usize) -> Option<usize> {
     if depth >= MAX_CURVE_DEPTH {
         return None;
     }
@@ -3295,6 +3300,310 @@ fn rectangular_trimmed_surface(step: &StepFile, args: &[Value]) -> Result<TriMes
         positions,
         triangles,
     })
+}
+
+// =====================================================================
+// IfcCurveBoundedSurface (BasisSurface, Boundaries, ImplicitOuter)
+//
+// A region of any supported basis surface bounded by curves given in
+// the surface's OWN parameter space: each boundary is an
+// IfcBoundaryCurve (IfcOuterBoundaryCurve for the outer one) — an
+// IfcCompositeCurveOnSurface whose segments' parent curves are
+// IfcPcurve(BasisSurface, ReferenceCurve) records (the 2-D
+// ReferenceCurve *is* the curve in (u, v)) or IfcSurfaceCurve records
+// (a 3-D Curve3D with its AssociatedGeometry p-curves; the p-curve on
+// this basis is used when present, else the 3-D samples are inverted).
+// ImplicitOuter TRUE means the basis surface's own parameter extent is
+// the outer boundary and every listed curve is a hole. Parameters
+// address the basis surface's parameterisation exactly as for
+// IfcRectangularTrimmedSurface (angular ones scaled by the model
+// plane-angle unit); the sheet is meshed by the parameter-space
+// trimmer with its normal along ∂S/∂u × ∂S/∂v.
+// =====================================================================
+
+fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    let basis_id = args
+        .first()
+        .and_then(Value::as_reference)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let surface = surfaces::ParamSurface::from_id(step, basis_id)?;
+    if !surface.has_schema_parameters() {
+        let kw = step
+            .get(basis_id)
+            .map_or_else(String::new, |i| i.keyword.clone());
+        return Err(GeometryError::Unsupported(kw));
+    }
+    let boundary_ids: Vec<u64> = args
+        .get(1)
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?
+        .iter()
+        .filter_map(Value::as_reference)
+        .collect();
+    let implicit_outer = matches!(args.get(2).and_then(Value::as_enum), Some("T"));
+    let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+    let (au, av) = surface.angular();
+    let scale = [
+        if au { angle_scale } else { 1.0 },
+        if av { angle_scale } else { 1.0 },
+    ];
+    let mut outers: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut holes: Vec<Vec<[f64; 2]>> = Vec::new();
+    for bid in boundary_ids {
+        let inst = step.get(bid).ok_or(GeometryError::MissingInstance(bid))?;
+        let is_outer = inst.keyword == "IFCOUTERBOUNDARYCURVE";
+        let pts = curve_on_surface_points(step, bid, basis_id, &surface, scale, 0)?;
+        if implicit_outer || !is_outer {
+            holes.push(pts);
+        } else {
+            outers.push(pts);
+        }
+    }
+    let mut implicit: Vec<Vec<[f64; 2]>> = Vec::new();
+    let mut outer = if implicit_outer {
+        // The basis surface's own extent bounds the region; a surface
+        // unbounded in a parameter has no implicit outer boundary. A
+        // periodic direction is closed by two loops winding around it
+        // (one per bounded end, opposite ways) instead of a rectangle
+        // whose sides would lie on the seam.
+        let (u0, u1) = surface.u_extent().ok_or(GeometryError::BadProfile)?;
+        let (v0, v1) = surface.v_extent().ok_or(GeometryError::BadProfile)?;
+        let (step_u, step_v) = surface.step();
+        let samples = |a: f64, b: f64, st: Option<f64>| -> Vec<f64> {
+            let n = match st {
+                Some(s) if s > 0.0 => (((b - a).abs() / s).ceil() as usize).clamp(4, 4096),
+                _ => 4,
+            };
+            (0..=n)
+                .map(|k| a + (b - a) * (k as f64) / (n as f64))
+                .collect()
+        };
+        match (surface.period_u().is_some(), surface.period_v().is_some()) {
+            (false, false) => vec![[u0, v0], [u1, v0], [u1, v1], [u0, v1]],
+            (true, false) => {
+                let us = samples(u0, u1, step_u);
+                let bottom: Vec<[f64; 2]> = us.iter().map(|&u| [u, v0]).collect();
+                let top: Vec<[f64; 2]> = us.iter().rev().map(|&u| [u, v1]).collect();
+                implicit.push(top);
+                bottom
+            }
+            (false, true) => {
+                let vs = samples(v0, v1, step_v);
+                let right: Vec<[f64; 2]> = vs.iter().map(|&v| [u1, v]).collect();
+                let left: Vec<[f64; 2]> = vs.iter().rev().map(|&v| [u0, v]).collect();
+                implicit.push(left);
+                right
+            }
+            // Closed in both directions (a torus): no boundary at all.
+            (true, true) => return Err(GeometryError::BadProfile),
+        }
+    } else {
+        match outers.len() {
+            1 => outers.pop().expect("one outer"),
+            // No curve flagged as the outer boundary: a single boundary
+            // can only be the outer one.
+            0 if holes.len() == 1 => holes.pop().expect("one boundary"),
+            _ => return Err(GeometryError::BadProfile),
+        }
+    };
+    // Outer counter-clockwise, holes clockwise (region on the left); a
+    // loop that winds around a periodic direction (zero closed area)
+    // is left as authored — the trimmer retries the other sense when
+    // the region comes out empty.
+    let orient = |ring: &mut Vec<[f64; 2]>, ccw: bool| {
+        let a = signed_area_2x(ring);
+        if a != 0.0 && (a > 0.0) != ccw {
+            ring.reverse();
+        }
+    };
+    orient(&mut outer, true);
+    for h in &mut holes {
+        orient(h, false);
+    }
+    let mut loops: Vec<Vec<[f64; 2]>> = Vec::with_capacity(holes.len() + 2);
+    loops.push(outer);
+    loops.extend(implicit);
+    loops.extend(holes);
+    let mut pool = VertexPool::new();
+    let mut triangles: Vec<[u32; 3]> = Vec::new();
+    trim::tessellate_parameter_face(&surface, basis_id, &loops, &mut pool, &mut triangles)?;
+    let mut mesh = TriMesh {
+        positions: pool.positions,
+        triangles,
+    };
+    // Loop vertices of a boundary that bounds no region (a pole row
+    // whose region lies entirely on the other side) stay unreferenced.
+    drop_unreferenced_vertices(&mut mesh);
+    Ok(mesh)
+}
+
+/// Remove vertices no triangle references, re-indexing the rest.
+fn drop_unreferenced_vertices(mesh: &mut TriMesh) {
+    let mut used = vec![false; mesh.positions.len()];
+    for t in &mesh.triangles {
+        for &i in t {
+            if let Some(u) = used.get_mut(i as usize) {
+                *u = true;
+            }
+        }
+    }
+    if used.iter().all(|&u| u) {
+        return;
+    }
+    let mut remap: Vec<u32> = vec![u32::MAX; mesh.positions.len()];
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(mesh.positions.len());
+    for (i, &p) in mesh.positions.iter().enumerate() {
+        if used[i] {
+            remap[i] = positions.len() as u32;
+            positions.push(p);
+        }
+    }
+    for t in &mut mesh.triangles {
+        for i in t.iter_mut() {
+            *i = remap[*i as usize];
+        }
+    }
+    mesh.positions = positions;
+}
+
+/// Sample a curve-on-surface into the parameter space of `basis_id`
+/// (`scale` converts authored p-curve coordinates to the surface's
+/// internal parameters — the plane-angle unit on angular ones).
+fn curve_on_surface_points(
+    step: &StepFile,
+    id: u64,
+    basis_id: u64,
+    surface: &surfaces::ParamSurface,
+    scale: [f64; 2],
+    depth: usize,
+) -> Result<Vec<[f64; 2]>, GeometryError> {
+    if depth >= MAX_CURVE_DEPTH {
+        return Err(GeometryError::BadProfile);
+    }
+    let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    match inst.keyword.as_str() {
+        // IfcPcurve(BasisSurface, ReferenceCurve): the 2-D reference
+        // curve in the basis surface's parameter space.
+        "IFCPCURVE" => {
+            let pc_basis = inst
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            if pc_basis != basis_id {
+                // Parameters of another surface mean nothing here.
+                return Err(GeometryError::Unsupported("IFCPCURVE".to_string()));
+            }
+            let curve_id = inst
+                .args
+                .get(1)
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let pts = curve_points_2d_depth(step, curve_id, depth + 1)?;
+            Ok(pts
+                .into_iter()
+                .map(|p| [p[0] * scale[0], p[1] * scale[1]])
+                .collect())
+        }
+        // IfcSurfaceCurve(Curve3D, AssociatedGeometry, MasterRepresentation)
+        // and its IfcIntersectionCurve / IfcSeamCurve subtypes.
+        "IFCSURFACECURVE" | "IFCINTERSECTIONCURVE" | "IFCSEAMCURVE" => {
+            let pcurves = inst.args.get(1).and_then(Value::as_list).unwrap_or(&[]);
+            let on_basis = pcurves.iter().filter_map(Value::as_reference).find(|&pid| {
+                step.get(pid).is_some_and(|pc| {
+                    pc.keyword == "IFCPCURVE"
+                        && pc.args.first().and_then(Value::as_reference) == Some(basis_id)
+                })
+            });
+            if let Some(pid) = on_basis {
+                return curve_on_surface_points(step, pid, basis_id, surface, scale, depth + 1);
+            }
+            // No p-curve on this basis: invert the 3-D curve, keeping
+            // periodic parameters continuous along the curve.
+            let curve_id = inst
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let pts3 = curve_points_3d(step, curve_id, depth + 1)?;
+            let (pu, pv) = (surface.period_u(), surface.period_v());
+            let mut out: Vec<[f64; 2]> = Vec::with_capacity(pts3.len());
+            let mut prev: Option<[f64; 2]> = None;
+            for p in pts3 {
+                let (mut uv, degenerate) = surface.inverse(p);
+                if let Some(q) = prev {
+                    let near = |x: f64, reference: f64, period: f64| {
+                        let d = x - reference;
+                        reference + d - (d / period).round() * period
+                    };
+                    if degenerate {
+                        uv[0] = q[0];
+                    } else if let Some(period) = pu {
+                        uv[0] = near(uv[0], q[0], period);
+                    }
+                    if let Some(period) = pv {
+                        uv[1] = near(uv[1], q[1], period);
+                    }
+                }
+                out.push(uv);
+                prev = Some(uv);
+            }
+            Ok(out)
+        }
+        // Composite curves on the surface: concatenate the segments'
+        // parent curves, each reversed when SameSense is FALSE.
+        "IFCCOMPOSITECURVEONSURFACE"
+        | "IFCBOUNDARYCURVE"
+        | "IFCOUTERBOUNDARYCURVE"
+        | "IFCCOMPOSITECURVE" => {
+            let segments = inst
+                .args
+                .first()
+                .and_then(Value::as_list)
+                .ok_or(GeometryError::BadProfile)?;
+            let mut out: Vec<[f64; 2]> = Vec::new();
+            for seg in segments {
+                let sid = seg.as_reference().ok_or(GeometryError::BadProfile)?;
+                let sinst = step.get(sid).ok_or(GeometryError::MissingInstance(sid))?;
+                if sinst.keyword != "IFCCOMPOSITECURVESEGMENT"
+                    && sinst.keyword != "IFCREPARAMETRISEDCOMPOSITECURVESEGMENT"
+                {
+                    return Err(GeometryError::Unsupported(sinst.keyword.clone()));
+                }
+                let same_sense = match sinst.args.get(1).and_then(Value::as_enum) {
+                    Some("T") => true,
+                    Some("F") => false,
+                    _ => return Err(GeometryError::BadProfile),
+                };
+                let parent_id = sinst
+                    .args
+                    .get(2)
+                    .and_then(Value::as_reference)
+                    .ok_or(GeometryError::BadProfile)?;
+                let mut pts =
+                    curve_on_surface_points(step, parent_id, basis_id, surface, scale, depth + 1)?;
+                if !same_sense {
+                    pts.reverse();
+                }
+                for p in pts {
+                    push_point_2d(&mut out, p);
+                }
+            }
+            if out.len() < 2 {
+                return Err(GeometryError::BadProfile);
+            }
+            Ok(out)
+        }
+        // A bare 2-D curve is read as a curve in parameter space.
+        _ if curve_dimension(step, id, depth) == Some(2) => {
+            let pts = curve_points_2d_depth(step, id, depth + 1)?;
+            Ok(pts
+                .into_iter()
+                .map(|p| [p[0] * scale[0], p[1] * scale[1]])
+                .collect())
+        }
+        other => Err(GeometryError::Unsupported(other.to_string())),
+    }
 }
 
 // =====================================================================
@@ -7528,6 +7837,158 @@ mod tests {
             tessellate_item(&f, 46).unwrap_err(),
             GeometryError::Unsupported("IFCSURFACEOFREVOLUTION".to_string())
         );
+    }
+
+    #[test]
+    fn curve_bounded_surface_on_a_plane_with_a_hole() {
+        // p-curve boundaries in the plane's own (u, v): a 4×2 rectangle
+        // outer minus a 1×1 square hole — exact area 7, normal +z.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCPLANE(#2);\n\
+             #10=IFCCARTESIANPOINT((0.,0.));\n#11=IFCCARTESIANPOINT((4.,0.));\n\
+             #12=IFCCARTESIANPOINT((4.,2.));\n#13=IFCCARTESIANPOINT((0.,2.));\n\
+             #14=IFCPOLYLINE((#10,#11,#12,#13,#10));\n#15=IFCPCURVE(#3,#14);\n\
+             #16=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#15);\n\
+             #17=IFCOUTERBOUNDARYCURVE((#16),.F.);\n\
+             #20=IFCCARTESIANPOINT((1.,0.5));\n#21=IFCCARTESIANPOINT((2.,0.5));\n\
+             #22=IFCCARTESIANPOINT((2.,1.5));\n#23=IFCCARTESIANPOINT((1.,1.5));\n\
+             #24=IFCPOLYLINE((#20,#21,#22,#23,#20));\n#25=IFCPCURVE(#3,#24);\n\
+             #26=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#25);\n\
+             #27=IFCBOUNDARYCURVE((#26),.F.);\n\
+             #30=IFCCURVEBOUNDEDSURFACE(#3,(#17,#27),.F.);\n\
+             #31=IFCCURVEBOUNDEDSURFACE(#3,(#27,#17),.F.);\n\
+             #32=IFCCURVEBOUNDEDSURFACE(#3,(#27),.T.);",
+        );
+        let m = tessellate_item(&f, 30).unwrap();
+        assert!((mesh_area(&m) - 7.0).abs() < 1e-9, "{}", mesh_area(&m));
+        assert!(mesh_normal_sum(&m)[2] > 0.0);
+        assert!(m.positions.iter().all(|p| p[2] == 0.0));
+        assert_bbox(&m, [0.0, 0.0, 0.0], [4.0, 2.0, 0.0]);
+        // Boundaries is a SET: order does not matter.
+        let m2 = tessellate_item(&f, 31).unwrap();
+        assert!((mesh_area(&m2) - 7.0).abs() < 1e-9);
+        // An implicit outer boundary needs a bounded basis.
+        assert_eq!(
+            tessellate_item(&f, 32).unwrap_err(),
+            GeometryError::BadProfile
+        );
+    }
+
+    #[test]
+    fn curve_bounded_surface_cylinder_band_closes_through_the_seam() {
+        // A p-curve rectangle spanning the full u period on a cylinder
+        // of radius 2 between v = 0 and v = 5: the sheet closes across
+        // the seam (its only open edges are the two rims), area ≈ 2π·2·5.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCCYLINDRICALSURFACE(#2,2.);\n\
+             #10=IFCCARTESIANPOINT((0.,0.));\n#11=IFCCARTESIANPOINT((6.283185307179586,0.));\n\
+             #12=IFCCARTESIANPOINT((6.283185307179586,5.));\n#13=IFCCARTESIANPOINT((0.,5.));\n\
+             #14=IFCPOLYLINE((#10,#11,#12,#13,#10));\n#15=IFCPCURVE(#3,#14);\n\
+             #16=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#15);\n\
+             #17=IFCOUTERBOUNDARYCURVE((#16),.F.);\n\
+             #30=IFCCURVEBOUNDEDSURFACE(#3,(#17),.F.);",
+        );
+        let m = tessellate_item(&f, 30).unwrap();
+        let exact = 2.0 * core::f64::consts::PI * 2.0 * 5.0;
+        let a = mesh_area(&m);
+        assert!(a < exact && (exact - a) / exact < 5e-3, "{a} vs {exact}");
+        for p in &m.positions {
+            assert!((p[0].hypot(p[1]) - 2.0).abs() < 1e-9, "{p:?}");
+        }
+        // Open edges only on the rims.
+        let mut net: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+        for t in &m.triangles {
+            for i in 0..3 {
+                let (x, y) = (t[i], t[(i + 1) % 3]);
+                *net.entry((x.min(y), x.max(y))).or_insert(0) += if x < y { 1 } else { -1 };
+            }
+        }
+        for ((x, y), n) in net {
+            if n != 0 {
+                let (zx, zy) = (m.positions[x as usize][2], m.positions[y as usize][2]);
+                assert!(zx == zy && (zx == 0.0 || zx == 5.0), "open edge {x}-{y}");
+            }
+        }
+        // Outward normals.
+        for t in &m.triangles {
+            let (p, q, r) = (
+                m.positions[t[0] as usize],
+                m.positions[t[1] as usize],
+                m.positions[t[2] as usize],
+            );
+            let n = cross_raw(
+                [q[0] - p[0], q[1] - p[1], q[2] - p[2]],
+                [r[0] - p[0], r[1] - p[1], r[2] - p[2]],
+            );
+            assert!(n[0] * p[0] + n[1] * p[1] > 0.0, "inward triangle {t:?}");
+        }
+    }
+
+    #[test]
+    fn curve_bounded_surface_sphere_with_implicit_outer_and_a_polar_hole() {
+        // ImplicitOuter on a unit sphere: the whole sphere minus a cap
+        // above latitude 60° (a winding p-curve hole at v = π/3, run in
+        // −u so the kept region lies on its left): area =
+        // 4π − 2π(1 − sin 60°).
+        let mut pts = String::new();
+        let mut ids = Vec::new();
+        // The boundary closes at the period image of its start point
+        // (u = −2π), the authored form of a loop that winds.
+        for k in 0..=48 {
+            let u = -2.0 * core::f64::consts::PI * (k as f64) / 48.0;
+            pts.push_str(&format!(
+                "#{}=IFCCARTESIANPOINT(({u},1.0471975511965976));\n",
+                100 + k
+            ));
+            ids.push(format!("#{}", 100 + k));
+        }
+        let f = parse(&format!(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCSPHERICALSURFACE(#2,1.);\n{pts}\
+             #14=IFCPOLYLINE(({}));\n#15=IFCPCURVE(#3,#14);\n\
+             #16=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#15);\n\
+             #17=IFCBOUNDARYCURVE((#16),.F.);\n\
+             #30=IFCCURVEBOUNDEDSURFACE(#3,(#17),.T.);",
+            ids.join(",")
+        ));
+        let m = tessellate_item(&f, 30).unwrap();
+        let pi = core::f64::consts::PI;
+        let exact = 4.0 * pi - 2.0 * pi * (1.0 - (pi / 3.0).sin());
+        let a = mesh_area(&m);
+        assert!((exact - a).abs() / exact < 1e-2, "{a} vs {exact}");
+        // Nothing above the cap's latitude.
+        let zmax = (pi / 3.0).sin();
+        assert!(m.positions.iter().all(|p| p[2] <= zmax + 1e-9));
+        assert!(m.positions.iter().any(|p| p[2] < -0.99));
+    }
+
+    #[test]
+    fn curve_bounded_surface_from_surface_curves_inverts_3d_geometry() {
+        // Boundaries as IfcSurfaceCurves whose only p-curves live on
+        // another surface: the 3-D circles are inverted on the cylinder
+        // (radius 1) — a band between z = 0 and z = 3, area ≈ 6π.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCCYLINDRICALSURFACE(#2,1.);\n#4=IFCPLANE(#2);\n\
+             #5=IFCCARTESIANPOINT((0.,0.,3.));\n#6=IFCAXIS2PLACEMENT3D(#5,$,$);\n\
+             #7=IFCCIRCLE(#2,1.);\n#8=IFCCIRCLE(#6,1.);\n\
+             #9=IFCCARTESIANPOINT((0.,0.));\n#10=IFCCARTESIANPOINT((1.,0.));\n\
+             #11=IFCPOLYLINE((#9,#10));\n#12=IFCPCURVE(#4,#11);\n\
+             #13=IFCSURFACECURVE(#7,(#12),.CURVE3D.);\n\
+             #14=IFCSURFACECURVE(#8,(#12),.CURVE3D.);\n\
+             #15=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#13);\n\
+             #16=IFCOUTERBOUNDARYCURVE((#15),.F.);\n\
+             #17=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.F.,#14);\n\
+             #18=IFCBOUNDARYCURVE((#17),.F.);\n\
+             #30=IFCCURVEBOUNDEDSURFACE(#3,(#16,#18),.F.);",
+        );
+        let m = tessellate_item(&f, 30).unwrap();
+        let exact = 6.0 * core::f64::consts::PI;
+        let a = mesh_area(&m);
+        assert!((exact - a).abs() / exact < 1e-2, "{a} vs {exact}");
+        assert_bbox(&m, [-1.0, -1.0, 0.0], [1.0, 1.0, 3.0]);
     }
 
     #[test]
