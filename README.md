@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline / revolved / extruded faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, bounded-surface sheets (curve-bounded planes, rectangular trims of any supported surface), swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids and sectioned spines, CSG primitives, **real boolean carving** (half-space + convex-tool DIFFERENCE / INTERSECTION with watertight re-capping), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; p-curve-bounded surfaces and non-convex mesh–mesh booleans later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline / revolved / extruded faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, bounded-surface sheets (curve-bounded planes, rectangular trims of any supported surface), swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids and sectioned spines, CSG primitives and CSG trees, **real mesh–mesh booleans** (UNION / INTERSECTION / DIFFERENCE with non-convex tools, half-space clipping, watertight stitching), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; p-curve-bounded surfaces and sectioned surfaces later |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
@@ -345,19 +345,30 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   and `IfcCsgSolid` evaluates its `TreeRootExpression`.
 * `tessellate_item` evaluates **boolean results** (`IfcBooleanResult` /
   `IfcBooleanClippingResult`, §8.8.3.5) with real carving:
-  - `DIFFERENCE` with an `IfcHalfSpaceSolid` (the `AgreementFlag` side
-    convention), `IfcPolygonalBoundedHalfSpace` (footprint prism;
-    concave boundaries ear-clipped into convex pieces) or
-    `IfcBoxedHalfSpace` (`Enclosure` box) splits the operand's closed
-    mesh plane-by-plane and **re-caps every cut watertight**
-    (deterministic loop chaining, hole-aware annulus caps).
-  - Any tool that tessellates to a closed **convex** mesh (extruded
-    convex profiles, CSG primitives) carves the same way — wall
-    openings genuinely cut. Non-convex tools fall back to the authored
-    first-operand boundary.
-  - `INTERSECTION` clips to the solid side for half-space / convex
-    tools; `UNION` merges the operand boundaries. Operands recurse
-    (clipping chains nest) under a shared depth cap.
+  - a plain `IfcHalfSpaceSolid` tool (the `AgreementFlag` side
+    convention) splits the operand's closed mesh along its base plane
+    and **re-caps the cut watertight** (deterministic loop chaining,
+    hole-aware annulus caps);
+  - every other tool goes through the **mesh–mesh Boolean evaluator**
+    (`mesh_boolean(a, b, op)`, also public): a binary space partition of
+    each operand's faces classifies the other operand's polygons —
+    split where they span a plane, coplanar ones by normal agreement,
+    so coincident faces keep one copy and touching solids dissolve
+    their shared face — and the seams are **stitched watertight**
+    (position welding + T-junction splitting), with the exact identity
+    vol(A − B) + vol(A ∩ B) = vol(A) pinned. Tools may be **non-convex**:
+    any closed solid — extruded / revolved / swept, Breps, tessellated
+    face sets, CSG primitives, nested Boolean results — or the bounded
+    half-spaces `IfcPolygonalBoundedHalfSpace` (footprint prism;
+    concave boundaries ear-clipped) and `IfcBoxedHalfSpace`
+    (`Enclosure` box), materialised as finite solids over the
+    operand's extent.
+  - `UNION` of two closed operands is the regularised union (an open
+    operand merges boundaries as authored); `INTERSECTION` /
+    `DIFFERENCE` carve; a `DIFFERENCE` tool that cannot be meshed
+    leaves the first operand as authored. Operands recurse (clipping
+    chains and CSG trees nest) under a shared depth cap, and the
+    fragment count is capped.
 * `tessellate_item` also evaluates the **mapped item**
   `IfcMappedItem` (`MappingSource`, `MappingTarget`) — the inserted
   instance of a reusable source representation. `MappingSource` is an
@@ -435,8 +446,8 @@ trimmed surfaces, B-spline curves
 `CorrespondingKnotLists`, rational `SameNumOfWeightsAndPoints` /
 `WeightsGreaterZero`), `IfcMapConversion` and `IfcRigidOperation`.
 
-Still later in Phase 3: `IfcCurveBoundedSurface` (p-curve boundaries),
-`IfcSectionedSurface`, and non-convex mesh–mesh booleans.
+Still later in Phase 3: `IfcCurveBoundedSurface` (p-curve boundaries)
+and `IfcSectionedSurface`.
 
 The synthetic fixture `tests/fixtures/synthetic-advanced-brep.ifc`
 (authored for this crate, IFC 4) places an advanced-Brep cylinder, a

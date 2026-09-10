@@ -135,8 +135,9 @@ pub use geo::{
     SiteGeolocation,
 };
 pub use geometry::{
-    mesh_from_product_shape, mesh_from_shape_representation, meshed_items_from_product_shape,
-    placement_transform, tessellate_item, GeometryError, Transform, TriMesh,
+    mesh_boolean, mesh_from_product_shape, mesh_from_shape_representation,
+    meshed_items_from_product_shape, placement_transform, tessellate_item, BooleanOperator,
+    GeometryError, Transform, TriMesh,
 };
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use material::{material_assignment, MaterialAssignment};

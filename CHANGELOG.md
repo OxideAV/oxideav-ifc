@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 3: mesh–mesh Booleans — `IfcBooleanResult` UNION / INTERSECTION
+  / DIFFERENCE with **non-convex** tools (any closed solid: swept, Brep,
+  tessellated, CSG primitive, nested result) and the bounded half-spaces
+  (`IfcPolygonalBoundedHalfSpace` / `IfcBoxedHalfSpace`, materialised
+  over the operand's extent) evaluate through a binary space partition
+  with coplanar handling, seams stitched watertight; `mesh_boolean` /
+  `BooleanOperator` are public. The convex-tool-only shortcut is gone
+  (a plain `IfcHalfSpaceSolid` keeps the direct plane split).
+
 - Phase 3: B-spline curves — `IfcBSplineCurveWithKnots` /
   `IfcRationalBSplineCurveWithKnots` (and the IFC 2x3 `IfcBezierCurve` /
   `IfcRationalBezierCurve`) evaluate by de Boor over the expanded knot

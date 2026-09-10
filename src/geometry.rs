@@ -92,17 +92,15 @@
 //! correctly; hole side walls are emitted for hollow / voided profiles.
 //!
 //! Boolean results (`IfcBooleanResult` / `IfcBooleanClippingResult`)
-//! compose at the surface-mesh level: UNION merges the operand
-//! boundaries; DIFFERENCE with a **half-space tool** genuinely carves —
-//! the first operand's closed mesh is split against the half-space's
-//! plane set (`IfcHalfSpaceSolid`, prism-restricted
-//! `IfcPolygonalBoundedHalfSpace`, box-restricted `IfcBoxedHalfSpace`)
-//! and every cut cross-section is re-capped watertight, per the
-//! `AgreementFlag` side convention of the half-space clipping digest;
-//! INTERSECTION with a plain/boxed half-space clips to the solid side.
-//! A non-half-space DIFFERENCE tool still falls back to the first
-//! operand's boundary as authored; general mesh–mesh INTERSECTION is
-//! surfaced as `Unsupported`.
+//! are evaluated on the operand meshes: a plain `IfcHalfSpaceSolid`
+//! tool splits the first operand along its base plane and re-caps the
+//! cut (the `AgreementFlag` side convention of the half-space clipping
+//! digest); every other tool — the prism-restricted
+//! `IfcPolygonalBoundedHalfSpace`, the box-restricted
+//! `IfcBoxedHalfSpace`, and any closed solid, convex or not — goes
+//! through the mesh–mesh Boolean of the `csg` submodule (a binary
+//! space partition with coplanar handling, seams stitched watertight),
+//! so UNION / INTERSECTION / DIFFERENCE all carve genuinely.
 //!
 //! Profile boundary curves cover arcs: `IfcTrimmedCurve` over a
 //! circle / ellipse / line basis (Cartesian and parameter trims,
@@ -132,10 +130,8 @@
 //! `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcSphere`)
 //! mesh with their per-primitive anchoring (block/pyramid by base
 //! corner, cone on its base centre, cylinder and sphere centred), and
-//! `IfcCsgSolid` evaluates its tree root. Any Boolean DIFFERENCE /
-//! INTERSECTION whose tool tessellates to a closed **convex** mesh
-//! (a primitive, an extruded convex profile, …) carves through the
-//! same plane-splitting path as the half-space family.
+//! `IfcCsgSolid` evaluates its tree root; primitives are Boolean
+//! operands like any other closed solid.
 //!
 //! The tapered sweeps (`IfcExtrudedAreaSolidTapered` /
 //! `IfcRevolvedAreaSolidTapered`) loft the section linearly to
@@ -166,17 +162,19 @@
 //! and `IfcRectangularTrimmedSurface` — mesh as open sheets.
 //!
 //! Still later Phase-3 work (reported as [`GeometryError::Unsupported`]
-//! rather than silently dropped): `IfcCurveBoundedSurface`,
-//! `IfcSectionedSurface`, and general mesh–mesh boolean subtraction /
-//! intersection.
+//! rather than silently dropped): `IfcCurveBoundedSurface` and
+//! `IfcSectionedSurface`.
 
 use crate::parser::StepFile;
 use crate::value::Value;
 
 pub(crate) mod bspline;
+mod csg;
 mod profiles;
 mod surfaces;
 mod trim;
+
+pub use csg::{mesh_boolean, BooleanOperator};
 
 /// A flat, indexed triangle mesh in the local coordinate space of the
 /// representation item it was extracted from.
@@ -373,25 +371,26 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
 // to DIFFERENCE with a half-space second operand (the common
 // "wall clipped by a plane" case).
 //
-// This slice composes the operand *surface meshes*:
-// * UNION — the merged operand boundaries (a boundary superset of the
-//   regularised union; overlapping interior surface is kept, not
-//   dissolved).
-// * DIFFERENCE — when the tool (second operand) is a half-space solid
-//   the subtracted region is genuinely carved: the first operand's
-//   mesh is split against the half-space's plane set and the cut
-//   cross-sections are re-capped (see `subtract_convex_region`). The
-//   half-space side convention is the AgreementFlag rule of the
-//   half-space digest §2: TRUE selects the negative side of the base
-//   plane as the solid (removed) region, FALSE the positive side.
-//   `IfcPolygonalBoundedHalfSpace` restricts the cut to the prism of
-//   its 2-D boundary polygon (digest §3, triangulated into convex
-//   prism pieces); `IfcBoxedHalfSpace` to its `Enclosure` box (§4).
-//   A tool that is not a half-space still falls back to emitting the
-//   first operand's boundary as authored (mesh–mesh CSG is a later
-//   slice).
-// * INTERSECTION — carved for half-space tools (the first operand
-//   clipped to the solid side); otherwise Unsupported.
+// Evaluation composes the operand *boundary meshes*:
+// * A tool that is a plain `IfcHalfSpaceSolid` splits the first
+//   operand's closed mesh along its base plane and re-caps the cut
+//   (`split_mesh_by_plane`) — exact and watertight. The side
+//   convention is the AgreementFlag rule of the half-space digest §2:
+//   TRUE selects the negative side of the base plane as the solid
+//   (removed) region, FALSE the positive side.
+// * Any other tool is evaluated by the mesh–mesh Boolean of the `csg`
+//   submodule: the bounded half-spaces (`IfcPolygonalBoundedHalfSpace`
+//   — the prism of its 2-D boundary, digest §3 — and `IfcBoxedHalfSpace`
+//   — its `Enclosure` box, §4) are first materialised as finite solids
+//   covering the first operand's extent, and a solid tool (a CSG
+//   primitive, any swept / Brep / tessellated solid, a nested Boolean
+//   result) is used as meshed, convex or not.
+// * UNION of two closed operands is the regularised union; when an
+//   operand is not a closed mesh (an open sheet) the boundaries are
+//   merged as authored instead.
+// * A DIFFERENCE tool that cannot be meshed (unsupported entity) or is
+//   not closed leaves the first operand as authored — visible rather
+//   than dropped; INTERSECTION with such a tool is Unsupported.
 //
 // Operands may be any meshable solid, including nested boolean results
 // (clipping chains); recursion shares the mapped-item depth cap.
@@ -404,10 +403,12 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
     }
     // Operator : IfcBooleanOperator (index 0) — .UNION. / .INTERSECTION.
     // / .DIFFERENCE.
-    let op = args
-        .first()
-        .and_then(Value::as_enum)
-        .ok_or(GeometryError::BadCoordinates)?;
+    let op = match args.first().and_then(Value::as_enum) {
+        Some("UNION") => BooleanOperator::Union,
+        Some("INTERSECTION") => BooleanOperator::Intersection,
+        Some("DIFFERENCE") => BooleanOperator::Difference,
+        _ => return Err(GeometryError::BadCoordinates),
+    };
     let first = args
         .get(1)
         .and_then(Value::as_reference)
@@ -416,78 +417,89 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
         .get(2)
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadCoordinates)?;
-    match op {
-        "UNION" => {
-            // Merge both operand boundaries; tolerate one unsupported
-            // operand as long as the other produced geometry.
-            let a = tessellate_item_depth(step, first, depth + 1);
-            let b = tessellate_item_depth(step, second, depth + 1);
-            match (a, b) {
-                (Ok(mut m), Ok(other)) => {
+    if op == BooleanOperator::Union {
+        // Merge both operand boundaries; tolerate one unsupported
+        // operand as long as the other produced geometry.
+        let a = tessellate_item_depth(step, first, depth + 1);
+        let b = tessellate_item_depth(step, second, depth + 1);
+        return match (a, b) {
+            (Ok(m), Ok(other)) => {
+                if csg::is_closed(&m) && csg::is_closed(&other) {
+                    mesh_boolean(&m, &other, BooleanOperator::Union)
+                } else {
+                    let mut m = m;
                     append_mesh(&mut m, other);
                     Ok(m)
                 }
-                (Ok(m), Err(GeometryError::Unsupported(_)))
-                | (Err(GeometryError::Unsupported(_)), Ok(m)) => Ok(m),
-                (Err(e), _) | (_, Err(e)) => Err(e),
             }
-        }
-        "DIFFERENCE" => {
-            let base = tessellate_item_depth(step, first, depth + 1)?;
-            match half_space_regions(step, second)? {
-                Some(regions) => {
-                    // A − (⋃ regions): subtract each convex piece in turn.
-                    let mut mesh = base;
-                    for region in &regions {
-                        mesh = subtract_convex_region(&mesh, region);
-                    }
-                    Ok(mesh)
-                }
-                // A solid tool: carve when it tessellates to a closed
-                // CONVEX mesh (an extruded convex profile, a CSG
-                // primitive, …) — a convex polyhedron is the
-                // intersection of its face half-spaces, so the same
-                // plane-splitting path applies. A non-convex (or
-                // unsupported) tool falls back to the base boundary as
-                // authored — visible rather than dropped; general
-                // mesh–mesh CSG is a later slice.
-                None => match tessellate_item_depth(step, second, depth + 1) {
-                    Ok(tool) => match convex_region_of_mesh(&tool) {
-                        Some(region) => Ok(subtract_convex_region(&base, &region)),
-                        None => Ok(base),
-                    },
-                    Err(_) => Ok(base),
-                },
-            }
-        }
-        "INTERSECTION" => {
-            let base = tessellate_item_depth(step, first, depth + 1)?;
-            match half_space_regions(step, second)? {
-                // A ∩ half-space is only defensible for a single convex
-                // region (the plain / boxed half-space); the polygonal
-                // union-of-prisms tool would need piecewise re-merge.
-                Some(regions) if regions.len() == 1 => {
-                    Ok(intersect_convex_region(&base, &regions[0]))
-                }
-                Some(_) => Err(GeometryError::Unsupported(
-                    "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
-                )),
-                // A closed convex solid tool intersects the same way.
-                None => {
-                    let region = tessellate_item_depth(step, second, depth + 1)
-                        .ok()
-                        .and_then(|tool| convex_region_of_mesh(&tool));
-                    match region {
-                        Some(region) => Ok(intersect_convex_region(&base, &region)),
-                        None => Err(GeometryError::Unsupported(
-                            "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
-                        )),
-                    }
-                }
-            }
-        }
-        _ => Err(GeometryError::BadCoordinates),
+            (Ok(m), Err(GeometryError::Unsupported(_)))
+            | (Err(GeometryError::Unsupported(_)), Ok(m)) => Ok(m),
+            (Err(e), _) | (_, Err(e)) => Err(e),
+        };
     }
+    let base = tessellate_item_depth(step, first, depth + 1)?;
+    let regions = half_space_regions(step, second)?;
+    // The tool as a finite solid mesh (None: a plain half-space, which
+    // takes the direct plane split).
+    let tool: Option<TriMesh> = match &regions {
+        Some(regions) if regions.len() == 1 && regions[0].len() == 1 => {
+            let plane = &regions[0][0];
+            let (outside, inside) = split_mesh_by_plane(&base, plane);
+            return Ok(match op {
+                BooleanOperator::Difference => outside,
+                _ => inside,
+            });
+        }
+        Some(regions) => Some(materialise_regions(&base, regions)?),
+        None => match tessellate_item_depth(step, second, depth + 1) {
+            Ok(mesh) if csg::is_closed(&mesh) => Some(mesh),
+            Ok(_) => None,
+            Err(GeometryError::Unsupported(_)) => None,
+            Err(e) => return Err(e),
+        },
+    };
+    match (op, tool) {
+        (_, Some(tool)) => mesh_boolean(&base, &tool, op),
+        (BooleanOperator::Difference, None) => Ok(base),
+        _ => Err(GeometryError::Unsupported(
+            "IFCBOOLEANRESULT(.INTERSECTION.)".to_string(),
+        )),
+    }
+}
+
+/// A bounded half-space tool (the union of convex plane regions) as a
+/// closed solid mesh: every region is cut out of a box enclosing
+/// `base` with margin, and the pieces are united.
+fn materialise_regions(base: &TriMesh, regions: &[ConvexRegion]) -> Result<TriMesh, GeometryError> {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for p in &base.positions {
+        for k in 0..3 {
+            lo[k] = lo[k].min(p[k]);
+            hi[k] = hi[k].max(p[k]);
+        }
+    }
+    if lo.iter().chain(hi.iter()).any(|v| !v.is_finite()) {
+        return Err(GeometryError::BadCoordinate);
+    }
+    let extent = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]);
+    let margin = 0.25 * extent + 1.0;
+    let envelope = box_mesh(
+        [lo[0] - margin, lo[1] - margin, lo[2] - margin],
+        [hi[0] + margin, hi[1] + margin, hi[2] + margin],
+    );
+    let mut tool: Option<TriMesh> = None;
+    for region in regions {
+        let piece = intersect_convex_region(&envelope, region);
+        if piece.is_empty() {
+            continue;
+        }
+        tool = Some(match tool {
+            None => piece,
+            Some(acc) => mesh_boolean(&acc, &piece, BooleanOperator::Union)?,
+        });
+    }
+    Ok(tool.unwrap_or_default())
 }
 
 // =====================================================================
@@ -1095,27 +1107,6 @@ fn point_in_loop_3d(p: [f64; 3], ring: &[(u32, [f64; 3])], normal: [f64; 3]) -> 
     inside
 }
 
-/// `mesh − region` for one convex plane region: successively split by
-/// each outward plane, keeping every positive-side piece (it is outside
-/// the region) and carrying the negative-side remainder forward; the
-/// final remainder (`mesh ∩ region`) is discarded. Every piece is
-/// re-capped by the split, so the result is a union of closed pieces
-/// whose internal shared walls are coincident opposite-winding pairs
-/// (exactly cancelling in `signed_volume`).
-fn subtract_convex_region(mesh: &TriMesh, region: &ConvexRegion) -> TriMesh {
-    let mut result = TriMesh::default();
-    let mut remainder = mesh.clone();
-    for plane in region {
-        if remainder.is_empty() {
-            break;
-        }
-        let (outside, inside) = split_mesh_by_plane(&remainder, plane);
-        append_mesh(&mut result, outside);
-        remainder = inside;
-    }
-    result
-}
-
 /// `mesh ∩ region` for one convex plane region: successively keep the
 /// negative (inside) side of every outward plane, re-capped.
 fn intersect_convex_region(mesh: &TriMesh, region: &ConvexRegion) -> TriMesh {
@@ -1128,80 +1119,6 @@ fn intersect_convex_region(mesh: &TriMesh, region: &ConvexRegion) -> TriMesh {
         remainder = inside;
     }
     remainder
-}
-
-/// If `mesh` is a **closed convex** solid with outward winding, return
-/// it as a convex plane region (its deduplicated face planes);
-/// otherwise `None`.
-///
-/// This is what lets an arbitrary solid tool (an extruded convex
-/// profile, a CSG primitive) drive the same plane-splitting Boolean
-/// path as the half-space family: a convex polyhedron IS the
-/// intersection of its face half-spaces. Closedness is required so an
-/// open sheet is never mistaken for a solid; convexity is verified by
-/// checking every vertex against every candidate plane.
-fn convex_region_of_mesh(mesh: &TriMesh) -> Option<ConvexRegion> {
-    if mesh.is_empty() {
-        return None;
-    }
-    // Closedness: every directed edge balanced by its reverse.
-    let mut net: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
-    for t in &mesh.triangles {
-        for i in 0..3 {
-            let a = t[i];
-            let b = t[(i + 1) % 3];
-            if a < b {
-                *net.entry((a, b)).or_insert(0) += 1;
-            } else {
-                *net.entry((b, a)).or_insert(0) -= 1;
-            }
-        }
-    }
-    if net.values().any(|&n| n != 0) {
-        return None;
-    }
-    let scale = mesh
-        .positions
-        .iter()
-        .map(|p| p[0].abs().max(p[1].abs()).max(p[2].abs()))
-        .fold(1.0f64, f64::max);
-    let eps = 1e-7 * scale;
-    let mut planes: ConvexRegion = Vec::new();
-    for t in &mesh.triangles {
-        let a = mesh.positions[t[0] as usize];
-        let b = mesh.positions[t[1] as usize];
-        let c = mesh.positions[t[2] as usize];
-        let n = cross_raw(
-            [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
-            [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
-        );
-        let Some(n) = normalise(n) else {
-            continue; // degenerate sliver: no plane information
-        };
-        // Skip near-duplicates (coplanar face fans).
-        let dup = planes
-            .iter()
-            .any(|p| dot_raw(p.normal, n) > 1.0 - 1e-9 && p.signed_distance(a).abs() <= eps);
-        if !dup {
-            planes.push(Plane {
-                point: a,
-                normal: n,
-            });
-        }
-    }
-    if planes.len() < 4 {
-        return None; // a closed solid needs at least a tetrahedron
-    }
-    // Convexity + outward orientation: every vertex on/behind every
-    // face plane.
-    for plane in &planes {
-        for &p in &mesh.positions {
-            if plane.signed_distance(p) > eps {
-                return None;
-            }
-        }
-    }
-    Some(planes)
 }
 
 // =====================================================================
@@ -9591,9 +9508,10 @@ mod tests {
     }
 
     #[test]
-    fn difference_with_nonconvex_tool_emits_first_operand() {
-        // Mesh–mesh subtraction with a NON-convex tool is a later
-        // slice: an L-profile prism tool leaves the base as authored.
+    fn difference_with_nonconvex_tool_carves() {
+        // Mesh–mesh subtraction with a NON-convex tool: an L-profile
+        // prism covering the quadrant x, y ≥ 0 of a centred unit cube
+        // (coplanar top and bottom faces) removes exactly a quarter.
         let f = parse(
             "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n\
              #2=IFCDIRECTION((0.,0.,1.));\n\
@@ -9607,11 +9525,32 @@ mod tests {
              #16=IFCPOLYLINE((#10,#11,#12,#13,#14,#15,#10));\n\
              #17=IFCARBITRARYCLOSEDPROFILEDEF(.AREA.,$,#16);\n\
              #18=IFCEXTRUDEDAREASOLID(#17,$,#2,1.);\n\
-             #4=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#18);",
+             #4=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#18);\n\
+             #5=IFCBOOLEANRESULT(.INTERSECTION.,#3,#18);\n\
+             #6=IFCBOOLEANRESULT(.UNION.,#3,#18);",
         );
-        let m = tessellate_item(&f, 4).unwrap();
-        let plain = tessellate_item(&f, 3).unwrap();
-        assert_eq!(m, plain);
+        let d = tessellate_item(&f, 4).unwrap();
+        assert_closed(&d);
+        assert!(
+            (d.signed_volume() - 0.75).abs() < 1e-9,
+            "{}",
+            d.signed_volume()
+        );
+        let i = tessellate_item(&f, 5).unwrap();
+        assert_closed(&i);
+        assert!(
+            (i.signed_volume() - 0.25).abs() < 1e-9,
+            "{}",
+            i.signed_volume()
+        );
+        // A − B and A ∩ B partition A; A ∪ B = A + B − A ∩ B.
+        let u = tessellate_item(&f, 6).unwrap();
+        assert_closed(&u);
+        assert!(
+            (u.signed_volume() - (1.0 + 3.0 - 0.25)).abs() < 1e-9,
+            "{}",
+            u.signed_volume()
+        );
     }
 
     #[test]
