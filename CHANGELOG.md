@@ -23,6 +23,14 @@ All notable changes to this project will be documented in this file.
   trimmer (loops as authored, winding through the seam). WHERE rules for
   p-curves, surface curves and composite curves on surfaces; typed
   schema entries for the family.
+- Parameter-space trimmer: Delaunay edge flips (Lawson's walk in the
+  metric-scaled parameter plane) before and after midpoint refinement —
+  the ear clipper's fans of slivers become well-shaped ladders, so a
+  cylinder band refines to its 96 triangles instead of thousands and
+  curved sheets no longer over-estimate their area (Schwarz-lantern
+  folding); flips never touch boundary / chord / seam edges, diagonals
+  that would cross a profile-sample crease, weld into a degenerate
+  triangle, or re-create a subdivided edge.
 - The parameter-space trimmer's perimeter-runner test now only
   considers chains whose every segment lies along a rectangle side (a
   chord between two perimeter points crosses the interior).

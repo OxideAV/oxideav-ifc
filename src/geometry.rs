@@ -7957,7 +7957,7 @@ mod tests {
         let pi = core::f64::consts::PI;
         let exact = 4.0 * pi - 2.0 * pi * (1.0 - (pi / 3.0).sin());
         let a = mesh_area(&m);
-        assert!((exact - a).abs() / exact < 1e-2, "{a} vs {exact}");
+        assert!(a < exact && (exact - a) / exact < 1e-2, "{a} vs {exact}");
         // Nothing above the cap's latitude.
         let zmax = (pi / 3.0).sin();
         assert!(m.positions.iter().all(|p| p[2] <= zmax + 1e-9));
@@ -7987,7 +7987,7 @@ mod tests {
         let m = tessellate_item(&f, 30).unwrap();
         let exact = 6.0 * core::f64::consts::PI;
         let a = mesh_area(&m);
-        assert!((exact - a).abs() / exact < 1e-2, "{a} vs {exact}");
+        assert!(a < exact && (exact - a) / exact < 5e-3, "{a} vs {exact}");
         assert_bbox(&m, [-1.0, -1.0, 0.0], [1.0, 1.0, 3.0]);
     }
 

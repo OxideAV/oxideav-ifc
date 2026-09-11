@@ -1151,6 +1151,11 @@ fn mesh_piece(
             ]
         })
         .collect();
+    // The ear clipper fans long slivers across the region; flip the
+    // interior diagonals to the Delaunay configuration (in the
+    // metric-scaled parameter space) before refining, so subdivision
+    // starts from well-shaped triangles instead of splitting slivers.
+    delaunay_flips(&mut tris, &uvs, surface, &HashMap::new());
 
     // Midpoint refinement.
     let (step_u, step_v) = surface.step();
@@ -1247,6 +1252,10 @@ fn mesh_piece(
         }
     }
 
+    // Refinement splits only the too-long edges, which leaves the
+    // diagonals of the split triangles arbitrary: flip again.
+    delaunay_flips(&mut conformed, &uvs, surface, &midpoints);
+
     // Emit with welding and chord registration.
     let mut mesh_id: Vec<Option<u32>> = vec![None; kinds.len()];
     let mut resolve = |i: usize, pool: &mut VertexPool| -> u32 {
@@ -1295,6 +1304,132 @@ fn mesh_piece(
         }
     }
     Ok(())
+}
+
+/// Flip interior edges of a parameter-space triangulation until every
+/// flippable edge is locally Delaunay (no opposite vertex inside the
+/// circumcircle of its neighbour), measured in the metric-scaled
+/// parameter plane. Edges owned by a single triangle — the region
+/// boundary, loop chords, seam and pole lines — are never touched, so
+/// no shared chord changes and no T-junction can appear; a flip only
+/// re-pairs two triangles of this piece. On a sampled-profile surface
+/// (`index_axis`) a diagonal may not cross a profile sample — the
+/// surface creases there, and a triangle spanning the crease would cut
+/// its corner. A diagonal between two parameter images of one surface
+/// point (seam or pole) is never created either — it would weld to
+/// nothing, nor is one that refinement already subdivided (`split`:
+/// its midpoint vertex sits on that segment). Bounded in flips.
+fn delaunay_flips(
+    tris: &mut [[u32; 3]],
+    uvs: &[Uv],
+    surface: &ParamSurface,
+    split: &HashMap<(u32, u32), u32>,
+) {
+    let scale = surface.metric();
+    let index_axis = surface.index_axis();
+    let key = |i: u32| surface.weld_key(uvs[i as usize]);
+    let p = |i: u32| -> Uv {
+        let uv = uvs[i as usize];
+        [uv[0] * scale.0, uv[1] * scale.1]
+    };
+    let orient =
+        |a: Uv, b: Uv, c: Uv| (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+    // > 0 when `d` lies strictly inside the circumcircle of the
+    // counter-clockwise triangle `a b c`.
+    let incircle = |a: Uv, b: Uv, c: Uv, d: Uv| -> f64 {
+        let (ax, ay) = (a[0] - d[0], a[1] - d[1]);
+        let (bx, by) = (b[0] - d[0], b[1] - d[1]);
+        let (cx, cy) = (c[0] - d[0], c[1] - d[1]);
+        let (a2, b2, c2) = (ax * ax + ay * ay, bx * bx + by * by, cx * cx + cy * cy);
+        let det = ax * (by * c2 - b2 * cy) - ay * (bx * c2 - b2 * cx) + a2 * (bx * cy - by * cx);
+        // Relative to the configuration's size⁴: exactly cocircular
+        // points (a regular grid) must not flip back and forth.
+        let size2 = a2 + b2 + c2;
+        det - 1e-9 * size2 * size2
+    };
+    // Lawson's walk from a fan can take O(n²) flips on n triangles.
+    let n = tris.len();
+    let mut budget = (n * 64 + n * n / 8).clamp(64, 1 << 22);
+    // Directed edge → triangle owning it, maintained across flips.
+    let mut owner: HashMap<(u32, u32), usize> = HashMap::with_capacity(tris.len() * 3);
+    for (ti, t) in tris.iter().enumerate() {
+        for i in 0..3 {
+            owner.insert((t[i], t[(i + 1) % 3]), ti);
+        }
+    }
+    // Lawson's walk: every triangle is checked, and a flip re-queues
+    // the two triangles it changed.
+    let mut queued = vec![true; tris.len()];
+    let mut stack: Vec<usize> = (0..tris.len()).rev().collect();
+    while let Some(ti) = stack.pop() {
+        queued[ti] = false;
+        for i in 0..3 {
+            let t = tris[ti];
+            let (a, b, c) = (t[i], t[(i + 1) % 3], t[(i + 2) % 3]);
+            let Some(&tj) = owner.get(&(b, a)) else {
+                continue; // boundary edge
+            };
+            if tj == ti {
+                continue;
+            }
+            let u = tris[tj];
+            let Some(k) = (0..3).find(|&k| u[k] == b && u[(k + 1) % 3] == a) else {
+                continue;
+            };
+            let d = u[(k + 2) % 3];
+            if d == c || d == a || d == b {
+                continue;
+            }
+            let (pa, pb, pc, pd) = (p(a), p(b), p(c), p(d));
+            // Both triangles counter-clockwise and the quad strictly
+            // convex (a, b on opposite sides of the new diagonal).
+            if orient(pa, pb, pc) <= 0.0 || orient(pb, pa, pd) <= 0.0 {
+                continue;
+            }
+            if orient(pc, pd, pa) * orient(pc, pd, pb) >= 0.0 {
+                continue;
+            }
+            if incircle(pa, pb, pc, pd) <= 0.0 {
+                continue;
+            }
+            if split.contains_key(&(c.min(d), c.max(d))) {
+                continue;
+            }
+            let (kc, kd) = (key(c), key(d));
+            if kc == kd || kd == key(a) || kd == key(b) || kc == key(a) || kc == key(b) {
+                continue; // a degenerate triangle after welding
+            }
+            if let Some(k) = index_axis {
+                let (x, y) = (uvs[c as usize][k], uvs[d as usize][k]);
+                let (lo, hi) = (x.min(y), y.max(x));
+                if (hi - 1e-9).ceil() - (lo + 1e-9).floor() > 1.0 {
+                    continue; // the new diagonal would cross a crease
+                }
+            }
+            // Flip: (a b c) + (b a d) → (a d c) + (d b c).
+            for old in [t, u] {
+                for e in 0..3 {
+                    owner.remove(&(old[e], old[(e + 1) % 3]));
+                }
+            }
+            tris[ti] = [a, d, c];
+            tris[tj] = [d, b, c];
+            for (idx, fresh) in [(ti, tris[ti]), (tj, tris[tj])] {
+                for e in 0..3 {
+                    owner.insert((fresh[e], fresh[(e + 1) % 3]), idx);
+                }
+                if !queued[idx] {
+                    queued[idx] = true;
+                    stack.push(idx);
+                }
+            }
+            budget -= 1;
+            if budget == 0 {
+                return;
+            }
+            break;
+        }
+    }
 }
 
 /// The (shared) midpoint vertex of local edge `a–b`: on the 3-D chord

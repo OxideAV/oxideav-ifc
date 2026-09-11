@@ -512,18 +512,24 @@ impl ParamSurface {
         !matches!(self, Self::Revolution { .. } | Self::Extrusion { .. })
     }
 
+    /// The parameter axis that counts profile samples (the surface is a
+    /// chord polyhedron along it: straight between integer values, with
+    /// a crease at each), if any.
+    pub(super) fn index_axis(&self) -> Option<usize> {
+        match self {
+            Self::Revolution { .. } => Some(1),
+            Self::Extrusion { .. } => Some(0),
+            _ => None,
+        }
+    }
+
     /// Where to split the parameter edge `a → b` (a fraction in
     /// `(0, 1)`): the midpoint, unless the direction parameterised by
     /// profile-sample index contains a sample between the ends — then
     /// the sample nearest the middle, so refined edges follow the
     /// sampled profile instead of cutting its corners.
     pub(super) fn split_fraction(&self, a: Uv, b: Uv) -> f64 {
-        let index_axis = match self {
-            Self::Revolution { .. } => Some(1),
-            Self::Extrusion { .. } => Some(0),
-            _ => None,
-        };
-        if let Some(k) = index_axis {
+        if let Some(k) = self.index_axis() {
             let (lo, hi) = (a[k].min(b[k]), a[k].max(b[k]));
             let mid = 0.5 * (lo + hi);
             let candidates = [mid.floor(), mid.ceil()];
