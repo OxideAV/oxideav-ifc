@@ -453,19 +453,48 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
         };
     }
     let base = tessellate_item_depth(step, first, depth + 1)?;
-    let regions = half_space_regions(step, second)?;
-    // The tool as a finite solid mesh (None: a plain half-space, which
-    // takes the direct plane split).
-    let tool: Option<TriMesh> = match &regions {
-        Some(regions) if regions.len() == 1 && regions[0].len() == 1 => {
-            let plane = &regions[0][0];
-            let (outside, inside) = split_mesh_by_plane(&base, plane);
+    // The tool as a finite solid mesh (None: no closed tool).
+    let tool: Option<TriMesh> = match half_space_parts(step, second)? {
+        // A plain planar half-space takes the direct plane split.
+        Some((HalfSpaceBase::Plane(plane), regions)) if regions.is_empty() => {
+            let (outside, inside) = split_mesh_by_plane(&base, &plane);
             return Ok(match op {
                 BooleanOperator::Difference => outside,
                 _ => inside,
             });
         }
-        Some(regions) => Some(materialise_regions(&base, regions)?),
+        // A restricted planar half-space: the plane joins every
+        // restriction region.
+        Some((HalfSpaceBase::Plane(plane), regions)) => {
+            let regions: Vec<ConvexRegion> = regions
+                .into_iter()
+                .map(|mut r| {
+                    r.push(plane);
+                    r
+                })
+                .collect();
+            Some(materialise_regions(&base, &regions)?)
+        }
+        // A curved base surface: the solid side of a cylinder / sphere
+        // is its inside (AgreementFlag TRUE — the surface normal points
+        // outward) or its outside; the finite tool covers the operand.
+        Some((HalfSpaceBase::Curved { surface, inside }, regions)) => {
+            let solid = curved_half_space_solid(&base, &surface)?;
+            let envelope = if regions.is_empty() {
+                base_envelope(&base)?
+            } else {
+                materialise_regions(&base, &regions)?
+            };
+            Some(mesh_boolean(
+                &envelope,
+                &solid,
+                if inside {
+                    BooleanOperator::Intersection
+                } else {
+                    BooleanOperator::Difference
+                },
+            )?)
+        }
         None => match tessellate_item_depth(step, second, depth + 1) {
             Ok(mesh) if csg::is_closed(&mesh) => Some(mesh),
             Ok(_) => None,
@@ -482,10 +511,9 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
     }
 }
 
-/// A bounded half-space tool (the union of convex plane regions) as a
-/// closed solid mesh: every region is cut out of a box enclosing
-/// `base` with margin, and the pieces are united.
-fn materialise_regions(base: &TriMesh, regions: &[ConvexRegion]) -> Result<TriMesh, GeometryError> {
+/// The axis-aligned bounding box of `base`, padded by a quarter of its
+/// extent plus one unit, as `(lo, hi)`.
+fn base_bounds(base: &TriMesh) -> Result<([f64; 3], [f64; 3]), GeometryError> {
     let mut lo = [f64::INFINITY; 3];
     let mut hi = [f64::NEG_INFINITY; 3];
     for p in &base.positions {
@@ -499,10 +527,74 @@ fn materialise_regions(base: &TriMesh, regions: &[ConvexRegion]) -> Result<TriMe
     }
     let extent = (hi[0] - lo[0]).max(hi[1] - lo[1]).max(hi[2] - lo[2]);
     let margin = 0.25 * extent + 1.0;
-    let envelope = box_mesh(
+    Ok((
         [lo[0] - margin, lo[1] - margin, lo[2] - margin],
         [hi[0] + margin, hi[1] + margin, hi[2] + margin],
-    );
+    ))
+}
+
+/// A box enclosing `base` with margin — the finite stand-in for "all
+/// of space" when an infinite tool is materialised.
+fn base_envelope(base: &TriMesh) -> Result<TriMesh, GeometryError> {
+    let (lo, hi) = base_bounds(base)?;
+    Ok(box_mesh(lo, hi))
+}
+
+/// The finite solid of a curved half-space base surface, large enough
+/// to cover `base`: a cylinder along its axis, or the sphere.
+fn curved_half_space_solid(
+    base: &TriMesh,
+    surface: &surfaces::ElementarySurface,
+) -> Result<TriMesh, GeometryError> {
+    let (lo, hi) = base_bounds(base)?;
+    let frame = &surface.frame;
+    let mut mesh = match surface.kind {
+        surfaces::SurfaceKind::Cylinder { radius } => {
+            // Axial extent of the padded bounds in the cylinder frame.
+            let (mut zmin, mut zmax) = (f64::INFINITY, f64::NEG_INFINITY);
+            for k in 0..8 {
+                let c = [
+                    if k & 1 == 0 { lo[0] } else { hi[0] },
+                    if k & 2 == 0 { lo[1] } else { hi[1] },
+                    if k & 4 == 0 { lo[2] } else { hi[2] },
+                ];
+                let z = surface.to_local(c)[2];
+                zmin = zmin.min(z);
+                zmax = zmax.max(z);
+            }
+            let n = CIRCLE_SEGMENTS as u32;
+            let ring = ellipse_ring(radius, radius);
+            let mut positions: Vec<[f64; 3]> = ring.iter().map(|&[x, y]| [x, y, zmin]).collect();
+            positions.extend(ring.iter().map(|&[x, y]| [x, y, zmax]));
+            let mut triangles = Vec::with_capacity(4 * CIRCLE_SEGMENTS);
+            for k in 0..n {
+                let k1 = (k + 1) % n;
+                triangles.push([k, k1, n + k1]);
+                triangles.push([k, n + k1, n + k]);
+            }
+            for k in 1..(n - 1) {
+                triangles.push([0, k + 1, k]);
+                triangles.push([n, n + k, n + k + 1]);
+            }
+            TriMesh {
+                positions,
+                triangles,
+            }
+        }
+        surfaces::SurfaceKind::Sphere { radius } => sphere_mesh(radius),
+        surfaces::SurfaceKind::Plane | surfaces::SurfaceKind::Torus { .. } => {
+            return Err(GeometryError::Unsupported("IFCTOROIDALSURFACE".to_string()));
+        }
+    };
+    mesh.transform(frame);
+    Ok(mesh)
+}
+
+/// A bounded half-space tool (the union of convex plane regions) as a
+/// closed solid mesh: every region is cut out of a box enclosing
+/// `base` with margin, and the pieces are united.
+fn materialise_regions(base: &TriMesh, regions: &[ConvexRegion]) -> Result<TriMesh, GeometryError> {
+    let envelope = base_envelope(base)?;
     let mut tool: Option<TriMesh> = None;
     for region in regions {
         let piece = intersect_convex_region(&envelope, region);
@@ -566,35 +658,48 @@ impl Plane {
 /// outward).
 type ConvexRegion = Vec<Plane>;
 
-/// Resolve a half-space solid instance to the union of convex regions
-/// it removes. Returns `Ok(None)` when the keyword is not a half-space
-/// solid at all (so the caller can fall back), and an error when it is
-/// one but malformed / resting on an unsupported base surface.
-fn half_space_regions(
+/// The dividing surface of a half-space solid, with the AgreementFlag
+/// applied.
+enum HalfSpaceBase {
+    /// A plane whose normal points OUT of the solid (removed) region.
+    Plane(Plane),
+    /// A cylindrical / spherical base: the solid region is the inside
+    /// of the surface (`inside`) or its outside.
+    Curved {
+        surface: surfaces::ElementarySurface,
+        inside: bool,
+    },
+}
+
+/// Resolve a half-space solid instance to its base and the convex
+/// regions restricting it (the prism pieces of a polygonal-bounded
+/// half-space, the enclosure box of a boxed one; empty for a plain
+/// half-space). Returns `Ok(None)` when the keyword is not a
+/// half-space solid at all (so the caller can fall back), and an error
+/// when it is one but malformed / resting on an unsupported base
+/// surface.
+#[allow(clippy::type_complexity)]
+fn half_space_parts(
     step: &StepFile,
     id: u64,
-) -> Result<Option<Vec<ConvexRegion>>, GeometryError> {
+) -> Result<Option<(HalfSpaceBase, Vec<ConvexRegion>)>, GeometryError> {
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
     match inst.keyword.as_str() {
-        "IFCHALFSPACESOLID" => {
-            let plane = half_space_base_plane(step, &inst.args)?;
-            Ok(Some(vec![vec![plane]]))
-        }
+        "IFCHALFSPACESOLID" => Ok(Some((half_space_base(step, &inst.args)?, Vec::new()))),
         "IFCBOXEDHALFSPACE" => {
             // (BaseSurface, AgreementFlag, Enclosure : IfcBoundingBox).
-            let plane = half_space_base_plane(step, &inst.args)?;
+            let base = half_space_base(step, &inst.args)?;
             let box_id = inst
                 .args
                 .get(2)
                 .and_then(Value::as_reference)
                 .ok_or(GeometryError::BadCoordinates)?;
-            let mut region = bounding_box_planes(step, box_id)?;
-            region.push(plane);
-            Ok(Some(vec![region]))
+            let region = bounding_box_planes(step, box_id)?;
+            Ok(Some((base, vec![region])))
         }
         "IFCPOLYGONALBOUNDEDHALFSPACE" => {
             // (BaseSurface, AgreementFlag, Position, PolygonalBoundary).
-            let plane = half_space_base_plane(step, &inst.args)?;
+            let base = half_space_base(step, &inst.args)?;
             let pos_id = inst
                 .args
                 .get(2)
@@ -612,7 +717,7 @@ fn half_space_regions(
             }
             make_ccw(&mut ring);
             // Ear-clip the (possibly concave) boundary polygon; each
-            // triangle becomes one convex prism piece ∩ base half-space.
+            // triangle becomes one convex prism piece.
             let tris = ear_clip(
                 ring.iter()
                     .enumerate()
@@ -642,22 +747,23 @@ fn half_space_regions(
                         normal: n3,
                     });
                 }
-                region.push(plane);
                 regions.push(region);
             }
-            Ok(Some(regions))
+            Ok(Some((base, regions)))
         }
         _ => Ok(None),
     }
 }
 
-/// The base plane of a half-space, oriented so its normal points OUT of
-/// the solid (removed) region — i.e. the AgreementFlag applied.
+/// The base surface of a half-space with the AgreementFlag applied: a
+/// plane oriented so its normal points OUT of the solid (removed)
+/// region, or a curved elementary surface with its solid side.
 ///
 /// AgreementFlag TRUE → solid is the negative side of the base-surface
-/// normal, so the outward normal of the removed region is +N; FALSE →
-/// solid is the positive side, outward normal −N (digest §2).
-fn half_space_base_plane(step: &StepFile, args: &[Value]) -> Result<Plane, GeometryError> {
+/// normal (for a plane: the outward normal of the removed region is
+/// +N; for a cylinder / sphere, whose normal points away from the axis
+/// / centre: the inside), FALSE → the positive side (digest §2).
+fn half_space_base(step: &StepFile, args: &[Value]) -> Result<HalfSpaceBase, GeometryError> {
     let surface_id = args
         .first()
         .and_then(Value::as_reference)
@@ -670,22 +776,28 @@ fn half_space_base_plane(step: &StepFile, args: &[Value]) -> Result<Plane, Geome
     let surf = step
         .get(surface_id)
         .ok_or(GeometryError::MissingInstance(surface_id))?;
-    if surf.keyword != "IFCPLANE" {
-        // A non-planar base surface (cylindrical, …) is out of scope.
-        return Err(GeometryError::Unsupported(surf.keyword.clone()));
+    match surf.keyword.as_str() {
+        "IFCPLANE" => {
+            // IfcPlane(Position : IfcAxis2Placement3D): normal = placement Z.
+            let pos_id = surf
+                .args
+                .first()
+                .and_then(Value::as_reference)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let t = axis2_placement_3d(step, pos_id)?;
+            let n = t.cols[2];
+            Ok(HalfSpaceBase::Plane(Plane {
+                point: t.translation,
+                normal: if agreement { n } else { [-n[0], -n[1], -n[2]] },
+            }))
+        }
+        "IFCCYLINDRICALSURFACE" | "IFCSPHERICALSURFACE" => Ok(HalfSpaceBase::Curved {
+            surface: surfaces::ElementarySurface::from_id(step, surface_id)?,
+            inside: agreement,
+        }),
+        // A toroidal / swept / B-spline base is out of scope.
+        other => Err(GeometryError::Unsupported(other.to_string())),
     }
-    // IfcPlane(Position : IfcAxis2Placement3D): normal = placement Z.
-    let pos_id = surf
-        .args
-        .first()
-        .and_then(Value::as_reference)
-        .ok_or(GeometryError::BadCoordinates)?;
-    let t = axis2_placement_3d(step, pos_id)?;
-    let n = t.cols[2];
-    Ok(Plane {
-        point: t.translation,
-        normal: if agreement { n } else { [-n[0], -n[1], -n[2]] },
-    })
 }
 
 /// The six outward planes of an `IfcBoundingBox(Corner, XDim, YDim,
@@ -10579,6 +10691,53 @@ mod tests {
             "{}",
             d.signed_volume()
         );
+    }
+
+    #[test]
+    fn curved_half_spaces_carve_cylinders_and_spheres() {
+        // A 4×4×2 box (z ∈ [0, 2]) against half-spaces on curved bases:
+        // a cylinder r = 1 on the z axis (AgreementFlag TRUE = the
+        // inside, the negative side of the outward surface normal), the
+        // same cylinder's outside (FALSE), a sphere r = 1 at the box
+        // centre, and a boxed half-space limiting the cylinder to the
+        // [0, 2]³ octant. Volumes follow the 48-gon disk / the
+        // tessellated sphere exactly; every result is watertight.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n#5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCCYLINDRICALSURFACE(#5,1.);\n\
+             #7=IFCHALFSPACESOLID(#6,.T.);\n#8=IFCHALFSPACESOLID(#6,.F.);\n\
+             #10=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#7);\n\
+             #11=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#8);\n\
+             #12=IFCBOOLEANRESULT(.INTERSECTION.,#3,#7);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,1.));\n#21=IFCAXIS2PLACEMENT3D(#20,$,$);\n\
+             #22=IFCSPHERICALSURFACE(#21,1.);\n#23=IFCHALFSPACESOLID(#22,.T.);\n\
+             #24=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#23);\n\
+             #30=IFCBOUNDINGBOX(#4,2.,2.,2.);\n\
+             #31=IFCBOXEDHALFSPACE(#6,.T.,#30);\n\
+             #32=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#31);",
+        );
+        let disk = disk_polygon_area(1.0) * 2.0;
+        let cases = [
+            (10u64, 32.0 - disk),
+            (11, disk),
+            (12, disk),
+            (24, 32.0 - sphere_mesh(1.0).signed_volume()),
+            (32, 32.0 - disk / 4.0),
+        ];
+        for (id, want) in cases {
+            let m = tessellate_item(&f, id).unwrap();
+            assert_closed(&m);
+            assert!(
+                (m.signed_volume() - want).abs() < 1e-9,
+                "#{id}: {} != {want}",
+                m.signed_volume()
+            );
+        }
+        let m = tessellate_item(&f, 11).unwrap();
+        assert!(m.positions.iter().all(|p| p[0].hypot(p[1]) <= 1.0 + 1e-9));
     }
 
     #[test]

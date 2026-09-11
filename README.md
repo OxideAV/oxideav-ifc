@@ -345,10 +345,14 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   and `IfcCsgSolid` evaluates its `TreeRootExpression`.
 * `tessellate_item` evaluates **boolean results** (`IfcBooleanResult` /
   `IfcBooleanClippingResult`, §8.8.3.5) with real carving:
-  - a plain `IfcHalfSpaceSolid` tool (the `AgreementFlag` side
-    convention) splits the operand's closed mesh along its base plane
-    and **re-caps the cut watertight** (deterministic loop chaining,
-    hole-aware annulus caps);
+  - a plain `IfcHalfSpaceSolid` tool on an `IfcPlane` (the
+    `AgreementFlag` side convention) splits the operand's closed mesh
+    along its base plane and **re-caps the cut watertight**
+    (deterministic loop chaining, hole-aware annulus caps); a
+    half-space on a **cylindrical or spherical** base (its inside for
+    `AgreementFlag` TRUE — the negative side of the outward surface
+    normal — its outside for FALSE) is materialised as a finite solid
+    over the operand's extent and carved by the evaluator below;
   - every other tool goes through the **mesh–mesh Boolean evaluator**
     (`mesh_boolean(a, b, op)`, also public): a binary space partition of
     each operand's faces classifies the other operand's polygons —
