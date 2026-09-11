@@ -31,6 +31,9 @@ All notable changes to this project will be documented in this file.
   sectioned entities. `IfcTriangulatedIrregularNetwork` reads as its
   triangulated face set (+ `NotClosed`). Typed schema entry for the
   sectioned surface.
+- WHERE rules for `IfcBooleanResult` / `IfcBooleanClippingResult`
+  (`IfcSweptDiskSolid` accepted despite the schema's DISC literal, digest
+  §5.3), `IfcPolygonalBoundedHalfSpace` and `IfcBoxedHalfSpace`.
 - `IfcSweptDiskSolidPolygonal.FilletRadius` rounds the directrix
   corners with tangent arcs (radius reduced where a fillet would overrun
   half a segment); WHERE rules `CorrectRadii` / `DirectrixIsPolyline`.

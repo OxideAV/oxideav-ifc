@@ -725,6 +725,88 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 });
             }
         }
+        // ---- Boolean results and half-spaces ----
+        "IFCBOOLEANRESULT" | "IFCBOOLEANCLIPPINGRESULT" => {
+            // (Operator, FirstOperand, SecondOperand).
+            let operand = |i: usize| {
+                a.get(i)
+                    .and_then(Value::as_reference)
+                    .and_then(|id| step.get(id))
+            };
+            // A tessellated-face-set operand must be Closed = TRUE
+            // (Closed is attribute 2 of a triangulated set, 1 of a
+            // polygonal one); every other operand kind passes.
+            let closed_ok = |i: usize| -> Option<bool> {
+                let inst = operand(i)?;
+                let closed = match inst.keyword.as_str() {
+                    "IFCTRIANGULATEDFACESET" | "IFCTRIANGULATEDIRREGULARNETWORK" => {
+                        inst.args.get(2)
+                    }
+                    "IFCPOLYGONALFACESET" => inst.args.get(1),
+                    _ => return Some(true),
+                };
+                Some(closed.and_then(Value::as_enum) == Some("T"))
+            };
+            check("FirstOperandClosed", closed_ok(1));
+            check("SecondOperandClosed", closed_ok(2));
+            // Every IfcBooleanOperand member is three-dimensional.
+            rule!("SameDim", {
+                operand(1)?;
+                operand(2)?;
+                true
+            });
+            if inst.keyword == "IFCBOOLEANCLIPPINGRESULT" {
+                rule!("OperatorType", a.first()?.as_enum()? == "DIFFERENCE");
+                // The schema literal reads IFCSWEPTDISCSOLID (sic); the
+                // intended IfcSweptDiskSolid is accepted (half-space
+                // digest §5.3).
+                rule!(
+                    "FirstOperandType",
+                    matches!(
+                        operand(1)?.keyword.as_str(),
+                        "IFCEXTRUDEDAREASOLID"
+                            | "IFCEXTRUDEDAREASOLIDTAPERED"
+                            | "IFCREVOLVEDAREASOLID"
+                            | "IFCREVOLVEDAREASOLIDTAPERED"
+                            | "IFCFIXEDREFERENCESWEPTAREASOLID"
+                            | "IFCDIRECTRIXDERIVEDREFERENCESWEPTAREASOLID"
+                            | "IFCSURFACECURVESWEPTAREASOLID"
+                            | "IFCSWEPTDISKSOLID"
+                            | "IFCSWEPTDISKSOLIDPOLYGONAL"
+                            | "IFCBOOLEANCLIPPINGRESULT"
+                    )
+                );
+                rule!(
+                    "SecondOperandType",
+                    matches!(
+                        operand(2)?.keyword.as_str(),
+                        "IFCHALFSPACESOLID" | "IFCPOLYGONALBOUNDEDHALFSPACE" | "IFCBOXEDHALFSPACE"
+                    )
+                );
+            }
+        }
+        "IFCPOLYGONALBOUNDEDHALFSPACE" => {
+            // (BaseSurface, AgreementFlag, Position, PolygonalBoundary).
+            let boundary = a.get(3).and_then(Value::as_reference);
+            rule!(
+                "BoundaryDim",
+                crate::geometry::curve_dimension(step, boundary?, 0)? == 2
+            );
+            rule!(
+                "BoundaryType",
+                matches!(
+                    keyword_of(step, boundary)?,
+                    "IFCPOLYLINE" | "IFCCOMPOSITECURVE" | "IFCINDEXEDPOLYCURVE"
+                )
+            );
+        }
+        "IFCBOXEDHALFSPACE" => {
+            // (BaseSurface, AgreementFlag, Enclosure).
+            rule!(
+                "UnboundedSurface",
+                keyword_of(step, a.first()?.as_reference())? != "IFCCURVEBOUNDEDPLANE"
+            );
+        }
         "IFCTRIANGULATEDIRREGULARNETWORK" => {
             // (Coordinates, Normals, Closed, CoordIndex, PnIndex, Flags):
             // NotClosed — Closed = FALSE (an unset flag is not TRUE).
@@ -1255,6 +1337,47 @@ mod tests {
         assert_eq!(rules(&f, 41), ["SameSurface"]);
         assert_eq!(rules(&f, 42), ["IsClosed"]);
         assert!(rules(&f, 43).is_empty());
+    }
+
+    #[test]
+    fn boolean_and_half_space_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\
+             #2=IFCTRIANGULATEDFACESET(#1,$,.T.,((1,2,3)),$);\n\
+             #3=IFCTRIANGULATEDFACESET(#1,$,$,((1,2,3)),$);\n\
+             #4=IFCPOLYGONALFACESET(#1,.F.,(#9),$);\n\
+             #5=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,1.,1.);\n#6=IFCDIRECTION((0.,0.,1.));\n\
+             #7=IFCEXTRUDEDAREASOLID(#5,$,#6,1.);\n\
+             #8=IFCCARTESIANPOINT((0.,0.,0.));\n#9=IFCAXIS2PLACEMENT3D(#8,$,$);\n\
+             #10=IFCPLANE(#9);\n#11=IFCHALFSPACESOLID(#10,.T.);\n\
+             #12=IFCCARTESIANPOINT((0.,0.));\n#13=IFCCARTESIANPOINT((1.,0.));\n\
+             #14=IFCPOLYLINE((#12,#13));\n#15=IFCPOLYLINE((#8,#8));\n\
+             #16=IFCCIRCLE(#9,1.);\n\
+             #20=IFCBOOLEANRESULT(.UNION.,#2,#7);\n\
+             #21=IFCBOOLEANRESULT(.UNION.,#3,#4);\n\
+             #22=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#7,#11);\n\
+             #23=IFCBOOLEANCLIPPINGRESULT(.UNION.,#2,#7);\n\
+             #30=IFCPOLYGONALBOUNDEDHALFSPACE(#10,.T.,#9,#14);\n\
+             #31=IFCPOLYGONALBOUNDEDHALFSPACE(#10,.T.,#9,#15);\n\
+             #32=IFCPOLYGONALBOUNDEDHALFSPACE(#10,.T.,#9,#16);\n\
+             #40=IFCBOUNDINGBOX(#8,1.,1.,1.);\n\
+             #41=IFCBOXEDHALFSPACE(#10,.T.,#40);\n\
+             #42=IFCCURVEBOUNDEDPLANE(#10,#14,$);\n\
+             #43=IFCBOXEDHALFSPACE(#42,.T.,#40);",
+        );
+        assert!(rules(&f, 20).is_empty());
+        assert_eq!(rules(&f, 21), ["FirstOperandClosed", "SecondOperandClosed"]);
+        assert!(rules(&f, 22).is_empty());
+        assert_eq!(
+            rules(&f, 23),
+            ["OperatorType", "FirstOperandType", "SecondOperandType"]
+        );
+        assert!(rules(&f, 30).is_empty());
+        assert_eq!(rules(&f, 31), ["BoundaryDim"]);
+        // A 3-D circle fails both the dimension and the type rule.
+        assert_eq!(rules(&f, 32), ["BoundaryDim", "BoundaryType"]);
+        assert!(rules(&f, 41).is_empty());
+        assert_eq!(rules(&f, 43), ["UnboundedSurface"]);
     }
 
     #[test]

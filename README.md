@@ -439,7 +439,13 @@ of one instance (`None` when the entity has no transcribed rules),
 hollow / composite profiles, the swept area solids (`SweptAreaType`,
 `ValidExtrusionDirection`, the revolution-axis rules, tapered
 `CorrectProfileAssignment`, directrix-sweep `DirectrixBounded`), swept
-disk solids, sectioned spines, advanced Breps / faces / edge loops /
+disk solids (+ the polygonal subtype's `CorrectRadii` /
+`DirectrixIsPolyline`), Boolean results and clipping results
+(`FirstOperandClosed` / `SecondOperandClosed` / `SameDim`,
+`OperatorType` / `FirstOperandType` / `SecondOperandType`), the
+half-space subtypes (`BoundaryDim` / `BoundaryType`,
+`UnboundedSurface`), sectioned solids / surfaces, triangulated
+irregular networks, curves on surfaces, sectioned spines, advanced Breps / faces / edge loops /
 oriented edges (`HasAdvancedFaces`, `VoidsHaveAdvancedFaces`,
 `ApplicableEdgeCurves`, `ApplicableSurface`, `RequiresEdgeCurve`,
 `IsClosed`, `IsContinuous`, `EdgeElementNotOriented`), the toroidal /
