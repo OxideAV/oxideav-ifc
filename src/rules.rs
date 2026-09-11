@@ -636,6 +636,80 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 });
             }
         }
+        "IFCSECTIONEDSOLIDHORIZONTAL" | "IFCSECTIONEDSURFACE" => {
+            // IfcSectionedSolidHorizontal(Directrix, CrossSections,
+            // CrossSectionPositions); IfcSectionedSurface(Directrix,
+            // CrossSectionPositions, CrossSections).
+            let surface = inst.keyword == "IFCSECTIONEDSURFACE";
+            let (sections, positions) = if surface {
+                (a.get(2), a.get(1))
+            } else {
+                (a.get(1), a.get(2))
+            };
+            let sections = sections.and_then(Value::as_list);
+            let positions = positions.and_then(Value::as_list);
+            let profile = |p: &Value| p.as_reference().and_then(|pid| step.get(pid));
+            let profile_type = |p: &Value| profile(p).and_then(|i| i.args.first()?.as_enum());
+            rule!(
+                "DirectrixIs3D",
+                crate::geometry::curve_dimension(step, a.first()?.as_reference()?, 0)? == 3
+            );
+            if surface {
+                rule!(
+                    "AreaProfileTypes",
+                    sections?.iter().any(|p| profile_type(p) == Some("CURVE"))
+                );
+            } else {
+                rule!("ConsistentProfileTypes", {
+                    let first = profile_type(sections?.first()?);
+                    sections?.iter().all(|p| profile_type(p) == first)
+                });
+            }
+            rule!("SectionsSameType", {
+                let first = profile(sections?.first()?)?.keyword.as_str();
+                sections?
+                    .iter()
+                    .all(|p| profile(p).is_some_and(|i| i.keyword == first))
+            });
+            rule!(
+                "CorrespondingSectionPositions",
+                sections?.len() == positions?.len()
+            );
+            // Offsets live on the placement's IfcPointByDistanceExpression
+            // Location: (DistanceAlong, OffsetLateral, OffsetVertical,
+            // OffsetLongitudinal, BasisCurve).
+            let offset_present = |p: &Value, index: usize| -> Option<bool> {
+                let placement = step.get(p.as_reference()?)?;
+                let loc = step.get(placement.args.first()?.as_reference()?)?;
+                Some(loc.args.get(index).is_some_and(|v| !v.is_unset()))
+            };
+            if surface {
+                rule!("NoOffsets", {
+                    let ps = positions?;
+                    let mut any = false;
+                    for p in ps {
+                        for i in 1..=3 {
+                            any |= offset_present(p, i)?;
+                        }
+                    }
+                    !any
+                });
+            } else {
+                rule!("NoLongitudinalOffsets", {
+                    let ps = positions?;
+                    let mut any = false;
+                    for p in ps {
+                        any |= offset_present(p, 3)?;
+                    }
+                    !any
+                });
+            }
+        }
+        "IFCTRIANGULATEDIRREGULARNETWORK" => {
+            // (Coordinates, Normals, Closed, CoordIndex, PnIndex, Flags):
+            // NotClosed — Closed = FALSE (an unset flag is not TRUE).
+            rule!("NotClosed", a.get(2).and_then(Value::as_enum) != Some("T"));
+        }
         "IFCSECTIONEDSPINE" => {
             // (SpineCurve, CrossSections, CrossSectionPositions).
             let sections = a.get(1).and_then(Value::as_list);
@@ -1161,6 +1235,47 @@ mod tests {
         assert_eq!(rules(&f, 41), ["SameSurface"]);
         assert_eq!(rules(&f, 42), ["IsClosed"]);
         assert!(rules(&f, 43).is_empty());
+    }
+
+    #[test]
+    fn sectioned_solid_and_surface_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n\
+             #4=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,1.);\n\
+             #5=IFCRECTANGLEPROFILEDEF(.CURVE.,$,$,2.,1.);\n\
+             #6=IFCCIRCLEPROFILEDEF(.AREA.,$,$,1.);\n\
+             #7=IFCCARTESIANPOINT((0.,0.));\n#8=IFCCARTESIANPOINT((1.,0.));\n#9=IFCPOLYLINE((#7,#8));\n\
+             #10=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(0.),$,$,$,#3);\n\
+             #11=IFCAXIS2PLACEMENTLINEAR(#10,$,$);\n\
+             #12=IFCPOINTBYDISTANCEEXPRESSION(IFCNONNEGATIVELENGTHMEASURE(10.),1.,$,2.,#3);\n\
+             #13=IFCAXIS2PLACEMENTLINEAR(#12,$,$);\n\
+             #20=IFCSECTIONEDSOLIDHORIZONTAL(#3,(#4,#4),(#11,#11));\n\
+             #21=IFCSECTIONEDSOLIDHORIZONTAL(#3,(#4,#5),(#11,#13));\n\
+             #22=IFCSECTIONEDSOLIDHORIZONTAL(#9,(#4,#6),(#11));\n\
+             #30=IFCSECTIONEDSURFACE(#3,(#11,#11),(#5,#5));\n\
+             #31=IFCSECTIONEDSURFACE(#3,(#11,#13),(#4,#4));\n\
+             #40=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(1.,1.,0.)));\n\
+             #41=IFCTRIANGULATEDIRREGULARNETWORK(#40,$,.F.,((1,2,3)),$,(0));\n\
+             #42=IFCTRIANGULATEDIRREGULARNETWORK(#40,$,.T.,((1,2,3)),$,(0));",
+        );
+        assert!(rules(&f, 20).is_empty());
+        assert_eq!(
+            rules(&f, 21),
+            ["ConsistentProfileTypes", "NoLongitudinalOffsets"]
+        );
+        assert_eq!(
+            rules(&f, 22),
+            [
+                "DirectrixIs3D",
+                "SectionsSameType",
+                "CorrespondingSectionPositions"
+            ]
+        );
+        assert!(rules(&f, 30).is_empty());
+        assert_eq!(rules(&f, 31), ["AreaProfileTypes", "NoOffsets"]);
+        assert!(rules(&f, 41).is_empty());
+        assert_eq!(rules(&f, 42), ["NotClosed"]);
     }
 
     #[test]

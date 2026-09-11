@@ -21,7 +21,7 @@ extension.
 |-------|-------|--------|
 | **1** | STEP physical-file (ISO 10303-21) parser: HEADER + DATA instance graph, full parameter grammar, reference resolver, DoS caps | ✅ landed |
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
-| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline / revolved / extruded faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, bounded-surface sheets (curve-bounded planes, rectangular trims of any supported surface, **p-curve-bounded surfaces** with implicit outers), swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids and sectioned spines, CSG primitives and CSG trees, **real mesh–mesh booleans** (UNION / INTERSECTION / DIFFERENCE with non-convex tools, half-space clipping, watertight stitching), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release; sectioned surfaces later |
+| **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline / revolved / extruded faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, bounded-surface sheets (curve-bounded planes, rectangular trims of any supported surface, **p-curve-bounded surfaces** with implicit outers), swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes, sectioned (alignment) solids, sectioned surfaces and sectioned spines, triangulated irregular networks, CSG primitives and CSG trees, **real mesh–mesh booleans** (UNION / INTERSECTION / DIFFERENCE with non-convex tools, half-space clipping, watertight stitching), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
 
 ## Phase 1 surface
@@ -143,7 +143,7 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   optional `PnIndex` indirection are resolved during extraction).
   `TriMesh::signed_volume()` reports the enclosed volume by the
   divergence theorem (positive for outward-wound watertight meshes).
-* `tessellate_item(step, id)` — one `IfcTriangulatedFaceSet`
+* `tessellate_item(step, id)` — one `IfcTriangulatedFaceSet` (or `IfcTriangulatedIrregularNetwork`)
   (`Coordinates`, `Normals`, `Closed`, `CoordIndex`, `PnIndex`) or
   `IfcPolygonalFaceSet` (`Coordinates`, `Closed`, `Faces`, `PnIndex`,
   with each `IfcIndexedPolygonalFace` fan-triangulated) → a `TriMesh`.
@@ -467,7 +467,20 @@ trimmed surfaces, B-spline curves
   `IfcGetBasisSurface` / `IfcAssociatedSurface`), `SameSurface` /
   `IsClosed` (composite curves on surfaces).
 
-Still later in Phase 3: `IfcSectionedSurface`.
+* **`IfcSectionedSurface`** (`Directrix`, `CrossSectionPositions`,
+  `CrossSections` — note the order) lofts open `CURVE`-typed profiles
+  (`IfcArbitraryOpenProfileDef`; a closed profile gives an open-ended
+  tube) at `IfcAxis2PlacementLinear` stations into a sheet with the
+  same station expansion as the horizontal solid — level sections,
+  no caps, offsets refused (`NoOffsets`). Both sectioned entities now
+  honour a placement's explicit `Axis` / `RefDirection` (Z = `Axis`,
+  X = `RefDirection` ⟂ Z, Y = Z × X; frames blend by rotation between
+  stations). WHERE rules `DirectrixIs3D`, `SectionsSameType`,
+  `CorrespondingSectionPositions`, `AreaProfileTypes` / `NoOffsets`
+  (surface), `ConsistentProfileTypes` / `NoLongitudinalOffsets`
+  (solid).
+* **`IfcTriangulatedIrregularNetwork`** (`Flags` after `PnIndex`)
+  reads as its `IfcTriangulatedFaceSet`; WHERE rule `NotClosed`.
 
 The synthetic fixture `tests/fixtures/synthetic-advanced-brep.ifc`
 (authored for this crate, IFC 4) places an advanced-Brep cylinder, a

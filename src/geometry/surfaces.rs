@@ -750,7 +750,10 @@ impl ParamSurface {
 /// an `IfcArbitraryOpenProfileDef(…, Curve)` samples its curve (open);
 /// any closed profile kind resolves through the shared ring path
 /// (closed). Returns the 2-D samples and whether they close.
-fn profile_curve(step: &StepFile, profile_id: u64) -> Result<(Vec<[f64; 2]>, bool), GeometryError> {
+pub(super) fn profile_curve(
+    step: &StepFile,
+    profile_id: u64,
+) -> Result<(Vec<[f64; 2]>, bool), GeometryError> {
     let inst = step
         .get(profile_id)
         .ok_or(GeometryError::MissingInstance(profile_id))?;

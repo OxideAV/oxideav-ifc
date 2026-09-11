@@ -23,6 +23,14 @@ All notable changes to this project will be documented in this file.
   trimmer (loops as authored, winding through the seam). WHERE rules for
   p-curves, surface curves and composite curves on surfaces; typed
   schema entries for the family.
+- Phase 3: `IfcSectionedSurface` — open profiles lofted at linear
+  placement stations into a sheet (the horizontal solid's station
+  expansion, no caps, `NoOffsets`); `IfcSectionedSolidHorizontal` and
+  the surface honour explicit `IfcAxis2PlacementLinear` `Axis` /
+  `RefDirection` frames (previously refused). WHERE rules for both
+  sectioned entities. `IfcTriangulatedIrregularNetwork` reads as its
+  triangulated face set (+ `NotClosed`). Typed schema entry for the
+  sectioned surface.
 - Parameter-space trimmer: Delaunay edge flips (Lawson's walk in the
   metric-scaled parameter plane) before and after midpoint refinement —
   the ear clipper's fans of slivers become well-shaped ladders, so a

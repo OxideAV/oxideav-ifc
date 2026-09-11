@@ -1170,6 +1170,12 @@ pub const SCHEMA: &[EntitySchema] = &[
         attrs: chain!(&["Directrix", "CrossSections", "CrossSectionPositions"]),
     },
     EntitySchema {
+        keyword: "IFCSECTIONEDSURFACE",
+        kind: EntityKind::Geometry,
+        // IfcSectionedSurface(Directrix, CrossSectionPositions, CrossSections).
+        attrs: chain!(&["Directrix", "CrossSectionPositions", "CrossSections"]),
+    },
+    EntitySchema {
         keyword: "IFCAXIS2PLACEMENTLINEAR",
         kind: EntityKind::Geometry,
         // IfcPlacement(Location) + IfcAxis2PlacementLinear(Axis,
@@ -3345,6 +3351,7 @@ mod tests {
             ("IFCRATIONALBSPLINESURFACEWITHKNOTS", 13),
             ("IFCCURVEBOUNDEDPLANE", 3),
             ("IFCRECTANGULARTRIMMEDSURFACE", 7),
+            ("IFCSECTIONEDSURFACE", 3),
             ("IFCCURVEBOUNDEDSURFACE", 3),
             ("IFCPCURVE", 2),
             ("IFCOUTERBOUNDARYCURVE", 2),
