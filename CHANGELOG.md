@@ -4,6 +4,33 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.2...v0.0.3) - 2026-09-11
+
+### Other
+
+- WHERE rules for Boolean results, clipping results and the bounded half-spaces
+- Swept-disk polygonal fillets: FilletRadius rounds the directrix corners with tangent arcs
+- half-spaces on cylindrical / spherical base surfaces carve
+- Brep voids are cavities whichever way the file winds them
+- mesh_boolean target + daily Fuzz workflow; CSG-tree / face-set-operand / polygonal-half-space intersection pins; package exclude
+- Phase 3: IfcSectionedSurface + IfcTriangulatedIrregularNetwork; sectioned stations honour explicit Axis/RefDirection
+- Delaunay edge flips before and after refinement — sliver fans become ladders, curved sheets stop over-estimating area
+- Phase 3: IfcCurveBoundedSurface — p-curve boundaries (IfcPcurve / IfcSurfaceCurve chains in IfcBoundaryCurves) meshed by the parameter-space trimmer
+- Phase 3: mesh–mesh Booleans — non-convex tools via a BSP evaluator with coplanar handling and watertight seam stitching
+- curved advanced Brep as a Boolean clipping operand (half-space cut stays watertight at half volume)
+- typed entries for the curved-Brep / surface / B-spline / sectioned-spine / bounded-surface entities + IfcAsymmetricIShapeProfileDef
+- WHERE rules for advanced Breps, faces, edge loops, oriented edges, toroidal / swept / B-spline surfaces
+- Phase 3 bounded surfaces as items: IfcCurveBoundedPlane + IfcRectangularTrimmedSurface
+- synthetic advanced-Brep fixture — placed cylinder / sphere / sectioned spine / arc sweep decode with world bboxes, watertight volumes
+- Phase 3: IfcSectionedSpine — profiles at explicit placements lofted along a composite spine
+- tessellate target + seed corpus; bound the cross-face chord repair
+- Phase 3 swept-surface faces: IfcSurfaceOfRevolution / IfcSurfaceOfLinearExtrusion as FaceSurface
+- Phase 3 curved advanced Breps: cylindrical / spherical / toroidal / B-spline faces trimmed in parameter space
+- Phase 3 edge loops + planar advanced Breps: IfcEdgeLoop / IfcOrientedEdge / IfcEdgeCurve / IfcSubedge over IfcVertexPoints
+- Phase 3: IfcAsymmetricIShapeProfileDef (IFC4 + 2x3 layouts) with its WHERE rules
+- Phase 3 directrix sweeps: IfcFixedReferenceSweptAreaSolid + IfcSurfaceCurveSweptAreaSolid
+- Phase 3 B-spline curves: IfcBSplineCurveWithKnots / rational / 2x3 Bézier as profile boundaries and directrices
+
 ### Added
 
 - Phase 3: mesh–mesh Booleans — `IfcBooleanResult` UNION / INTERSECTION
