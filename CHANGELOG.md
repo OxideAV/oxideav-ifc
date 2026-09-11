@@ -31,6 +31,8 @@ All notable changes to this project will be documented in this file.
   sectioned entities. `IfcTriangulatedIrregularNetwork` reads as its
   triangulated face set (+ `NotClosed`). Typed schema entry for the
   sectioned surface.
+- Brep `Voids` shells are cavities whichever way the file wound them
+  (a positively wound void shell is reversed by its signed volume).
 - `fuzz/` gains the `mesh_boolean` target (hostile operand pairs through
   the Boolean evaluator, partition identities asserted on well-formed
   boxes) and a daily `Fuzz` workflow; both targets ran clean for 4

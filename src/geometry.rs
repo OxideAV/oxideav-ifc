@@ -2059,9 +2059,8 @@ impl VertexPool {
 
 /// Tessellate an `IfcFacetedBrep` / `IfcFacetedBrepWithVoids`. The
 /// `Outer` closed shell (attribute index 0) is meshed; the optional
-/// `Voids` shells (index 1, …WithVoids only) are appended as additional
-/// surface — boolean subtraction is a later slice, but emitting the void
-/// shells keeps their geometry visible rather than dropped.
+/// `Voids` shells (index 1, …WithVoids only) are appended as cavities,
+/// wound into the material whichever way the file wound them.
 fn faceted_brep(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
     let outer = args
         .first()
@@ -2071,12 +2070,26 @@ fn faceted_brep(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryErro
     let mut triangles = Vec::new();
     connected_face_set(step, outer, &mut pool, &mut triangles)?;
     // IfcFacetedBrepWithVoids.Voids : SET OF IfcClosedShell (attr index 1).
+    // A void is a cavity: its shell must wind INTO the material (so the
+    // solid's volume is the outer volume minus the void's). Whichever
+    // way the file wound it, the shell's own signed volume tells — a
+    // positively wound void shell is reversed.
     if let Some(voids) = args.get(1).and_then(Value::as_list) {
         for v in voids {
             let Some(shell_id) = v.as_reference() else {
                 continue;
             };
+            let start = triangles.len();
             connected_face_set(step, shell_id, &mut pool, &mut triangles)?;
+            let void = TriMesh {
+                positions: pool.positions.clone(),
+                triangles: triangles[start..].to_vec(),
+            };
+            if void.signed_volume() > 0.0 {
+                for t in &mut triangles[start..] {
+                    t.swap(1, 2);
+                }
+            }
         }
     }
     trim::repair_t_junctions(&mut triangles, &pool);
@@ -10359,6 +10372,74 @@ mod tests {
         assert!(
             (m.signed_volume() - want).abs() < 1e-9,
             "{} != {want}",
+            m.signed_volume()
+        );
+    }
+
+    #[test]
+    fn faceted_brep_void_shell_is_a_cavity_whichever_way_it_winds() {
+        // A unit cube with a 0.5-cube void authored OUTWARD-wound (as
+        // if it were an outer shell): the void is still a cavity —
+        // volume 1 − 0.125, watertight, no inward outer faces.
+        let mut src = String::new();
+        let corners = |base: u64, lo: f64, hi: f64| -> String {
+            let c = [
+                (lo, lo, lo),
+                (hi, lo, lo),
+                (hi, hi, lo),
+                (lo, hi, lo),
+                (lo, lo, hi),
+                (hi, lo, hi),
+                (hi, hi, hi),
+                (lo, hi, hi),
+            ];
+            let mut s = String::new();
+            for (i, (x, y, z)) in c.iter().enumerate() {
+                s.push_str(&format!(
+                    "#{}=IFCCARTESIANPOINT(({x:?},{y:?},{z:?}));\n",
+                    base + i as u64
+                ));
+            }
+            // Outward-wound faces.
+            let faces = [
+                [0, 3, 2, 1],
+                [4, 5, 6, 7],
+                [0, 1, 5, 4],
+                [1, 2, 6, 5],
+                [2, 3, 7, 6],
+                [3, 0, 4, 7],
+            ];
+            for (i, fc) in faces.iter().enumerate() {
+                let pts: Vec<String> = fc.iter().map(|k| format!("#{}", base + k)).collect();
+                s.push_str(&format!(
+                    "#{}=IFCPOLYLOOP(({}));\n#{}=IFCFACEOUTERBOUND(#{},.T.);\n#{}=IFCFACE((#{}));\n",
+                    base + 10 + i as u64,
+                    pts.join(","),
+                    base + 20 + i as u64,
+                    base + 10 + i as u64,
+                    base + 30 + i as u64,
+                    base + 20 + i as u64
+                ));
+            }
+            let faces: Vec<String> = (0..6).map(|i| format!("#{}", base + 30 + i)).collect();
+            s.push_str(&format!(
+                "#{}=IFCCLOSEDSHELL(({}));\n",
+                base + 40,
+                faces.join(",")
+            ));
+            s
+        };
+        src.push_str(&corners(100, 0.0, 1.0));
+        src.push_str(&corners(200, 0.25, 0.75));
+        src.push_str("#300=IFCFACETEDBREPWITHVOIDS(#140,(#240));\n#301=IFCFACETEDBREP(#240);");
+        let f = parse(&src);
+        let void = tessellate_item(&f, 301).unwrap();
+        assert!((void.signed_volume() - 0.125).abs() < 1e-12);
+        let m = tessellate_item(&f, 300).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - 0.875).abs() < 1e-12,
+            "{}",
             m.signed_volume()
         );
     }
