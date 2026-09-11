@@ -1,0 +1,21 @@
+name: Fuzz
+
+# Daily fuzz run for the cargo-fuzz harnesses under fuzz/. The shared
+# workflow auto-discovers the targets from fuzz/fuzz_targets/*.rs and
+# splits the 30-minute total budget evenly across them. Current
+# targets: tessellate (every instance of an arbitrary STEP file through
+# the Phase-3 geometry extractor) and mesh_boolean (hostile operand
+# pairs through the mesh–mesh Boolean evaluator, with the partition
+# identity asserted on well-formed boxes).
+
+on:
+  schedule:
+    - cron: "41 4 * * *"   # daily 04:41 UTC, jittered off the hour
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    uses: OxideAV/.github/.github/workflows/crate-fuzz.yml@master
+    with:
+      time_budget_seconds: 1800
+    secrets: inherit

@@ -11,6 +11,8 @@ description = "Pure-Rust IFC (ISO 16739 BIM) reader — clean-room STEP physical
 readme = "README.md"
 keywords = ["ifc", "bim", "step", "iso-10303", "3d"]
 categories = ["multimedia", "rendering::data-formats", "parser-implementations"]
+# Fixture models and the fuzz crate stay out of the published package.
+exclude = ["/tests", "/fuzz"]
 
 [dependencies]
 # Both framework deps are gated behind the default-on `registry`

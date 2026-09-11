@@ -492,19 +492,28 @@ watertightness.
 ### Fuzzing
 
 `fuzz/` is a `cargo-fuzz` crate (its own workspace; needs a nightly
-toolchain) with the `tessellate` target: every instance of an
-arbitrary STEP file is run through `tessellate_item` under tight
-`StepLimits`, so the face-set / Brep / sweep / Boolean / curved-face
-paths must never panic or run away on hostile input. `fuzz/seeds/`
-holds the seed corpus (the STEP snippets of the geometry tests):
+toolchain) with two targets, run daily by the `Fuzz` workflow:
+
+* `tessellate` — every instance of an arbitrary STEP file is run
+  through `tessellate_item` under tight `StepLimits`, so the face-set /
+  Brep / sweep / Boolean / curved-face paths must never panic or run
+  away on hostile input. `fuzz/seeds/` holds the seed corpus (the STEP
+  snippets of the geometry tests).
+* `mesh_boolean` — hostile operand pairs (concatenations of boxes,
+  tetrahedra and wedges, degenerate or inverted) through every operator
+  of the mesh–mesh Boolean evaluator; on two well-formed boxes the
+  partition identities and the watertightness of every result are
+  asserted, so a classification or stitching bug is a finding.
 
 ```sh
 cd fuzz && cargo fuzz run tessellate seeds -- -max_total_time=300
+cd fuzz && cargo fuzz run mesh_boolean -- -max_total_time=300
 ```
 
 Hostile-geometry work is bounded throughout: curve samples, B-spline
-control nets, sweep sections, per-face triangles, refinement rounds
-and the cross-face chord repair all carry hard caps.
+control nets, sweep sections, per-face triangles, refinement rounds,
+Delaunay flips, the cross-face chord repair and the Boolean fragment
+count all carry hard caps.
 
 ## Phase 4 surface — semantic data layer
 

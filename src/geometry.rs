@@ -10364,6 +10364,143 @@ mod tests {
     }
 
     #[test]
+    fn csg_tree_nests_primitives_exactly() {
+        // (sphere − tilted cylinder) ∪ disjoint block, as an IfcCsgSolid
+        // tree: watertight, and the pieces partition exactly —
+        // vol(S − C) + vol(S ∩ C) = vol(S), the union adds the block.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCSPHERE(#2,3.);\n\
+             #4=IFCDIRECTION((0.,0.6,0.8));\n#5=IFCDIRECTION((1.,0.,0.));\n\
+             #6=IFCAXIS2PLACEMENT3D(#1,#4,#5);\n\
+             #7=IFCRIGHTCIRCULARCYLINDER(#6,10.,1.);\n\
+             #8=IFCCARTESIANPOINT((10.,10.,10.));\n#9=IFCAXIS2PLACEMENT3D(#8,$,$);\n\
+             #10=IFCBLOCK(#9,1.,2.,3.);\n\
+             #11=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#7);\n\
+             #12=IFCBOOLEANRESULT(.INTERSECTION.,#3,#7);\n\
+             #13=IFCBOOLEANRESULT(.UNION.,#11,#10);\n\
+             #14=IFCCSGSOLID(#13);",
+        );
+        let sphere = tessellate_item(&f, 3).unwrap();
+        let d = tessellate_item(&f, 11).unwrap();
+        let i = tessellate_item(&f, 12).unwrap();
+        let tree = tessellate_item(&f, 14).unwrap();
+        for m in [&d, &i, &tree] {
+            assert_closed(m);
+        }
+        let vs = sphere.signed_volume();
+        assert!(
+            (d.signed_volume() + i.signed_volume() - vs).abs() < 1e-9 * vs,
+            "{} + {} != {vs}",
+            d.signed_volume(),
+            i.signed_volume()
+        );
+        assert!(i.signed_volume() > 0.9 * core::f64::consts::PI * 6.0);
+        assert!(
+            (tree.signed_volume() - (d.signed_volume() + 6.0)).abs() < 1e-9 * vs,
+            "{}",
+            tree.signed_volume()
+        );
+    }
+
+    #[test]
+    fn boolean_with_closed_polygonal_face_set_operands() {
+        // Two closed IfcPolygonalFaceSet unit cubes offset by 0.5 in x:
+        // tessellated operands carve like any other solid.
+        let cube = |id: u64, pts: u64, x0: f64| {
+            let faces: Vec<String> = [
+                [1, 4, 3, 2],
+                [5, 6, 7, 8],
+                [1, 2, 6, 5],
+                [2, 3, 7, 6],
+                [3, 4, 8, 7],
+                [4, 1, 5, 8],
+            ]
+            .iter()
+            .enumerate()
+            .map(|(k, f)| {
+                format!(
+                    "#{}=IFCINDEXEDPOLYGONALFACE(({},{},{},{}));\n",
+                    pts + 1 + k as u64,
+                    f[0],
+                    f[1],
+                    f[2],
+                    f[3]
+                )
+            })
+            .collect();
+            format!(
+                "#{pts}=IFCCARTESIANPOINTLIST3D((({x0},0.,0.),({x1},0.,0.),({x1},1.,0.),({x0},1.,0.),\
+                 ({x0},0.,1.),({x1},0.,1.),({x1},1.,1.),({x0},1.,1.)));\n{}\
+                 #{id}=IFCPOLYGONALFACESET(#{pts},.T.,(#{a},#{b},#{c},#{d},#{e},#{g}),$);\n",
+                faces.concat(),
+                x1 = x0 + 1.0,
+                a = pts + 1,
+                b = pts + 2,
+                c = pts + 3,
+                d = pts + 4,
+                e = pts + 5,
+                g = pts + 6,
+            )
+        };
+        let src = format!(
+            "{}{}#50=IFCBOOLEANRESULT(.DIFFERENCE.,#10,#30);\n\
+             #51=IFCBOOLEANRESULT(.INTERSECTION.,#10,#30);\n\
+             #52=IFCBOOLEANRESULT(.UNION.,#10,#30);",
+            cube(10, 20, 0.0),
+            cube(30, 40, 0.5)
+        );
+        let f = parse(&src);
+        let a = tessellate_item(&f, 10).unwrap();
+        assert!((a.signed_volume() - 1.0).abs() < 1e-12);
+        for (id, want) in [(50u64, 0.5), (51, 0.5), (52, 1.5)] {
+            let m = tessellate_item(&f, id).unwrap();
+            assert_closed(&m);
+            assert!(
+                (m.signed_volume() - want).abs() < 1e-9,
+                "#{id}: {}",
+                m.signed_volume()
+            );
+        }
+    }
+
+    #[test]
+    fn intersection_with_polygonal_bounded_halfspace_keeps_footprint() {
+        // A 4×4×2 box ∩ (half-space below z = 1, restricted to a concave
+        // L footprint of area 3): the L prism of height 1, watertight.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,4.,4.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,$,#2,2.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,1.));\n#5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCPLANE(#5);\n\
+             #7=IFCCARTESIANPOINT((0.,0.,0.));\n#8=IFCAXIS2PLACEMENT3D(#7,$,$);\n\
+             #10=IFCCARTESIANPOINT((0.,0.));\n#11=IFCCARTESIANPOINT((2.,0.));\n\
+             #12=IFCCARTESIANPOINT((2.,1.));\n#13=IFCCARTESIANPOINT((1.,1.));\n\
+             #14=IFCCARTESIANPOINT((1.,2.));\n#15=IFCCARTESIANPOINT((0.,2.));\n\
+             #16=IFCPOLYLINE((#10,#11,#12,#13,#14,#15,#10));\n\
+             #17=IFCPOLYGONALBOUNDEDHALFSPACE(#6,.T.,#8,#16);\n\
+             #18=IFCBOOLEANRESULT(.INTERSECTION.,#3,#17);\n\
+             #19=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#17);",
+        );
+        let i = tessellate_item(&f, 18).unwrap();
+        assert_closed(&i);
+        assert!(
+            (i.signed_volume() - 3.0).abs() < 1e-9,
+            "{}",
+            i.signed_volume()
+        );
+        assert_bbox(&i, [0.0, 0.0, 0.0], [2.0, 2.0, 1.0]);
+        let d = tessellate_item(&f, 19).unwrap();
+        assert_closed(&d);
+        assert!(
+            (d.signed_volume() - 29.0).abs() < 1e-9,
+            "{}",
+            d.signed_volume()
+        );
+    }
+
+    #[test]
     fn boolean_intersection_is_unsupported() {
         let f = parse(
             "#1=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(0.,1.,0.)));\n\

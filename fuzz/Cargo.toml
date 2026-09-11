@@ -21,6 +21,13 @@ test = false
 doc = false
 bench = false
 
+[[bin]]
+name = "mesh_boolean"
+path = "fuzz_targets/mesh_boolean.rs"
+test = false
+doc = false
+bench = false
+
 # The fuzz crate is its own workspace root (it sits inside the
 # umbrella tree but is not a member of it).
 [workspace]

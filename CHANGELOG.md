@@ -31,6 +31,14 @@ All notable changes to this project will be documented in this file.
   sectioned entities. `IfcTriangulatedIrregularNetwork` reads as its
   triangulated face set (+ `NotClosed`). Typed schema entry for the
   sectioned surface.
+- `fuzz/` gains the `mesh_boolean` target (hostile operand pairs through
+  the Boolean evaluator, partition identities asserted on well-formed
+  boxes) and a daily `Fuzz` workflow; both targets ran clean for 4
+  minutes each (210k / 377k executions). `[package] exclude` keeps
+  `tests/` fixtures and `fuzz/` out of the published package.
+- Boolean pins: nested CSG trees over primitives, closed
+  `IfcPolygonalFaceSet` operands, INTERSECTION with a concave
+  `IfcPolygonalBoundedHalfSpace` (previously `Unsupported`).
 - Parameter-space trimmer: Delaunay edge flips (Lawson's walk in the
   metric-scaled parameter plane) before and after midpoint refinement —
   the ear clipper's fans of slivers become well-shaped ladders, so a
