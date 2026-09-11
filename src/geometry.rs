@@ -2693,6 +2693,20 @@ fn swept_disk_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geometry
     if path.len() < 2 {
         return Err(GeometryError::BadProfile);
     }
+    // IfcSweptDiskSolidPolygonal.FilletRadius (index 5): round every
+    // corner of the polyline directrix with a tangent arc.
+    if let Some(fillet) = args.get(5).filter(|v| !v.is_unset()) {
+        let r = fillet.as_number().ok_or(GeometryError::BadCoordinate)?;
+        if r < 0.0 {
+            return Err(GeometryError::BadProfile);
+        }
+        if r > 0.0 {
+            path = fillet_polyline(&path, closed, r);
+            if path.len() < 2 {
+                return Err(GeometryError::BadProfile);
+            }
+        }
+    }
 
     // Per-segment unit directions, then per-point mitre data: the ring
     // plane normal is the bisector of the incoming and outgoing
@@ -4474,6 +4488,81 @@ fn linear_placement_station(
         return Err(GeometryError::BadProfile);
     }
     Ok((dist, off_lat, off_vert, axes))
+}
+
+/// Replace every corner of a polyline with a circular arc of radius
+/// `radius` tangent to both adjacent segments (a closed polyline has a
+/// corner at every vertex, an open one at its interior vertices). The
+/// tangent points sit `radius · tan(θ/2)` from the corner along each
+/// segment (θ the turning angle); where that would overrun half of an
+/// adjacent segment the radius is reduced for that corner so the arcs
+/// never overlap. Arcs are sampled at the circle density.
+fn fillet_polyline(path: &[[f64; 3]], closed: bool, radius: f64) -> Vec<[f64; 3]> {
+    let n = path.len();
+    let seg_len = |i: usize| dist(path[i], path[(i + 1) % n]);
+    let mut out: Vec<[f64; 3]> = Vec::with_capacity(n * 4);
+    let corners = if closed { 0..n } else { 1..n.saturating_sub(1) };
+    if !closed {
+        out.push(path[0]);
+    }
+    for i in corners {
+        let prev = path[(i + n - 1) % n];
+        let p = path[i];
+        let next = path[(i + 1) % n];
+        let (Some(d_in), Some(d_out)) = (
+            normalise([p[0] - prev[0], p[1] - prev[1], p[2] - prev[2]]),
+            normalise([next[0] - p[0], next[1] - p[1], next[2] - p[2]]),
+        ) else {
+            out.push(p);
+            continue;
+        };
+        let cos_t = dot_raw(d_in, d_out).clamp(-1.0, 1.0);
+        let theta = cos_t.acos();
+        let axis = cross_raw(d_in, d_out);
+        let Some(axis) = normalise(axis) else {
+            out.push(p); // straight through (or a hairpin): no arc
+            continue;
+        };
+        if !(1e-9..=core::f64::consts::PI - 1e-9).contains(&theta) {
+            out.push(p);
+            continue;
+        }
+        // Tangent distance, limited to half of each adjacent segment.
+        let half_in = 0.5 * seg_len((i + n - 1) % n);
+        let half_out = 0.5 * seg_len(i);
+        let t = (radius * (theta / 2.0).tan()).min(half_in).min(half_out);
+        let r = t / (theta / 2.0).tan();
+        if r <= 0.0 || !r.is_finite() {
+            out.push(p);
+            continue;
+        }
+        let start = [p[0] - t * d_in[0], p[1] - t * d_in[1], p[2] - t * d_in[2]];
+        // Centre: from the start point, perpendicular to d_in within
+        // the bend plane, on the inside of the turn.
+        let inward = cross_raw(axis, d_in);
+        let centre = [
+            start[0] + r * inward[0],
+            start[1] + r * inward[1],
+            start[2] + r * inward[2],
+        ];
+        let u = [-inward[0], -inward[1], -inward[2]]; // centre → start
+        let w = cross_raw(axis, u); // = d_in
+        let k = ((theta / (2.0 * core::f64::consts::PI / CIRCLE_SEGMENTS as f64)).ceil() as usize)
+            .max(2);
+        for j in 0..=k {
+            let phi = theta * (j as f64) / (k as f64);
+            let (c, s) = (phi.cos(), phi.sin());
+            out.push([
+                centre[0] + r * (c * u[0] + s * w[0]),
+                centre[1] + r * (c * u[1] + s * w[1]),
+                centre[2] + r * (c * u[2] + s * w[2]),
+            ]);
+        }
+    }
+    if !closed {
+        out.push(path[n - 1]);
+    }
+    out
 }
 
 /// Evaluate a swept-disk directrix into a 3-D point run. `start` /
@@ -10738,6 +10827,45 @@ mod tests {
         }
         let m = tessellate_item(&f, 11).unwrap();
         assert!(m.positions.iter().all(|p| p[0].hypot(p[1]) <= 1.0 + 1e-9));
+    }
+
+    #[test]
+    fn swept_disk_polygonal_fillets_the_corner() {
+        // An L-shaped polyline (10 along x, then 10 along y) swept by a
+        // disk r = 1 with FilletRadius 3: the corner becomes a quarter
+        // arc, so the volume is the disk × (7 + arc polyline + 7)
+        // exactly (mitred sweep of a centred profile), and the sharp
+        // outer corner region is empty.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCCARTESIANPOINT((10.,10.,0.));\n#4=IFCPOLYLINE((#1,#2,#3));\n\
+             #5=IFCSWEPTDISKSOLIDPOLYGONAL(#4,1.,$,$,$,3.);\n\
+             #6=IFCSWEPTDISKSOLIDPOLYGONAL(#4,1.,$,$,$,$);",
+        );
+        let m = tessellate_item(&f, 5).unwrap();
+        assert_closed(&m);
+        let k = 12.0; // quarter turn at 48 segments per turn
+        let arc = k * 2.0 * 3.0 * (core::f64::consts::FRAC_PI_4 / k).sin();
+        let want = disk_polygon_area(1.0) * (14.0 + arc);
+        assert!(
+            (m.signed_volume() - want).abs() < 1e-9,
+            "{} != {want}",
+            m.signed_volume()
+        );
+        let sharp = m
+            .positions
+            .iter()
+            .map(|p| p[0] - p[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!(sharp < 9.7, "{sharp}");
+        // Without a fillet the mitred corner reaches x − y = 12.
+        let m = tessellate_item(&f, 6).unwrap();
+        let sharp = m
+            .positions
+            .iter()
+            .map(|p| p[0] - p[1])
+            .fold(f64::NEG_INFINITY, f64::max);
+        assert!((sharp - 12.0).abs() < 1e-9, "{sharp}");
     }
 
     #[test]

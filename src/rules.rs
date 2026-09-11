@@ -325,6 +325,26 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                 "DirectrixBounded",
                 directrix.map(|d| bounded || is_conic_or_bounded(&d.keyword)),
             );
+            if inst.keyword == "IFCSWEPTDISKSOLIDPOLYGONAL" {
+                // FilletRadius (index 5) ≥ Radius when present; the
+                // directrix is a polyline or a segment-less indexed
+                // poly-curve.
+                rule!(
+                    "CorrectRadii",
+                    match num(a, 5) {
+                        None => true,
+                        Some(fillet) => fillet >= num(a, 1)?,
+                    }
+                );
+                check(
+                    "DirectrixIsPolyline",
+                    directrix.map(|d| {
+                        d.keyword == "IFCPOLYLINE"
+                            || (d.keyword == "IFCINDEXEDPOLYCURVE"
+                                && d.args.get(1).map_or(true, Value::is_unset))
+                    }),
+                );
+            }
         }
         // ---- Advanced Breps, faces, edges ----
         "IFCADVANCEDBREP" | "IFCADVANCEDBREPWITHVOIDS" => {
@@ -1235,6 +1255,20 @@ mod tests {
         assert_eq!(rules(&f, 41), ["SameSurface"]);
         assert_eq!(rules(&f, 42), ["IsClosed"]);
         assert!(rules(&f, 43).is_empty());
+    }
+
+    #[test]
+    fn swept_disk_polygonal_rules() {
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((10.,0.,0.));\n\
+             #3=IFCPOLYLINE((#1,#2));\n#4=IFCCIRCLE(#9,1.);\n\
+             #10=IFCSWEPTDISKSOLIDPOLYGONAL(#3,1.,$,$,$,3.);\n\
+             #11=IFCSWEPTDISKSOLIDPOLYGONAL(#3,2.,$,$,$,1.);\n\
+             #12=IFCSWEPTDISKSOLIDPOLYGONAL(#4,1.,$,$,$,$);",
+        );
+        assert!(rules(&f, 10).is_empty());
+        assert_eq!(rules(&f, 11), ["CorrectRadii"]);
+        assert_eq!(rules(&f, 12), ["DirectrixIsPolyline"]);
     }
 
     #[test]
