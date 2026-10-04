@@ -27,11 +27,13 @@ extension.
 ## Phase 1 surface
 
 ```rust
+# let bytes = std::fs::read("model.ifc")?;
 let step = oxideav_ifc::parse_step(&bytes)?;
 assert_eq!(step.header.file_schema, ["IFC4"]);
 for wall in step.instances_of("IfcWall") {
     println!("#{} {} args", wall.id, wall.args.len());
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 * `probe_step(bytes)` — cheap `ISO-10303-21;` magic probe.
@@ -72,6 +74,7 @@ attribute order is its inheritance chain concatenated **parent-first**
 `IFC4_ADD2.exp` declarations.
 
 ```rust
+# let bytes = std::fs::read("model.ifc")?;
 let step = oxideav_ifc::parse_step(&bytes)?;
 let model = oxideav_ifc::Model::from_step(&step);
 
@@ -86,6 +89,7 @@ for site in model.aggregated_children(project.id()) {
         }
     }
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 * `TypedEntity::new(&ParsedInstance)` — a borrowing view that resolves
@@ -135,9 +139,12 @@ in `--no-default-features` builds); the `registry` decoder lifts the
 result into a `Scene3D`.
 
 ```rust
+# let bytes = std::fs::read("model.ifc")?;
+# let face_set_id: u64 = 42; // e.g. an IfcTriangulatedFaceSet instance id
 let step = oxideav_ifc::parse_step(&bytes)?;
 let mesh = oxideav_ifc::tessellate_item(&step, face_set_id)?;
 println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 * `TriMesh { positions: Vec<[f64;3]>, triangles: Vec<[u32;3]> }` — a
@@ -535,6 +542,8 @@ into a queryable surface (all std-only, `--no-default-features`
 included):
 
 ```rust
+# let bytes = std::fs::read("model.ifc")?;
+# let wall_id: u64 = 42; // an IfcWall instance id
 let step = oxideav_ifc::parse_step(&bytes)?;
 let model = oxideav_ifc::Model::from_step(&step);
 
@@ -545,6 +554,7 @@ for pset in model.property_sets(wall_id) {
     }
 }
 let name = model.material_assignment(wall_id).and_then(|m| m.name().map(String::from));
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 * **Property sets** (`oxideav_ifc::props`): `Model` folds
