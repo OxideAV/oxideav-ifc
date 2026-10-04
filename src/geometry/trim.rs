@@ -211,14 +211,26 @@ pub(super) fn tessellate_curved_face(
     pool: &mut VertexPool,
     triangles: &mut Vec<[u32; 3]>,
 ) -> Result<(), GeometryError> {
-    let uv_loops = parameter_loops(surface, loops)?;
+    let uv_loops = parameter_loops(surface, loops, same_sense)?;
+    // An outer loop spanning a whole period has edges on the seam; the
+    // fundamental rectangle is then centred on it instead.
+    let spans = |k: usize, period: Option<f64>| -> bool {
+        match (period, uv_loops.first()) {
+            (Some(p), Some(l)) => {
+                let (lo, hi) = l.bbox();
+                hi[k] - lo[k] >= p * (1.0 - 1e-9)
+            }
+            _ => false,
+        }
+    };
+    let centre_seam = [spans(0, surface.period_u()), spans(1, surface.period_v())];
     mesh_parameter_loops(
         surface,
         steps,
         surface_key,
         uv_loops,
         same_sense,
-        [false, false],
+        centre_seam,
         pool,
         triangles,
     )
@@ -389,6 +401,7 @@ fn mesh_parameter_loops(
 fn parameter_loops(
     surface: &ParamSurface,
     loops: &[Vec<LoopVertex>],
+    same_sense: bool,
 ) -> Result<Vec<ULoop>, GeometryError> {
     let period_u = surface.period_u();
     let period_v = surface.period_v();
@@ -457,6 +470,39 @@ fn parameter_loops(
             // The free u jump sits at the pole (just before `start`), so
             // the loop closes without a u shift.
             wrap[0] = 0.0;
+        }
+        // A loop running pole to pole and back along one seam (a sphere
+        // or spindle torus bounded only by its seam meridian) unwraps to
+        // a zero-area polygon: its return run lies one period further
+        // on, the jumps happening at the poles.
+        if let Some(p) = period_u {
+            let poles: Vec<usize> = (0..n).filter(|&i| raw[i].1).collect();
+            if poles.len() >= 2 {
+                let mut area2 = 0.0;
+                let (mut vlo, mut vhi) = (f64::INFINITY, f64::NEG_INFINITY);
+                for i in 0..n {
+                    let (a, b) = (uv[i], uv[(i + 1) % n]);
+                    area2 += a[0] * b[1] - b[0] * a[1];
+                    vlo = vlo.min(a[1]);
+                    vhi = vhi.max(a[1]);
+                }
+                if area2.abs() <= 1e-9 * p * (vhi - vlo).max(1e-300) {
+                    // Shift the run between the first two poles by one
+                    // period, towards the side that leaves the face on
+                    // the loop's left (right when the face normal opposes
+                    // the surface's): with v decreasing along the run, the
+                    // face lies at larger u, so the run moves down.
+                    let (d1, d2) = (poles[0], poles[1]);
+                    if d2 > d1 + 1 {
+                        let dv = uv[d2 - 1][1] - uv[d1 + 1][1];
+                        let down = (dv < 0.0) == same_sense;
+                        let shift = if down { -p } else { p };
+                        for q in uv.iter_mut().take(d2).skip(d1 + 1) {
+                            q[0] += shift;
+                        }
+                    }
+                }
+            }
         }
         let mut verts: Vec<PVert> = Vec::with_capacity(n + 2);
         for i in 0..n {

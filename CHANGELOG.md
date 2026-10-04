@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `kernel::Surface::degenerate_torus` (spindle torus: the axis points are
+  poles). Curved faces bounded only by a seam run pole to pole and back
+  (a sphere / spindle torus with one meridian edge) unwrap the return run
+  one period over, on the side that leaves the face on the loop's left;
+  a curved face whose outer loop spans a whole period gets its
+  fundamental rectangle centred off the seam (as parameter faces already
+  did).
 - Constrained Delaunay triangulation (`geometry::cdt`, Lawson insertion in
   Morton order + Sloan-style constraint recovery + parity flood fill)
   for every polygon-with-holes the crate triangulates (profile caps,

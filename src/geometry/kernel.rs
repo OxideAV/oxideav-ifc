@@ -255,6 +255,22 @@ impl Surface {
         Ok(Self::elementary(frame, SurfaceKind::Torus { major, minor }))
     }
 
+    /// ISO 10303-42 `degenerate_toroidal_surface` (`minor ≥ major`, a
+    /// spindle torus crossing its own axis): the torus parameterisation,
+    /// the two axis points being poles; which part (the outer "apple"
+    /// or the inner "lemon") a face covers follows from its loops.
+    pub fn degenerate_torus(
+        frame: Transform,
+        major: f64,
+        minor: f64,
+    ) -> Result<Self, GeometryError> {
+        let (major, minor) = (positive(major)?, positive(minor)?);
+        if minor < major {
+            return Err(GeometryError::BadProfile);
+        }
+        Ok(Self::elementary(frame, SurfaceKind::Torus { major, minor }))
+    }
+
     /// A B-spline surface over its knot domain.
     pub fn bspline(surface: BSplineSurface) -> Self {
         Self::wrap(ParamSurface::from_bspline(surface.0))

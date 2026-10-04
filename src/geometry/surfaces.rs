@@ -387,9 +387,14 @@ impl ParamSurface {
                         let degenerate = rho <= 1e-9 * radius;
                         ([l[1].atan2(l[0]), v], degenerate)
                     }
-                    SurfaceKind::Torus { major, .. } => {
+                    SurfaceKind::Torus { major, minor } => {
+                        // A spindle (degenerate) torus meets its axis: the
+                        // two axis points are poles in u.
                         let rho = l[0].hypot(l[1]);
-                        ([l[1].atan2(l[0]), l[2].atan2(rho - major)], rho <= 0.0)
+                        (
+                            [l[1].atan2(l[0]), l[2].atan2(rho - major)],
+                            rho <= 1e-9 * (major + minor),
+                        )
                     }
                     SurfaceKind::Cone { radius, tan } => {
                         // Nearest point on the meridian line
@@ -784,6 +789,17 @@ impl ParamSurface {
         ) && (uv[1].abs() - core::f64::consts::FRAC_PI_2).abs() < 1e-9;
         if pole {
             return (0, if uv[1] > 0.0 { i64::MAX } else { i64::MIN });
+        }
+        if let Self::Elementary(ElementarySurface {
+            kind: SurfaceKind::Torus { major, minor },
+            ..
+        }) = self
+        {
+            // A spindle torus's axis points (R + r cos v = 0) are one
+            // surface point for every u.
+            if (major + minor * uv[1].cos()).abs() <= 1e-9 * (major + minor) {
+                return (i64::MAX, q(uv[1], self.period_v()));
+            }
         }
         if let Self::Revolution {
             profile,
