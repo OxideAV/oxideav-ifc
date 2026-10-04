@@ -1082,6 +1082,72 @@ mod tests {
         assert!((area - (10_000.0 - 5.0 * 16.0)).abs() < 1e-6, "{area}");
     }
 
+    /// A cone split into two half faces that both pass through the apex
+    /// (the apex is a loop vertex on a pole of the parameterisation):
+    /// the halves' u ranges span exactly half a period, the pole is
+    /// crossed freely, and refinement on the pole line reuses the loop's
+    /// apex vertex and borders no boundary chord — watertight, with the
+    /// exact area and volume up to the chord error.
+    #[test]
+    fn cone_halves_through_the_apex() {
+        let n = 24;
+        let frame = Transform {
+            cols: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+            translation: [0.0, 0.0, 4.0],
+        };
+        let cone = Surface::cone(frame, 0.0, (0.5f64).atan())
+            .unwrap()
+            .with_chordal_tolerance(0.001, 0.2, 4.0);
+        let mut m = FaceMesher::new();
+        let apex = m.add_vertex([0.0, 0.0, 4.0]);
+        let rim: Vec<u32> = (0..2 * n)
+            .map(|i| {
+                let a = core::f64::consts::PI * i as f64 / n as f64;
+                m.add_vertex([2.0 * a.cos(), 2.0 * a.sin(), 0.0])
+            })
+            .collect();
+        let half = |k: usize| -> Vec<u32> {
+            let mut l: Vec<u32> = (0..=n).map(|i| rim[(k * n + i) % (2 * n)]).collect();
+            l.push(apex);
+            l
+        };
+        m.set_tag(1);
+        m.add_surface_face(&cone, 1, &[half(0)], true).unwrap();
+        m.set_tag(2);
+        m.add_surface_face(&cone, 1, &[half(1)], true).unwrap();
+        let rev: Vec<u32> = rim.iter().rev().copied().collect();
+        m.set_tag(3);
+        m.add_planar_face(&rev, &[]).unwrap();
+        let (mesh, tags) = m.finish_tagged();
+        assert!(closed(&mesh), "not watertight");
+        // Lateral area π r l per half: π · 2 · √20 / 2.
+        let want = core::f64::consts::PI * 20f64.sqrt();
+        for tag in [1, 2] {
+            let area: f64 = mesh
+                .triangles
+                .iter()
+                .zip(&tags)
+                .filter(|(_, &g)| g == tag)
+                .map(|(t, _)| {
+                    let [a, b, c] = t.map(|i| mesh.positions[i as usize]);
+                    let n = cross_raw(
+                        [b[0] - a[0], b[1] - a[1], b[2] - a[2]],
+                        [c[0] - a[0], c[1] - a[1], c[2] - a[2]],
+                    );
+                    0.5 * dot_raw(n, n).sqrt()
+                })
+                .sum();
+            assert!(
+                (area - want).abs() / want < 0.005,
+                "half {tag}: {area} vs {want}"
+            );
+        }
+        // π r² h / 3; the 48-gon rim loses ~0.3 %.
+        let exact = core::f64::consts::PI * 4.0 * 4.0 / 3.0;
+        let vol = mesh.signed_volume();
+        assert!((vol - exact).abs() / exact < 0.005, "{vol} vs {exact}");
+    }
+
     #[test]
     fn polygon_triangulation_with_hole() {
         let outer = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];

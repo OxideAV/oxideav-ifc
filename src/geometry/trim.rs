@@ -401,9 +401,20 @@ fn parameter_loops(
         // Raw inversions.
         let raw: Vec<(Uv, bool)> = l.iter().map(|v| surface.inverse(v.p)).collect();
         // Unwrap continuously, starting from the first non-degenerate
-        // vertex; degenerate ones take the running u.
+        // vertex; degenerate ones take the running u. A loop through a
+        // pole starts right after it instead: crossing the pole changes
+        // u freely, so the jump is placed there and the loop does not
+        // wind in u (otherwise a sector spanning half a period or more
+        // reads as winding around the axis).
         let mut uv: Vec<Uv> = Vec::with_capacity(n);
-        let start = raw.iter().position(|(_, d)| !d).unwrap_or(0);
+        let through_pole = raw.iter().position(|(_, d)| *d);
+        let start = match through_pole {
+            Some(d) => (1..=n)
+                .map(|k| (d + k) % n)
+                .find(|&i| !raw[i].1)
+                .unwrap_or(0),
+            None => raw.iter().position(|(_, d)| !d).unwrap_or(0),
+        };
         let mut last: Option<Uv> = None;
         for k in 0..n {
             let i = (start + k) % n;
@@ -431,7 +442,7 @@ fn parameter_loops(
         ];
         // Rotate back to the loop's own vertex order.
         uv.rotate_right(start);
-        let wrap = if start == 0 {
+        let mut wrap = if start == 0 {
             wrap
         } else {
             // The unwrapping started mid-loop; recompute the closing
@@ -442,6 +453,11 @@ fn parameter_loops(
                 period_v.map_or(0.0, |p| unwrap_near(f[1], l[1], p) - f[1]),
             ]
         };
+        if through_pole.is_some() {
+            // The free u jump sits at the pole (just before `start`), so
+            // the loop closes without a u shift.
+            wrap[0] = 0.0;
+        }
         let mut verts: Vec<PVert> = Vec::with_capacity(n + 2);
         for i in 0..n {
             let prev = l[(i + n - 1) % n].id;
@@ -452,16 +468,19 @@ fn parameter_loops(
                 // next vertex's u.
                 let u_prev = uv[(i + n - 1) % n][0];
                 let u_next = uv[(i + 1) % n][0];
+                // The first copy only borders the incoming edge, the
+                // second only the outgoing one (between them the boundary
+                // runs along the pole line, which is no chord).
                 verts.push(PVert::Loop {
                     id,
                     uv: [u_prev, uv[i][1]],
                     prev,
-                    next,
+                    next: id,
                 });
                 verts.push(PVert::Loop {
                     id,
                     uv: [u_next, uv[i][1]],
-                    prev,
+                    prev: id,
                     next,
                 });
             } else {
@@ -1146,6 +1165,17 @@ fn mesh_piece(
         holes2.push(ring);
         index_table.extend(ids);
     }
+    // A boundary vertex is the surface point at its parameters: grid
+    // vertices refinement later creates at the same parameters (above
+    // all on a pole / apex line, where the boundary passes through the
+    // degenerate point) must reuse it, or the triangles there would
+    // hang off a twin vertex the shared-chord repair does not know.
+    for (i, k) in kinds.iter().enumerate() {
+        if let Local::Loop { id, .. } = *k {
+            let (ku, kv) = surface.weld_key(uvs[i]);
+            pool.param_weld.entry((surface_key, ku, kv)).or_insert(id);
+        }
+    }
     let area = ProfileArea {
         outer: outer2,
         holes: holes2,
@@ -1165,7 +1195,7 @@ fn mesh_piece(
     // interior diagonals to the Delaunay configuration (in the
     // metric-scaled parameter space) before refining, so subdivision
     // starts from well-shaped triangles instead of splitting slivers.
-    delaunay_flips(&mut tris, &uvs, surface, &HashMap::new());
+    delaunay_flips(&mut tris, &uvs, surface, &HashMap::new(), None);
 
     // Midpoint refinement.
     let (step_u, step_v) = steps;
@@ -1264,7 +1294,7 @@ fn mesh_piece(
 
     // Refinement splits only the too-long edges, which leaves the
     // diagonals of the split triangles arbitrary: flip again.
-    delaunay_flips(&mut conformed, &uvs, surface, &midpoints);
+    delaunay_flips(&mut conformed, &uvs, surface, &midpoints, Some(steps));
 
     // Emit with welding and chord registration.
     let mut mesh_id: Vec<Option<u32>> = vec![None; kinds.len()];
@@ -1334,7 +1364,18 @@ fn delaunay_flips(
     uvs: &[Uv],
     surface: &ParamSurface,
     split: &HashMap<(u32, u32), u32>,
+    steps: Option<(Option<f64>, Option<f64>)>,
 ) {
+    // After refinement, a flip may not trade a diagonal within the
+    // refinement steps for one that exceeds them (the parameter-space
+    // metric is only approximate, so its Delaunay choice can be a long
+    // chord that sags off the surface).
+    let too_long = |x: u32, y: u32| -> bool {
+        let Some((su, sv)) = steps else { return false };
+        let (a, b) = (uvs[x as usize], uvs[y as usize]);
+        su.is_some_and(|s| (a[0] - b[0]).abs() > s * 1.0001)
+            || sv.is_some_and(|s| (a[1] - b[1]).abs() > s * 1.0001)
+    };
     let scale = surface.metric();
     let index_axis = surface.index_axis();
     let key = |i: u32| surface.weld_key(uvs[i as usize]);
@@ -1403,6 +1444,9 @@ fn delaunay_flips(
                 continue;
             }
             if split.contains_key(&(c.min(d), c.max(d))) {
+                continue;
+            }
+            if too_long(c, d) && !too_long(a, b) {
                 continue;
             }
             let (kc, kd) = (key(c), key(d));
@@ -1474,8 +1518,13 @@ fn midpoint(
     // midpoint is that vertex again, so the triangles collapse.
     if let (PVert::Loop { id: ia, .. }, PVert::Loop { id: ib, .. }) = (&pa, &pb) {
         if ia == ib {
+            // A point inside the pole line borders no boundary chord.
             let m = kinds.len() as u32;
-            kinds.push(kinds[a as usize]);
+            kinds.push(Local::Loop {
+                id: *ia,
+                prev: *ia,
+                next: *ia,
+            });
             uvs.push(uv);
             pos.push(pos[a as usize]);
             midpoints.insert(key, m);

@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Trimmed curved faces through a pole / apex (a loop vertex on a
+  degenerate parameter line, e.g. a cone sector ending at the apex):
+  the loop crosses the pole freely instead of reading as winding when
+  its u range is half a period or more; pole copies and pole-line
+  midpoints no longer pretend to lie on the adjacent boundary chords
+  (whose interpolated points pulled interior triangles onto the chord);
+  refinement reuses boundary vertices at equal parameters; post-
+  refinement Delaunay flips never trade a short diagonal for one over
+  the refinement step.
 - Hole bridging (profile / face triangulation): a bridge leaves both
   ends through their interior sector and later bridges may not cross
   earlier ones, so several holes bridged to one outer corner no longer
