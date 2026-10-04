@@ -517,7 +517,7 @@ fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop], centre_seam: [bool;
             (a, a + p)
         }
         (None, Some(e)) => e,
-        (None, None) => (lo[1], hi[1]),
+        (None, None) => surface.loop_v_range(lo[1], hi[1]),
     };
     // Guard against a flat range (a loop lying entirely on one line).
     let pad = |a: f64, b: f64| {

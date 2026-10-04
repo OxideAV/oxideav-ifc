@@ -883,6 +883,89 @@ mod tests {
         assert!((vol - exact).abs() / exact < 0.02, "{vol}");
     }
 
+    /// A solid cone (apex up): the lateral face is bounded by a single
+    /// circle loop (the apex is a pole of the parameterisation), closed
+    /// by a planar disk; also a frustum between two circles.
+    #[test]
+    fn cone_to_apex_and_frustum_are_watertight() {
+        let n = 48;
+        let ring = |m: &mut FaceMesher, r: f64, z: f64| -> Vec<u32> {
+            (0..n)
+                .map(|i| {
+                    let a = 2.0 * core::f64::consts::PI * i as f64 / n as f64;
+                    m.add_vertex([r * a.cos(), r * a.sin(), z])
+                })
+                .collect()
+        };
+        // Cone: radius 1 at z = 0, apex at z = 2 (semi-angle atan(1/2)),
+        // axis pointing down so radius grows... use axis +z with the
+        // frame at the base: radius shrinks with v, i.e. a negative
+        // semi-angle is not allowed — flip the frame instead (z down,
+        // origin at the apex level).
+        let half = (0.5f64).atan();
+        let frame = Transform {
+            cols: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+            translation: [0.0, 0.0, 2.0],
+        };
+        let cone = Surface::cone(frame, 0.0, half).unwrap();
+        let mut m = FaceMesher::new();
+        let base = ring(&mut m, 1.0, 0.0);
+        let rev: Vec<u32> = base.iter().rev().copied().collect();
+        m.add_planar_face(&rev, &[]).unwrap();
+        // Lateral loop counter-clockwise seen from outside-above: the
+        // base circle traversed counter-clockwise about +z.
+        m.add_surface_face(&cone, 1, std::slice::from_ref(&base), true)
+            .unwrap();
+        let mesh = m.finish();
+        assert!(closed(&mesh), "cone not watertight");
+        let exact = core::f64::consts::PI * 2.0 / 3.0;
+        let vol = mesh.signed_volume();
+        assert!((vol - exact).abs() / exact < 0.02, "{vol} vs {exact}");
+
+        // Frustum: radius 2 at z = 0 to radius 1 at z = 1 (apex at z = 2).
+        let frame = Transform {
+            cols: [[1.0, 0.0, 0.0], [0.0, -1.0, 0.0], [0.0, 0.0, -1.0]],
+            translation: [0.0, 0.0, 0.0],
+        };
+        let cone = Surface::cone(frame, 2.0, core::f64::consts::FRAC_PI_4).unwrap();
+        let mut m = FaceMesher::new();
+        let bottom = ring(&mut m, 2.0, 0.0);
+        let top = ring(&mut m, 1.0, 1.0);
+        m.add_planar_face(&top, &[]).unwrap();
+        let rev: Vec<u32> = bottom.iter().rev().copied().collect();
+        m.add_planar_face(&rev, &[]).unwrap();
+        let top_rev: Vec<u32> = top.iter().rev().copied().collect();
+        m.add_surface_face(&cone, 2, &[bottom.clone(), top_rev], true)
+            .unwrap();
+        let mesh = m.finish();
+        assert!(closed(&mesh), "frustum not watertight");
+        let exact = core::f64::consts::PI / 3.0 * (4.0 + 2.0 + 1.0);
+        let vol = mesh.signed_volume();
+        assert!((vol - exact).abs() / exact < 0.02, "{vol} vs {exact}");
+    }
+
+    /// A hemisphere closed by a single equator loop plus a disk.
+    #[test]
+    fn hemisphere_single_loop_is_watertight() {
+        let n = 48;
+        let mut m = FaceMesher::new();
+        let base: Vec<u32> = (0..n)
+            .map(|i| {
+                let a = 2.0 * core::f64::consts::PI * i as f64 / n as f64;
+                m.add_vertex([a.cos(), a.sin(), 0.0])
+            })
+            .collect();
+        let rev: Vec<u32> = base.iter().rev().copied().collect();
+        m.add_planar_face(&rev, &[]).unwrap();
+        let s = Surface::sphere(Transform::IDENTITY, 1.0).unwrap();
+        m.add_surface_face(&s, 1, std::slice::from_ref(&base), true)
+            .unwrap();
+        let mesh = m.finish();
+        assert!(closed(&mesh));
+        let exact = 2.0 / 3.0 * core::f64::consts::PI;
+        assert!((mesh.signed_volume() - exact).abs() / exact < 0.02);
+    }
+
     #[test]
     fn polygon_triangulation_with_hole() {
         let outer = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];

@@ -704,8 +704,10 @@ impl ParamSurface {
                 SurfaceKind::Cylinder { radius } => (radius, 1.0),
                 SurfaceKind::Sphere { radius } => (radius, radius),
                 SurfaceKind::Torus { major, minor } => (major + minor, minor),
+                // The section radius varies along v; a cone authored at
+                // its apex (radius 0) still needs a usable u scale.
                 SurfaceKind::Cone { radius, tan } => (
-                    radius.abs().max(f64::MIN_POSITIVE),
+                    (radius.abs() + tan.abs()).max(1e-12),
                     (1.0 + tan * tan).sqrt(),
                 ),
             },
@@ -832,6 +834,36 @@ impl ParamSurface {
             surface,
             samples,
             size,
+        }
+    }
+
+    /// The `v` range of the fundamental rectangle for a surface without
+    /// a fixed `v` extent, given the loops' own `v` range: the loops'
+    /// range, except that a cone reaches to its apex on the side the
+    /// surface lives (so a face closed by a single loop around the axis
+    /// — the region between that loop and the apex — closes through the
+    /// apex line).
+    pub(super) fn loop_v_range(&self, lo: f64, hi: f64) -> (f64, f64) {
+        match self {
+            Self::Elementary(ElementarySurface {
+                kind: SurfaceKind::Cone { radius, tan },
+                ..
+            }) if *tan != 0.0 => {
+                // The far side is padded past the loops so no loop lies on
+                // the rectangle's boundary.
+                let apex = -radius / tan;
+                if *tan > 0.0 {
+                    let a = apex.min(lo);
+                    let b = hi.max(apex);
+                    (a, b + 0.5 * (b - a).max(1e-9))
+                } else {
+                    let b = apex.max(hi);
+                    let a = lo.min(apex);
+                    (a - 0.5 * (b - a).max(1e-9), b)
+                }
+            }
+            Self::Offset { base, .. } => base.loop_v_range(lo, hi),
+            _ => (lo, hi),
         }
     }
 
