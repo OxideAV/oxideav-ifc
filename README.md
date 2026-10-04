@@ -642,7 +642,8 @@ other ISO 10303 readers (the STEP AP203 / AP214 / AP242 reader
   clipped to the fundamental domain, triangulated and refined),
   `add_parameter_face`; faces sharing boundary vertex ids come out
   watertight, `finish` repairs the refinement's T-junctions.
-* `triangulate_polygon` — hole-aware ear clipping in 2-D.
+* `triangulate_polygon` — constrained Delaunay triangulation of a 2-D
+  polygon with holes (ear clipping with hole bridges as the fallback).
 
 ## Cargo features
 

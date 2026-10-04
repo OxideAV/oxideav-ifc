@@ -176,6 +176,7 @@ use crate::parser::StepFile;
 use crate::value::Value;
 
 pub(crate) mod bspline;
+mod cdt;
 mod csg;
 pub mod kernel;
 mod profiles;
@@ -6119,6 +6120,23 @@ fn cross2(a: [f64; 2], b: [f64; 2], c: [f64; 2]) -> f64 {
 /// into triangles is an extraction choice. Ear clipping handles concave
 /// outer boundaries (which the previous cap fan did not).
 fn triangulate_profile(area: &ProfileArea) -> Result<Vec<[u32; 3]>, GeometryError> {
+    // Constrained Delaunay first (any number of holes, O(n log n));
+    // hole bridging + ear clipping when it reports a degenerate input.
+    let mut pts: Vec<[f64; 2]> = Vec::with_capacity(area.point_count());
+    let mut rings: Vec<Vec<u32>> = Vec::with_capacity(area.holes.len() + 1);
+    for ring in area.rings() {
+        let start = pts.len() as u32;
+        pts.extend_from_slice(ring);
+        rings.push((start..pts.len() as u32).collect());
+    }
+    if let Ok(t) = cdt::triangulate(&pts, &rings) {
+        return Ok(t);
+    }
+    ear_clip_profile(area)
+}
+
+/// Hole bridging + ear clipping (the fallback of [`triangulate_profile`]).
+fn ear_clip_profile(area: &ProfileArea) -> Result<Vec<[u32; 3]>, GeometryError> {
     // Working polygon: (original concatenated index, position). Outer is
     // CCW; holes are walked clockwise when merged so the bridged polygon
     // stays consistently oriented.

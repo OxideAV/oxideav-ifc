@@ -803,9 +803,10 @@ fn dedup_ring(mut ring: Vec<(u32, [f64; 3])>) -> Vec<(u32, [f64; 3])> {
     ring
 }
 
-/// Triangulate a 2-D polygon-with-holes (outer ring counter-clockwise,
-/// holes counter-clockwise too — they are reversed when merged). The
-/// returned triangles index the concatenation outer ++ holes…
+/// Triangulate a 2-D polygon-with-holes (constrained Delaunay; hole
+/// bridging + ear clipping for degenerate input). The outer ring is
+/// counter-clockwise; the returned counter-clockwise triangles index the
+/// concatenation outer ++ holes….
 pub fn triangulate_polygon(
     outer: &[[f64; 2]],
     holes: &[Vec<[f64; 2]>],

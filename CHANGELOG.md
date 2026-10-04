@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Constrained Delaunay triangulation (`geometry::cdt`, Lawson insertion in
+  Morton order + Sloan-style constraint recovery + parity flood fill)
+  for every polygon-with-holes the crate triangulates (profile caps,
+  planar faces, trimmed curved-face pieces): any number of holes, no
+  bridge selection, `O(n log n)` in practice (a 40 000-point ring pair
+  in 0.4 s where ear clipping took tens of seconds); hole bridging +
+  ear clipping remains the fallback for degenerate input.
 - Trimmed curved faces through a pole / apex (a loop vertex on a
   degenerate parameter line, e.g. a cone sector ending at the apex):
   the loop crosses the pole freely instead of reading as winding when
