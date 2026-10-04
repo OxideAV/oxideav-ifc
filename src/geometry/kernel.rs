@@ -185,8 +185,8 @@ fn angular_step(radius: f64, tolerance: f64, max_angle: f64) -> f64 {
         return max_angle;
     }
     let a = 2.0 * (1.0 - tolerance / r).clamp(-1.0, 1.0).acos();
-    // Never finer than 1024 segments per turn.
-    a.clamp(2.0 * core::f64::consts::PI / 1024.0, max_angle)
+    // Never finer than one degree per segment (bounds hostile density).
+    a.clamp(2.0 * core::f64::consts::PI / 360.0, max_angle)
 }
 
 impl Surface {
@@ -553,7 +553,7 @@ fn bspline_steps(surface: &bspline::BSplineSurface, tol: f64) -> (Option<f64>, O
         } else {
             span
         };
-        Some(h.clamp(span / 256.0, span / 2.0))
+        Some(h.clamp(span / 128.0, span / 2.0))
     };
     (step(max_uu, u0, u1, pu), step(max_vv, v0, v1, pv))
 }
