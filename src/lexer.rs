@@ -402,7 +402,12 @@ impl<'a> Lexer<'a> {
                     self.lex_string_directive(&mut out, &mut code_page)?;
                 }
                 b'\n' | b'\r' => {
-                    return Err(self.err("raw newline inside string literal"));
+                    // A physical line break inside a string: CAD writers
+                    // (e.g. the NIST MBE PMI models) wrap long strings at
+                    // their line length; the break is layout, not part of
+                    // the value, so it is dropped.
+                    Self::flush_raw(&mut out, &mut raw);
+                    self.bump();
                 }
                 0x20..=0x7E => {
                     Self::flush_raw(&mut out, &mut raw);

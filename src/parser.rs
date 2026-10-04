@@ -694,9 +694,11 @@ mod tests {
     }
 
     #[test]
-    fn string_raw_newline_rejected() {
-        let res = parse_step(wrap("#1=IFCA('a\nb');").as_bytes());
-        assert!(matches!(res, Err(Error::Syntax { .. })), "{res:?}");
+    fn string_wrapped_across_lines_is_joined() {
+        // Writers wrap long strings at their line length; the physical
+        // line breaks are not part of the value.
+        let f = parse("#1=IFCA('ab\ncd\r\nef');");
+        assert_eq!(arg(&f, 1, 0), Value::String("abcdef".into()));
     }
 
     #[test]

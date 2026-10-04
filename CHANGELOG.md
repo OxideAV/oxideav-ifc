@@ -6,6 +6,9 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 1: a physical line break inside a string literal (CAD writers
+  wrap long strings at their line length) is dropped instead of being
+  a syntax error.
 - `kernel`: the ISO 10303-42 curve / surface evaluators and the
   trimmed-face tessellator exposed over neutral data (no IFC entity
   names) so the STEP AP reader `oxideav-step` shares one engine:
