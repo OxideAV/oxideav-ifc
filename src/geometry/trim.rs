@@ -1516,6 +1516,17 @@ pub(super) fn repair_t_junctions(triangles: &mut Vec<[u32; 3]>, pool: &VertexPoo
     if pool.chord_points.is_empty() {
         return;
     }
+    let mut tagged: Vec<([u32; 3], u32)> = triangles.iter().map(|&t| (t, 0)).collect();
+    repair_t_junctions_tagged(&mut tagged, pool);
+    *triangles = tagged.into_iter().map(|(t, _)| t).collect();
+}
+
+/// [`repair_t_junctions`] over triangles carrying a tag (the caller's
+/// face id): every triangle a split produces inherits its parent's tag.
+pub(super) fn repair_t_junctions_tagged(triangles: &mut Vec<([u32; 3], u32)>, pool: &VertexPool) {
+    if pool.chord_points.is_empty() {
+        return;
+    }
     // Inserted vertex → (chord, t).
     let mut on_chord: HashMap<u32, ((u32, u32), f64)> = HashMap::new();
     for (&chord, pts) in &pool.chord_points {
@@ -1576,12 +1587,12 @@ pub(super) fn repair_t_junctions(triangles: &mut Vec<[u32; 3]>, pool: &VertexPoo
             None => false,
         }
     };
-    let mut out: Vec<[u32; 3]> = Vec::with_capacity(triangles.len());
-    let mut stack: Vec<[u32; 3]> = core::mem::take(triangles);
+    let mut out: Vec<([u32; 3], u32)> = Vec::with_capacity(triangles.len());
+    let mut stack: Vec<([u32; 3], u32)> = core::mem::take(triangles);
     // Every split adds triangles; a hostile chord layout is bounded
     // by this budget (the remainder is emitted unrepaired).
     let mut budget = stack.len() * 8 + 65_536;
-    while let Some(t) = stack.pop() {
+    while let Some((t, tag)) = stack.pop() {
         if all_on_one_chord(&t) {
             continue;
         }
@@ -1591,16 +1602,16 @@ pub(super) fn repair_t_junctions(triangles: &mut Vec<[u32; 3]>, pool: &VertexPoo
             if let Some(pts) = between(x, y) {
                 let mut prev = x;
                 for &p in &pts {
-                    stack.push([prev, p, z]);
+                    stack.push(([prev, p, z], tag));
                     prev = p;
                 }
-                stack.push([prev, y, z]);
+                stack.push(([prev, y, z], tag));
                 split = true;
                 break;
             }
         }
         if !split {
-            out.push(t);
+            out.push((t, tag));
         }
         budget -= 1;
         if budget == 0 {

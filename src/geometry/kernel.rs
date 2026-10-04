@@ -548,6 +548,10 @@ fn bspline_steps(surface: &bspline::BSplineSurface, tol: f64) -> (Option<f64>, O
 pub struct FaceMesher {
     pool: VertexPool,
     triangles: Vec<[u32; 3]>,
+    /// Per-triangle tag (the caller's face id, see
+    /// [`FaceMesher::set_tag`]).
+    tags: Vec<u32>,
+    tag: u32,
 }
 
 impl Default for FaceMesher {
@@ -562,6 +566,25 @@ impl FaceMesher {
         Self {
             pool: VertexPool::new(),
             triangles: Vec::new(),
+            tags: Vec::new(),
+            tag: 0,
+        }
+    }
+
+    /// Set the tag every triangle added from now on carries (e.g. a
+    /// face id for per-face styling); [`FaceMesher::finish_tagged`]
+    /// returns it per output triangle, T-junction splits included.
+    pub fn set_tag(&mut self, tag: u32) {
+        self.tag = tag;
+    }
+
+    /// Tag the triangles appended since the last sync.
+    fn sync_tags(&mut self) {
+        let n = self.triangles.len();
+        if self.tags.len() < n {
+            self.tags.resize(n, self.tag);
+        } else {
+            self.tags.truncate(n);
         }
     }
 
@@ -598,7 +621,9 @@ impl FaceMesher {
     /// Append one triangle over existing vertex ids.
     pub fn add_triangle(&mut self, t: [u32; 3]) -> Result<(), GeometryError> {
         self.check_ids(&t)?;
+        self.sync_tags();
         self.triangles.push(t);
+        self.tags.push(self.tag);
         Ok(())
     }
 
@@ -629,7 +654,10 @@ impl FaceMesher {
             .map(|h| dedup_ring(ring(h)))
             .filter(|h| h.len() >= 3)
             .collect();
-        triangulate_face_3d(&outer, &holes, &mut self.triangles)
+        self.sync_tags();
+        let r = triangulate_face_3d(&outer, &holes, &mut self.triangles);
+        self.sync_tags();
+        r
     }
 
     /// Mesh the region of `surface` bounded by `loops` (vertex ids;
@@ -663,7 +691,8 @@ impl FaceMesher {
                     .collect(),
             );
         }
-        trim::tessellate_curved_face(
+        self.sync_tags();
+        let r = trim::tessellate_curved_face(
             &surface.inner,
             surface.steps,
             surface_key,
@@ -671,7 +700,9 @@ impl FaceMesher {
             same_sense,
             &mut self.pool,
             &mut self.triangles,
-        )
+        );
+        self.sync_tags();
+        r
     }
 
     /// Mesh the region of `surface` bounded by loops given directly in
@@ -683,14 +714,17 @@ impl FaceMesher {
         surface_key: u64,
         loops: &[Vec<[f64; 2]>],
     ) -> Result<(), GeometryError> {
-        trim::tessellate_parameter_face(
+        self.sync_tags();
+        let r = trim::tessellate_parameter_face(
             &surface.inner,
             surface.steps,
             surface_key,
             loops,
             &mut self.pool,
             &mut self.triangles,
-        )
+        );
+        self.sync_tags();
+        r
     }
 
     /// Reverse the winding of every triangle from index `start` on.
@@ -703,7 +737,9 @@ impl FaceMesher {
     /// Drop every triangle from index `start` on (rolls back a failed
     /// face that emitted partial output).
     pub fn truncate(&mut self, start: usize) {
+        self.sync_tags();
         self.triangles.truncate(start);
+        self.tags.truncate(start);
     }
 
     /// The signed volume (divergence theorem) of the triangles from
@@ -721,12 +757,29 @@ impl FaceMesher {
 
     /// Finish: split the T-junctions trimmed-face refinement left on
     /// shared boundary chords and return the mesh.
-    pub fn finish(mut self) -> TriMesh {
-        trim::repair_t_junctions(&mut self.triangles, &self.pool);
-        TriMesh {
-            positions: self.pool.positions,
-            triangles: self.triangles,
-        }
+    pub fn finish(self) -> TriMesh {
+        self.finish_tagged().0
+    }
+
+    /// [`FaceMesher::finish`], also returning each output triangle's
+    /// tag (see [`FaceMesher::set_tag`]).
+    pub fn finish_tagged(mut self) -> (TriMesh, Vec<u32>) {
+        self.sync_tags();
+        let mut tagged: Vec<([u32; 3], u32)> = self
+            .triangles
+            .iter()
+            .copied()
+            .zip(self.tags.iter().copied())
+            .collect();
+        trim::repair_t_junctions_tagged(&mut tagged, &self.pool);
+        let (triangles, tags) = tagged.into_iter().unzip();
+        (
+            TriMesh {
+                positions: self.pool.positions,
+                triangles,
+            },
+            tags,
+        )
     }
 }
 
@@ -964,6 +1017,25 @@ mod tests {
         assert!(closed(&mesh));
         let exact = 2.0 / 3.0 * core::f64::consts::PI;
         assert!((mesh.signed_volume() - exact).abs() / exact < 0.02);
+    }
+
+    #[test]
+    fn tags_follow_triangles_through_repair() {
+        let mut m = FaceMesher::new();
+        let a = m.add_vertex([0.0, 0.0, 0.0]);
+        let b = m.add_vertex([1.0, 0.0, 0.0]);
+        let c = m.add_vertex([0.0, 1.0, 0.0]);
+        let d = m.add_vertex([0.0, 0.0, 1.0]);
+        m.set_tag(7);
+        m.add_planar_face(&[a, c, b], &[]).unwrap();
+        m.set_tag(9);
+        m.add_triangle([a, b, d]).unwrap();
+        m.add_triangle([b, c, d]).unwrap();
+        m.add_triangle([c, a, d]).unwrap();
+        let (mesh, tags) = m.finish_tagged();
+        assert_eq!(mesh.triangles.len(), tags.len());
+        assert_eq!(tags.iter().filter(|&&t| t == 7).count(), 1);
+        assert_eq!(tags.iter().filter(|&&t| t == 9).count(), 3);
     }
 
     #[test]
