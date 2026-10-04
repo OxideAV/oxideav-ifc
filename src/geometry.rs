@@ -6147,7 +6147,9 @@ fn triangulate_profile(area: &ProfileArea) -> Result<Vec<[u32; 3]>, GeometryErro
             .rev()
             .map(|(i, &p)| (offset + i as u32, p))
             .collect();
-        merge_hole(&mut poly, &hverts, &all_edges)?;
+        let bridge = merge_hole(&mut poly, &hverts, &all_edges)?;
+        // Later bridges must not cross this one.
+        all_edges.push(bridge);
         offset += hole.len() as u32;
     }
 
@@ -6155,7 +6157,8 @@ fn triangulate_profile(area: &ProfileArea) -> Result<Vec<[u32; 3]>, GeometryErro
 }
 
 /// Splice one hole (given clockwise) into the outer polygon through a
-/// mutually visible vertex pair, duplicating the two bridge vertices.
+/// mutually visible vertex pair, duplicating the two bridge vertices;
+/// returns the bridge segment (later bridges must not cross it).
 ///
 /// Visibility is brute force: candidate (outer, hole) vertex pairs are
 /// tried nearest-first, accepting the first bridge segment that crosses
@@ -6166,7 +6169,7 @@ fn merge_hole(
     poly: &mut Vec<(u32, [f64; 2])>,
     hole: &[(u32, [f64; 2])],
     all_edges: &[([f64; 2], [f64; 2])],
-) -> Result<(), GeometryError> {
+) -> Result<([f64; 2], [f64; 2]), GeometryError> {
     let mut pairs: Vec<(f64, usize, usize)> = Vec::with_capacity(poly.len() * hole.len());
     for (pi, &(_, pp)) in poly.iter().enumerate() {
         for (hi, &(_, hp)) in hole.iter().enumerate() {
@@ -6176,23 +6179,51 @@ fn merge_hole(
     }
     pairs.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
 
-    for &(_, pi, hi) in &pairs {
-        let a = poly[pi].1;
-        let b = hole[hi].1;
-        if bridge_is_clear(a, b, all_edges) {
-            // poly[..=pi] ++ hole[hi..] ++ hole[..=hi] ++ poly[pi..]:
-            // walk the whole hole cycle starting (and ending, duplicated)
-            // at hi, then return to the duplicated outer vertex pi.
-            let mut spliced: Vec<(u32, [f64; 2])> = Vec::with_capacity(poly.len() + hole.len() + 2);
-            spliced.extend_from_slice(&poly[..=pi]);
-            spliced.extend_from_slice(&hole[hi..]);
-            spliced.extend_from_slice(&hole[..=hi]);
-            spliced.extend_from_slice(&poly[pi..]);
-            *poly = spliced;
-            return Ok(());
-        }
+    // A bridge must leave both ends through their interior sector: at a
+    // vertex the boundary passes more than once (an earlier bridge's
+    // duplicated end), only one of the copies opens towards the hole.
+    let (np, nh) = (poly.len(), hole.len());
+    let opens = |pi: usize, hi: usize| -> bool {
+        let (a, b) = (poly[pi].1, hole[hi].1);
+        in_cone(poly[(pi + np - 1) % np].1, a, poly[(pi + 1) % np].1, b)
+            && in_cone(hole[(hi + nh - 1) % nh].1, b, hole[(hi + 1) % nh].1, a)
+    };
+    let chosen = pairs
+        .iter()
+        .find(|&&(_, pi, hi)| opens(pi, hi) && bridge_is_clear(poly[pi].1, hole[hi].1, all_edges))
+        .or_else(|| {
+            pairs
+                .iter()
+                .find(|&&(_, pi, hi)| bridge_is_clear(poly[pi].1, hole[hi].1, all_edges))
+        })
+        .copied();
+    let (_, pi, hi) = chosen.ok_or(GeometryError::BadProfile)?;
+    let a = poly[pi].1;
+    let b = hole[hi].1;
+    // poly[..=pi] ++ hole[hi..] ++ hole[..=hi] ++ poly[pi..]: walk the
+    // whole hole cycle starting (and ending, duplicated) at hi, then
+    // return to the duplicated outer vertex pi.
+    let mut spliced: Vec<(u32, [f64; 2])> = Vec::with_capacity(poly.len() + hole.len() + 2);
+    spliced.extend_from_slice(&poly[..=pi]);
+    spliced.extend_from_slice(&hole[hi..]);
+    spliced.extend_from_slice(&hole[..=hi]);
+    spliced.extend_from_slice(&poly[pi..]);
+    *poly = spliced;
+    Ok((a, b))
+}
+
+/// `true` when the direction from `v` towards `p` points into the
+/// interior sector of the boundary corner `prev → v → next` (the
+/// boundary runs counter-clockwise, interior on its left).
+fn in_cone(prev: [f64; 2], v: [f64; 2], next: [f64; 2], p: [f64; 2]) -> bool {
+    let convex = cross2(prev, v, next) >= 0.0;
+    let left_in = cross2(prev, v, p) > 0.0;
+    let left_out = cross2(v, next, p) > 0.0;
+    if convex {
+        left_in && left_out
+    } else {
+        left_in || left_out
     }
-    Err(GeometryError::BadProfile)
 }
 
 /// `true` when the open segment `a–b` crosses none of `edges` (touching

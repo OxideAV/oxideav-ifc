@@ -6,6 +6,10 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Hole bridging (profile / face triangulation): a bridge leaves both
+  ends through their interior sector and later bridges may not cross
+  earlier ones, so several holes bridged to one outer corner no longer
+  stall the ear clipper (a CAD plate with eight holes failed before).
 - Phase 1: a physical line break inside a string literal (CAD writers
   wrap long strings at their line length) is dropped instead of being
   a syntax error.

@@ -1049,6 +1049,39 @@ mod tests {
         assert_eq!(tags.iter().filter(|&&t| t == 9).count(), 3);
     }
 
+    /// Several holes whose nearest outer vertex is the same corner: each
+    /// later bridge must leave that corner through the copy whose
+    /// sector opens towards its hole (else the bridged polygon
+    /// self-intersects and ear clipping stalls).
+    #[test]
+    fn holes_bridged_to_one_corner() {
+        let outer = [[0.0, 0.0], [100.0, 0.0], [100.0, 100.0], [0.0, 100.0]];
+        let sq = |x: f64, y: f64| vec![[x, y], [x + 4.0, y], [x + 4.0, y + 4.0], [x, y + 4.0]];
+        let holes = vec![
+            sq(2.0, 90.0),
+            sq(8.0, 94.0),
+            sq(3.0, 82.0),
+            sq(12.0, 86.0),
+            sq(20.0, 93.0),
+        ];
+        let t = triangulate_polygon(&outer, &holes).unwrap();
+        // n vertices + 2 per bridge, triangles = n + 2h − 2.
+        assert_eq!(t.len(), 4 + 20 + 2 * 5 - 2);
+        let all: Vec<[f64; 2]> = outer
+            .iter()
+            .copied()
+            .chain(holes.iter().flatten().copied())
+            .collect();
+        let area: f64 = t
+            .iter()
+            .map(|&[a, b, c]| {
+                let (a, b, c) = (all[a as usize], all[b as usize], all[c as usize]);
+                0.5 * ((b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]))
+            })
+            .sum();
+        assert!((area - (10_000.0 - 5.0 * 16.0)).abs() < 1e-6, "{area}");
+    }
+
     #[test]
     fn polygon_triangulation_with_hole() {
         let outer = [[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
