@@ -47,15 +47,74 @@ impl Default for StepLimits {
     }
 }
 
-/// One DATA-section instance record: `#id = KEYWORD(args);`.
+/// One partial entity record of a complex (external-mapping)
+/// instance: `KEYWORD(args)` inside `#id = ( … );`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct EntityPart {
+    /// Upper-cased keyword of this partial entity, e.g. `SI_UNIT`.
+    pub keyword: String,
+    /// The attributes this partial entity declares itself (not those of
+    /// its supertypes, which have their own partial records).
+    pub args: Vec<Value>,
+}
+
+/// One DATA-section instance record: `#id = KEYWORD(args);` (internal
+/// mapping) or `#id = (A(…) B(…) …);` (external mapping, ISO 10303-21
+/// §12.2.5 — the complex-entity form STEP application protocols use for
+/// e.g. `(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))`).
 #[derive(Debug, Clone, PartialEq)]
 pub struct ParsedInstance {
     /// The `#id` instance name (unique per file).
     pub id: u64,
-    /// Upper-cased entity keyword, e.g. `IFCWALL`.
+    /// Upper-cased entity keyword, e.g. `IFCWALL`. For a complex
+    /// instance this is the partial keywords joined by `+` in file
+    /// order (`LENGTH_UNIT+NAMED_UNIT+SI_UNIT`), which no simple entity
+    /// keyword can collide with.
     pub keyword: String,
-    /// The parameter list, in serialisation order.
+    /// The parameter list, in serialisation order. Empty for a complex
+    /// instance — its attributes live in [`ParsedInstance::parts`].
     pub args: Vec<Value>,
+    /// The partial entity records of a complex instance, in file order;
+    /// empty for an ordinary (internal-mapping) instance.
+    pub parts: Vec<EntityPart>,
+}
+
+impl ParsedInstance {
+    /// True for a complex (external-mapping) instance.
+    pub fn is_complex(&self) -> bool {
+        !self.parts.is_empty()
+    }
+
+    /// The attributes declared by entity `keyword` (case-insensitive):
+    /// the whole argument list of a simple instance whose keyword
+    /// matches, or the matching partial record of a complex instance.
+    pub fn part(&self, keyword: &str) -> Option<&[Value]> {
+        if self.parts.is_empty() {
+            return self
+                .keyword
+                .eq_ignore_ascii_case(keyword)
+                .then_some(self.args.as_slice());
+        }
+        self.parts
+            .iter()
+            .find(|p| p.keyword.eq_ignore_ascii_case(keyword))
+            .map(|p| p.args.as_slice())
+    }
+
+    /// True when the instance is (simple) or contains (complex) entity
+    /// `keyword` (case-insensitive).
+    pub fn has_part(&self, keyword: &str) -> bool {
+        self.part(keyword).is_some()
+    }
+
+    /// Every entity keyword of the instance: its own keyword for a
+    /// simple instance, each partial keyword for a complex one.
+    pub fn keywords(&self) -> impl Iterator<Item = &str> {
+        let simple = self.parts.is_empty().then_some(self.keyword.as_str());
+        simple
+            .into_iter()
+            .chain(self.parts.iter().map(|p| p.keyword.as_str()))
+    }
 }
 
 /// A fully parsed STEP physical file.
@@ -104,7 +163,11 @@ impl StepFile {
     pub fn references_of(&self, id: u64) -> Vec<u64> {
         let mut out = Vec::new();
         if let Some(inst) = self.instances.get(&id) {
-            for arg in &inst.args {
+            for arg in inst
+                .args
+                .iter()
+                .chain(inst.parts.iter().flat_map(|p| &p.args))
+            {
                 arg.collect_references(&mut out);
             }
         }
@@ -294,14 +357,20 @@ impl<'a> Parser<'a> {
                     }
                 };
                 self.expect(&Token::Equals, "after instance id")?;
-                let keyword = match self.bump()? {
-                    Token::Keyword(kw) => kw,
+                let (keyword, args, parts) = match self.bump()? {
+                    Token::Keyword(kw) => {
+                        let args = self.parse_paren_args(0)?;
+                        (kw, args, Vec::new())
+                    }
                     Token::LParen => {
-                        // External-mapping (multi-keyword complex
-                        // entity) records are not used by IFC writers.
-                        return Err(self.err_here(
-                            "external-mapping complex entity records are not supported",
-                        ));
+                        // External mapping: `( A(…) B(…) … )`.
+                        let parts = self.parse_complex_parts()?;
+                        let keyword = parts
+                            .iter()
+                            .map(|p| p.keyword.as_str())
+                            .collect::<Vec<_>>()
+                            .join("+");
+                        (keyword, Vec::new(), parts)
                     }
                     other => {
                         return Err(self.err_here(format!(
@@ -310,7 +379,6 @@ impl<'a> Parser<'a> {
                         )));
                     }
                 };
-                let args = self.parse_paren_args(0)?;
                 self.expect(&Token::Semicolon, "after instance record")?;
                 if instances.len() >= self.limits.max_instances {
                     return Err(Error::LimitExceeded(format!(
@@ -319,7 +387,15 @@ impl<'a> Parser<'a> {
                     )));
                 }
                 if instances
-                    .insert(id, ParsedInstance { id, keyword, args })
+                    .insert(
+                        id,
+                        ParsedInstance {
+                            id,
+                            keyword,
+                            args,
+                            parts,
+                        },
+                    )
                     .is_some()
                 {
                     return Err(Error::DuplicateId(id));
@@ -342,6 +418,39 @@ impl<'a> Parser<'a> {
         }
 
         Ok(StepFile { header, instances })
+    }
+
+    /// Parse the partial records of an external-mapping instance after
+    /// its opening `(`, through the closing `)`: one or more
+    /// `KEYWORD(args)` groups (no separators).
+    fn parse_complex_parts(&mut self) -> Result<Vec<EntityPart>> {
+        let mut parts = Vec::new();
+        loop {
+            match &self.tok {
+                Token::RParen => {
+                    self.bump()?;
+                    break;
+                }
+                Token::Keyword(_) => {
+                    let keyword = match self.bump()? {
+                        Token::Keyword(kw) => kw,
+                        _ => unreachable!(),
+                    };
+                    let args = self.parse_paren_args(0)?;
+                    parts.push(EntityPart { keyword, args });
+                }
+                other => {
+                    return Err(self.err_here(format!(
+                        "expected a partial entity keyword or `)` in a complex instance, found {}",
+                        other.describe()
+                    )));
+                }
+            }
+        }
+        if parts.is_empty() {
+            return Err(self.err_here("complex entity instance has no partial records"));
+        }
+        Ok(parts)
     }
 
     /// Parse `( arg, arg, ... )`. A trailing comma before `)` is
@@ -744,14 +853,46 @@ mod tests {
     }
 
     #[test]
-    fn external_mapping_records_rejected_clearly() {
-        let res = parse_step(wrap("#1=(IFCA()IFCB());").as_bytes());
-        match res {
-            Err(Error::Syntax { message, .. }) => {
-                assert!(message.contains("external-mapping"), "{message}");
-            }
-            other => panic!("expected syntax error, got {other:?}"),
+    fn external_mapping_records_parse_into_parts() {
+        let f = parse(
+            "#1=( LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.) );\n\
+             #2=(A(#1)B('x',(1,2)));",
+        );
+        let inst = f.get(1).unwrap();
+        assert!(inst.is_complex());
+        assert_eq!(inst.keyword, "LENGTH_UNIT+NAMED_UNIT+SI_UNIT");
+        assert!(inst.args.is_empty());
+        assert_eq!(
+            inst.part("si_unit").unwrap(),
+            &[Value::Enum("MILLI".into()), Value::Enum("METRE".into())]
+        );
+        assert_eq!(inst.part("NAMED_UNIT").unwrap(), &[Value::Derived]);
+        assert!(inst.has_part("LENGTH_UNIT"));
+        assert!(!inst.has_part("PLANE_ANGLE_UNIT"));
+        assert_eq!(
+            inst.keywords().collect::<Vec<_>>(),
+            ["LENGTH_UNIT", "NAMED_UNIT", "SI_UNIT"]
+        );
+        assert_eq!(f.references_of(2), [1]);
+        assert!(f.dangling_references().is_empty());
+        // Simple instances answer `part` with their own arguments.
+        let g = parse("#1=IFCWALL(1);");
+        assert_eq!(g.get(1).unwrap().part("IfcWall").unwrap().len(), 1);
+        assert!(g.get(1).unwrap().part("IFCSLAB").is_none());
+    }
+
+    #[test]
+    fn malformed_complex_records_are_errors() {
+        for body in ["#1=();", "#1=(A() 3);", "#1=(A()", "#1=(A() B);"] {
+            assert!(parse_step(wrap(body).as_bytes()).is_err(), "{body}");
         }
+    }
+
+    #[test]
+    fn user_defined_keywords_keep_their_bang() {
+        let f = parse("#1=!MY_ENTITY(1);#2=(!X() Y());");
+        assert_eq!(f.get(1).unwrap().keyword, "!MY_ENTITY");
+        assert!(f.get(2).unwrap().has_part("!X"));
     }
 
     #[test]

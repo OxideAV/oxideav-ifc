@@ -201,6 +201,18 @@ impl<'a> Lexer<'a> {
             b'+' | b'-' => self.lex_number(),
             b'0'..=b'9' => self.lex_number(),
             b'A'..=b'Z' | b'a'..=b'z' | b'_' => self.lex_keyword(),
+            // User-defined keyword (ISO 10303-21 §6.4: `!` + standard
+            // keyword characters); kept with its `!` prefix.
+            b'!' if self
+                .peek_at(1)
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == b'_') =>
+            {
+                self.bump();
+                match self.lex_keyword()? {
+                    Token::Keyword(k) => Ok(Token::Keyword(format!("!{k}"))),
+                    other => Ok(other),
+                }
+            }
             other => Err(self.err(format!("unexpected byte 0x{other:02X}"))),
         }
     }

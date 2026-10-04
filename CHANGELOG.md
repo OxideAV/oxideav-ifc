@@ -6,6 +6,13 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Phase 1: external-mapping (complex entity) instances
+  `#id = (A(…) B(…) …);` parse into `ParsedInstance::parts`
+  ([`EntityPart`]) instead of being rejected, with `is_complex` /
+  `part` / `has_part` / `keywords` accessors; `references_of` /
+  `reachable_from` follow references inside partial records. User-
+  defined `!KEYWORD` entity names lex. (Needed by the STEP AP reader
+  `oxideav-step`, which reuses this parser.)
 - Phase 3: mesh–mesh Booleans — `IfcBooleanResult` UNION / INTERSECTION
   / DIFFERENCE with **non-convex** tools (any closed solid: swept, Brep,
   tessellated, CSG primitive, nested result) and the bounded half-spaces

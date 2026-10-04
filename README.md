@@ -56,9 +56,12 @@ for wall in step.instances_of("IfcWall") {
 * DoS hardening via `StepLimits`: input-size, instance-count,
   aggregate-nesting-depth, and string-length caps.
 
-Known Phase-1 limits: external-mapping (multi-keyword complex
-entity) records — which IFC writers do not emit — are rejected with
-a clear error.
+* External-mapping (complex entity) records `#id = (A(…) B(…) …);`
+  — which IFC writers do not emit but STEP application protocols use
+  heavily — parse into `ParsedInstance::parts` (`EntityPart` per
+  partial record; `part` / `has_part` / `keywords` accessors). The
+  instance `keyword` is the partial keywords joined by `+`.
+* User-defined keywords (`!NAME`) keep their `!` prefix.
 
 ## Phase 2 surface — typed schema layer
 

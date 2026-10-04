@@ -142,7 +142,8 @@ pub use geometry::{
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use material::{material_assignment, MaterialAssignment};
 pub use parser::{
-    parse_step, parse_step_with_limits, probe_step, ParsedInstance, StepFile, StepLimits,
+    parse_step, parse_step_with_limits, probe_step, EntityPart, ParsedInstance, StepFile,
+    StepLimits,
 };
 pub use props::{
     element_quantity, property_set, ElementQuantity, IfcValue, Property, PropertySet,
