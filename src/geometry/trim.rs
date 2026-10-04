@@ -1400,7 +1400,7 @@ fn delaunay_flips(
     };
     // Lawson's walk from a fan can take O(n²) flips on n triangles.
     let n = tris.len();
-    let mut budget = (n * 64 + n * n / 8).clamp(64, 1 << 22);
+    let mut budget = (n * 32).clamp(64, 1 << 20);
     // Directed edge → triangle owning it, maintained across flips.
     let mut owner: HashMap<(u32, u32), usize> = HashMap::with_capacity(tris.len() * 3);
     for (ti, t) in tris.iter().enumerate() {
