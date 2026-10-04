@@ -610,6 +610,17 @@ impl FaceMesher {
         self.triangles.len()
     }
 
+    /// The vertex positions so far.
+    pub fn positions(&self) -> &[[f64; 3]] {
+        &self.pool.positions
+    }
+
+    /// The triangles so far (before [`FaceMesher::finish`]'s T-junction
+    /// repair).
+    pub fn triangles(&self) -> &[[u32; 3]] {
+        &self.triangles
+    }
+
     fn check_ids(&self, ids: &[u32]) -> Result<(), GeometryError> {
         let n = self.pool.positions.len();
         if ids.iter().any(|&i| i as usize >= n) {
