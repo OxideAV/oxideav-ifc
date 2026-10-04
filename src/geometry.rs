@@ -177,6 +177,7 @@ use crate::value::Value;
 
 pub(crate) mod bspline;
 mod csg;
+pub mod kernel;
 mod profiles;
 mod surfaces;
 mod trim;
@@ -584,6 +585,9 @@ fn curved_half_space_solid(
         surfaces::SurfaceKind::Sphere { radius } => sphere_mesh(radius),
         surfaces::SurfaceKind::Plane | surfaces::SurfaceKind::Torus { .. } => {
             return Err(GeometryError::Unsupported("IFCTOROIDALSURFACE".to_string()));
+        }
+        surfaces::SurfaceKind::Cone { .. } => {
+            return Err(GeometryError::Unsupported("CONICAL_SURFACE".to_string()));
         }
     };
     mesh.transform(frame);
@@ -2115,6 +2119,7 @@ fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geomet
 
 /// A growing, point-id-deduplicated vertex pool used while walking a
 /// Brep / surface-model face graph.
+#[derive(Debug)]
 struct VertexPool {
     positions: Vec<[f64; 3]>,
     /// Map from `IfcCartesianPoint` instance id → its index in
@@ -3575,7 +3580,14 @@ fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
     loops.extend(holes);
     let mut pool = VertexPool::new();
     let mut triangles: Vec<[u32; 3]> = Vec::new();
-    trim::tessellate_parameter_face(&surface, basis_id, &loops, &mut pool, &mut triangles)?;
+    trim::tessellate_parameter_face(
+        &surface,
+        surface.step(),
+        basis_id,
+        &loops,
+        &mut pool,
+        &mut triangles,
+    )?;
     let mut mesh = TriMesh {
         positions: pool.positions,
         triangles,
@@ -6563,7 +6575,15 @@ fn face(
         for h in &holes {
             loops.push(to_loop(h));
         }
-        return trim::tessellate_curved_face(&surface, sid, &loops, same_sense, pool, triangles);
+        return trim::tessellate_curved_face(
+            &surface,
+            surface.step(),
+            sid,
+            &loops,
+            same_sense,
+            pool,
+            triangles,
+        );
     }
 
     triangulate_face_3d(&outer, &holes, triangles)

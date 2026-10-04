@@ -204,6 +204,7 @@ const MAX_REFINE_ROUNDS: usize = 16;
 /// `same_sense` is the face's `IfcFaceSurface.SameSense`.
 pub(super) fn tessellate_curved_face(
     surface: &ParamSurface,
+    steps: (Option<f64>, Option<f64>),
     surface_key: u64,
     loops: &[Vec<LoopVertex>],
     same_sense: bool,
@@ -213,6 +214,7 @@ pub(super) fn tessellate_curved_face(
     let uv_loops = parameter_loops(surface, loops)?;
     mesh_parameter_loops(
         surface,
+        steps,
         surface_key,
         uv_loops,
         same_sense,
@@ -237,6 +239,7 @@ pub(super) fn tessellate_curved_face(
 /// single mesh vertices.
 pub(super) fn tessellate_parameter_face(
     surface: &ParamSurface,
+    steps: (Option<f64>, Option<f64>),
     surface_key: u64,
     loops: &[Vec<Uv>],
     pool: &mut VertexPool,
@@ -321,6 +324,7 @@ pub(super) fn tessellate_parameter_face(
     let centre_seam = [spans(0, period_u), spans(1, period_v)];
     mesh_parameter_loops(
         surface,
+        steps,
         surface_key,
         uv_loops,
         true,
@@ -333,8 +337,10 @@ pub(super) fn tessellate_parameter_face(
 /// Orient, clip to the fundamental rectangle, and mesh the parameter
 /// loops; retried with the opposite orientation when the region comes
 /// out empty (inconsistent flags in the file).
+#[allow(clippy::too_many_arguments)]
 fn mesh_parameter_loops(
     surface: &ParamSurface,
+    steps: (Option<f64>, Option<f64>),
     surface_key: u64,
     uv_loops: Vec<ULoop>,
     same_sense: bool,
@@ -363,7 +369,7 @@ fn mesh_parameter_loops(
         let mut out: Vec<[u32; 3]> = Vec::new();
         let mut failed = false;
         for piece in &pieces {
-            if mesh_piece(surface, surface_key, piece, reversed, pool, &mut out).is_err() {
+            if mesh_piece(surface, steps, surface_key, piece, reversed, pool, &mut out).is_err() {
                 failed = true;
                 break;
             }
@@ -1076,8 +1082,12 @@ enum Local {
 }
 
 /// Triangulate, refine and emit one piece.
+/// `steps` is the largest parameter span a mesh edge may cover in `u`
+/// / `v` (`ParamSurface::step` unless the caller overrides the
+/// density).
 fn mesh_piece(
     surface: &ParamSurface,
+    steps: (Option<f64>, Option<f64>),
     surface_key: u64,
     piece: &Piece,
     reversed: bool,
@@ -1158,7 +1168,7 @@ fn mesh_piece(
     delaunay_flips(&mut tris, &uvs, surface, &HashMap::new());
 
     // Midpoint refinement.
-    let (step_u, step_v) = surface.step();
+    let (step_u, step_v) = steps;
     let mut midpoints: HashMap<(u32, u32), u32> = HashMap::new();
     let too_long = |a: Uv, b: Uv| {
         step_u.is_some_and(|s| (a[0] - b[0]).abs() > s * 1.0001)

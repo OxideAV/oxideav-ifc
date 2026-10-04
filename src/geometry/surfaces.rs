@@ -41,6 +41,12 @@ pub(super) enum SurfaceKind {
     /// `IfcToroidalSurface(MajorRadius, MinorRadius)`: the tube centre
     /// circle of `major` radius lies in the local xy-plane.
     Torus { major: f64, minor: f64 },
+    /// ISO 10303-42 `conical_surface(radius, semi_angle)` (no IFC
+    /// counterpart; constructed through [`super::kernel`]): axis along
+    /// local z, `radius` the section radius in the local xy-plane,
+    /// `tan` the tangent of the semi-angle — the radius grows by `tan`
+    /// per unit of `z`.
+    Cone { radius: f64, tan: f64 },
 }
 
 impl ElementarySurface {
@@ -129,6 +135,10 @@ impl ElementarySurface {
                 let centre = [radial[0] * major, radial[1] * major, 0.0];
                 normalise([l[0] - centre[0], l[1] - centre[1], l[2] - centre[2]])?
             }
+            SurfaceKind::Cone { tan, .. } => {
+                let radial = normalise([l[0], l[1], 0.0])?;
+                normalise([radial[0], radial[1], -tan])?
+            }
         };
         normalise(self.dir_to_world(local))
     }
@@ -163,6 +173,14 @@ pub(super) enum ParamSurface {
         samples: Vec<(f64, f64, [f64; 3])>,
         /// Control-net extent (for scale-relative tolerances).
         size: f64,
+    },
+    /// ISO 10303-42 `offset_surface(basis_surface, distance)`: the basis
+    /// displaced by `distance` along its unit normal `∂S/∂u × ∂S/∂v`;
+    /// shares the basis parameterisation (constructed through
+    /// [`super::kernel`]).
+    Offset {
+        base: Box<ParamSurface>,
+        distance: f64,
     },
     /// `IfcSurfaceOfRevolution(SweptCurve, Position, AxisPosition)`: the
     /// sampled 2-D profile (in the `Position` xy-plane) revolved about
@@ -269,30 +287,7 @@ impl ParamSurface {
             "IFCBSPLINESURFACEWITHKNOTS" | "IFCRATIONALBSPLINESURFACEWITHKNOTS" => {
                 let surface =
                     super::bspline::BSplineSurface::from_instance(step, &inst.keyword, &inst.args)?;
-                let us = surface.u_samples(8);
-                let vs = surface.v_samples(8);
-                let mut samples = Vec::with_capacity(us.len() * vs.len());
-                let mut lo = [f64::INFINITY; 3];
-                let mut hi = [f64::NEG_INFINITY; 3];
-                for &u in &us {
-                    for &v in &vs {
-                        let p = surface.point_at(u, v);
-                        for k in 0..3 {
-                            lo[k] = lo[k].min(p[k]);
-                            hi[k] = hi[k].max(p[k]);
-                        }
-                        samples.push((u, v, p));
-                    }
-                }
-                let size =
-                    ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2))
-                        .sqrt()
-                        .max(f64::MIN_POSITIVE);
-                Ok(Self::BSpline {
-                    surface,
-                    samples,
-                    size,
-                })
+                Ok(Self::from_bspline(surface))
             }
             other => Err(GeometryError::Unsupported(other.to_string())),
         }
@@ -315,12 +310,27 @@ impl ParamSurface {
                         let rho = major + minor * v.cos();
                         [rho * u.cos(), rho * u.sin(), minor * v.sin()]
                     }
+                    SurfaceKind::Cone { radius, tan } => {
+                        let rho = radius + v * tan;
+                        [rho * u.cos(), rho * u.sin(), v]
+                    }
                 };
                 let d = e.dir_to_world(local);
                 let t = e.frame.translation;
                 [d[0] + t[0], d[1] + t[1], d[2] + t[2]]
             }
             Self::BSpline { surface, .. } => surface.point_at(u, v),
+            Self::Offset { base, distance } => {
+                let p = base.eval(uv);
+                match base.unit_normal(uv) {
+                    Some(n) => [
+                        p[0] + distance * n[0],
+                        p[1] + distance * n[1],
+                        p[2] + distance * n[2],
+                    ],
+                    None => p,
+                }
+            }
             Self::Revolution {
                 frame,
                 profile,
@@ -381,8 +391,21 @@ impl ParamSurface {
                         let rho = l[0].hypot(l[1]);
                         ([l[1].atan2(l[0]), l[2].atan2(rho - major)], rho <= 0.0)
                     }
+                    SurfaceKind::Cone { radius, tan } => {
+                        // Nearest point on the meridian line
+                        // rho = radius + v·tan in the (rho, z) half-plane.
+                        let rho = l[0].hypot(l[1]);
+                        let v = ((rho - radius) * tan + l[2]) / (1.0 + tan * tan);
+                        let scale = radius.abs().max(v.abs() * tan.abs()).max(1e-300);
+                        let degenerate =
+                            rho <= 1e-12 * scale || (radius + v * tan).abs() <= 1e-9 * scale;
+                        ([l[1].atan2(l[0]), v], degenerate)
+                    }
                 }
             }
+            // The basis point nearest an offset point is the foot of its
+            // normal (for offsets inside the basis' curvature radius).
+            Self::Offset { base, .. } => base.inverse(p),
             Self::BSpline {
                 surface,
                 samples,
@@ -496,9 +519,10 @@ impl ParamSurface {
         match self {
             Self::Elementary(e) => match e.kind {
                 SurfaceKind::Plane => (false, false),
-                SurfaceKind::Cylinder { .. } => (true, false),
+                SurfaceKind::Cylinder { .. } | SurfaceKind::Cone { .. } => (true, false),
                 SurfaceKind::Sphere { .. } | SurfaceKind::Torus { .. } => (true, true),
             },
+            Self::Offset { base, .. } => base.angular(),
             Self::Revolution { .. } => (true, false),
             Self::BSpline { .. } | Self::Extrusion { .. } => (false, false),
         }
@@ -509,7 +533,10 @@ impl ParamSurface {
     /// sampled-profile surfaces use a sample-index parameter of their
     /// own that no `IfcParameterValue` refers to.
     pub(super) fn has_schema_parameters(&self) -> bool {
-        !matches!(self, Self::Revolution { .. } | Self::Extrusion { .. })
+        match self {
+            Self::Offset { base, .. } => base.has_schema_parameters(),
+            _ => !matches!(self, Self::Revolution { .. } | Self::Extrusion { .. }),
+        }
     }
 
     /// The parameter axis that counts profile samples (the surface is a
@@ -519,6 +546,7 @@ impl ParamSurface {
         match self {
             Self::Revolution { .. } => Some(1),
             Self::Extrusion { .. } => Some(0),
+            Self::Offset { base, .. } => base.index_axis(),
             _ => None,
         }
     }
@@ -554,6 +582,7 @@ impl ParamSurface {
     /// The `u` period (the parameter wraps), if any.
     pub(super) fn period_u(&self) -> Option<f64> {
         match self {
+            Self::Offset { base, .. } => base.period_u(),
             Self::Elementary(e) => match e.kind {
                 SurfaceKind::Plane => None,
                 _ => Some(2.0 * core::f64::consts::PI),
@@ -582,6 +611,7 @@ impl ParamSurface {
     /// The `v` period, if any.
     pub(super) fn period_v(&self) -> Option<f64> {
         match self {
+            Self::Offset { base, .. } => base.period_v(),
             Self::Elementary(e) => match e.kind {
                 SurfaceKind::Torus { .. } => Some(2.0 * core::f64::consts::PI),
                 _ => None,
@@ -603,6 +633,7 @@ impl ParamSurface {
     /// the loops decide.
     pub(super) fn u_extent(&self) -> Option<(f64, f64)> {
         match self {
+            Self::Offset { base, .. } => base.u_extent(),
             Self::Elementary(_) | Self::Revolution { .. } => self.period_u().map(|p| (0.0, p)),
             Self::BSpline { surface, .. } => Some(surface.u_domain()),
             Self::Extrusion {
@@ -622,6 +653,7 @@ impl ParamSurface {
     /// B-spline domain).
     pub(super) fn v_extent(&self) -> Option<(f64, f64)> {
         match self {
+            Self::Offset { base, .. } => base.v_extent(),
             Self::Elementary(e) => match e.kind {
                 SurfaceKind::Sphere { .. } => {
                     Some((-core::f64::consts::FRAC_PI_2, core::f64::consts::FRAC_PI_2))
@@ -644,7 +676,7 @@ impl ParamSurface {
         match self {
             Self::Elementary(e) => match e.kind {
                 SurfaceKind::Plane => (None, None),
-                SurfaceKind::Cylinder { .. } => (Some(angular), None),
+                SurfaceKind::Cylinder { .. } | SurfaceKind::Cone { .. } => (Some(angular), None),
                 SurfaceKind::Sphere { .. } | SurfaceKind::Torus { .. } => {
                     (Some(angular), Some(angular))
                 }
@@ -658,6 +690,7 @@ impl ParamSurface {
             // the samples); straight along the sweep.
             Self::Revolution { .. } => (Some(angular), Some(1.0)),
             Self::Extrusion { .. } => (Some(1.0), None),
+            Self::Offset { base, .. } => base.step(),
         }
     }
 
@@ -671,7 +704,20 @@ impl ParamSurface {
                 SurfaceKind::Cylinder { radius } => (radius, 1.0),
                 SurfaceKind::Sphere { radius } => (radius, radius),
                 SurfaceKind::Torus { major, minor } => (major + minor, minor),
+                SurfaceKind::Cone { radius, tan } => (
+                    radius.abs().max(f64::MIN_POSITIVE),
+                    (1.0 + tan * tan).sqrt(),
+                ),
             },
+            Self::Offset { base, distance } => {
+                let (a, b) = base.metric();
+                // Curvature-agnostic: never shrink below the basis scale
+                // by more than the offset.
+                (
+                    (a + distance.abs()).max(f64::MIN_POSITIVE),
+                    (b + distance.abs()).max(f64::MIN_POSITIVE),
+                )
+            }
             Self::BSpline { surface, size, .. } => {
                 let (u0, u1) = surface.u_domain();
                 let (v0, v1) = surface.v_domain();
@@ -698,6 +744,20 @@ impl ParamSurface {
     /// A welding key for a parameter point: two points with equal keys
     /// are the same surface point (periodic images, the sphere poles).
     pub(super) fn weld_key(&self, uv: Uv) -> (i64, i64) {
+        if let Self::Offset { base, .. } = self {
+            return base.weld_key(uv);
+        }
+        if let Self::Elementary(ElementarySurface {
+            kind: SurfaceKind::Cone { radius, tan },
+            ..
+        }) = self
+        {
+            // The apex is one surface point for every u.
+            let scale = radius.abs().max(uv[1].abs() * tan.abs()).max(1e-300);
+            if (radius + uv[1] * tan).abs() <= 1e-9 * scale {
+                return (i64::MAX, (uv[1] * 1e9).round() as i64);
+            }
+        }
         let q = |x: f64, period: Option<f64>| -> i64 {
             let x = match period {
                 Some(p) => {
@@ -743,6 +803,72 @@ impl ParamSurface {
             }
         }
         (q(uv[0], self.period_u()), q(uv[1], self.period_v()))
+    }
+}
+
+impl ParamSurface {
+    /// Wrap an evaluated B-spline surface, precomputing the coarse
+    /// sample grid the inverse seeds from and the control-net extent.
+    pub(super) fn from_bspline(surface: super::bspline::BSplineSurface) -> Self {
+        let us = surface.u_samples(8);
+        let vs = surface.v_samples(8);
+        let mut samples = Vec::with_capacity(us.len() * vs.len());
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for &u in &us {
+            for &v in &vs {
+                let p = surface.point_at(u, v);
+                for k in 0..3 {
+                    lo[k] = lo[k].min(p[k]);
+                    hi[k] = hi[k].max(p[k]);
+                }
+                samples.push((u, v, p));
+            }
+        }
+        let size = ((hi[0] - lo[0]).powi(2) + (hi[1] - lo[1]).powi(2) + (hi[2] - lo[2]).powi(2))
+            .sqrt()
+            .max(f64::MIN_POSITIVE);
+        Self::BSpline {
+            surface,
+            samples,
+            size,
+        }
+    }
+
+    /// The partial derivatives `(∂S/∂u, ∂S/∂v)` at `uv` by central
+    /// differences (step relative to the parameter magnitude).
+    pub(super) fn partials(&self, uv: Uv) -> ([f64; 3], [f64; 3]) {
+        if let Self::BSpline { surface, .. } = self {
+            return surface.partials(uv[0], uv[1]);
+        }
+        let d = |k: usize| -> [f64; 3] {
+            let h = 1e-6 * (1.0 + uv[k].abs());
+            let (mut a, mut b) = (uv, uv);
+            a[k] -= h;
+            b[k] += h;
+            let (pa, pb) = (self.eval(a), self.eval(b));
+            [
+                (pb[0] - pa[0]) / (2.0 * h),
+                (pb[1] - pa[1]) / (2.0 * h),
+                (pb[2] - pa[2]) / (2.0 * h),
+            ]
+        };
+        (d(0), d(1))
+    }
+
+    /// The unit normal `∂S/∂u × ∂S/∂v / |…|` at `uv`; `None` where the
+    /// surface is degenerate (a pole, an apex).
+    pub(super) fn unit_normal(&self, uv: Uv) -> Option<[f64; 3]> {
+        let (su, sv) = self.partials(uv);
+        let n = cross_raw(su, sv);
+        let len = (n[0] * n[0] + n[1] * n[1] + n[2] * n[2]).sqrt();
+        let scale = (su[0] * su[0] + su[1] * su[1] + su[2] * su[2]).sqrt()
+            * (sv[0] * sv[0] + sv[1] * sv[1] + sv[2] * sv[2]).sqrt();
+        if len > 1e-12 * scale && len > 0.0 {
+            Some([n[0] / len, n[1] / len, n[2] / len])
+        } else {
+            None
+        }
     }
 }
 

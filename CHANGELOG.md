@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- `kernel`: the ISO 10303-42 curve / surface evaluators and the
+  trimmed-face tessellator exposed over neutral data (no IFC entity
+  names) so the STEP AP reader `oxideav-step` shares one engine:
+  `BSplineCurve` / `BSplineSurface` (neutral constructors, lenient merge
+  of repeated knots), `Surface` (plane, cylinder, sphere, torus,
+  B-spline, revolution / linear extrusion of a sampled 3-D curve, and
+  the new **cone** and **offset** surface kinds; `with_chordal_tolerance`
+  / `with_param_steps` density control), `FaceMesher` (shared-vertex
+  shell meshing: planar, trimmed curved and parameter-space faces,
+  T-junction repair on finish) and `triangulate_polygon`. The trimmer
+  now takes its refinement steps from the caller (IFC paths pass the
+  surface default, so IFC output is unchanged).
 - Phase 1: external-mapping (complex entity) instances
   `#id = (A(…) B(…) …);` parse into `ParsedInstance::parts`
   ([`EntityPart`]) instead of being rejected, with `is_complex` /

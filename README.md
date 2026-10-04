@@ -624,6 +624,26 @@ The registry decoder uses the layer too: primitives with no surface
 style fall back to the product's associated material as a named
 `Material` (the basin fixture decodes with `"Ceramic"`).
 
+## Shared ISO 10303-42 kernel
+
+`oxideav_ifc::kernel` exposes the geometry engine over plain data so
+other ISO 10303 readers (the STEP AP203 / AP214 / AP242 reader
+`oxideav-step`) resolve their own entity layouts onto it:
+
+* `BSplineCurve` / `BSplineSurface` — (rational) B-splines from control
+  points + distinct knots + multiplicities.
+* `Surface` — plane, cylinder, cone, sphere, torus, B-spline, surface of
+  revolution / linear extrusion of a sampled 3-D curve, offset surface;
+  `point_at` / `inverse` / `normal_at`; refinement density from
+  `with_chordal_tolerance(tol, max_angle, size_hint)` or explicit
+  `with_param_steps`.
+* `FaceMesher` — shared vertex pool + triangles: `add_planar_face`,
+  `add_surface_face` (boundary loops inverted into parameter space,
+  clipped to the fundamental domain, triangulated and refined),
+  `add_parameter_face`; faces sharing boundary vertex ids come out
+  watertight, `finish` repairs the refinement's T-junctions.
+* `triangulate_polygon` — hole-aware ear clipping in 2-D.
+
 ## Cargo features
 
 * `registry` *(default)* — pulls `oxideav-core` + `oxideav-mesh3d`

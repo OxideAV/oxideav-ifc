@@ -91,6 +91,18 @@
 //!   [`mass_unit_scale`] / [`time_unit_scale`] / [`named_unit_scale`]
 //!   alongside the length / plane-angle scales.
 //!
+//! ## Shared ISO 10303-42 kernel
+//!
+//! [`kernel`] exposes the curve / surface evaluators and the trimmed-
+//! face tessellator behind the IFC geometry over plain data (no IFC
+//! entity names): [`kernel::BSplineCurve`], [`kernel::BSplineSurface`],
+//! [`kernel::Surface`] (plane, cylinder, cone, sphere, torus, B-spline,
+//! revolution, extrusion, offset — with a chordal-tolerance density
+//! option) and [`kernel::FaceMesher`] (shared-vertex shell meshing:
+//! planar faces, trimmed curved faces, parameter-space faces). The STEP
+//! AP203 / AP214 / AP242 reader `oxideav-step` resolves its own entity
+//! layouts onto it.
+//!
 //! ## Standalone build
 //!
 //! The framework deps (`oxideav-core`, `oxideav-mesh3d`) sit behind
@@ -134,6 +146,7 @@ pub use geo::{
     site_geolocation, MapConversion, ProjectedCrs, RigidCoordinateKind, RigidOperation,
     SiteGeolocation,
 };
+pub use geometry::kernel;
 pub use geometry::{
     mesh_boolean, mesh_from_product_shape, mesh_from_shape_representation,
     meshed_items_from_product_shape, placement_transform, tessellate_item, BooleanOperator,

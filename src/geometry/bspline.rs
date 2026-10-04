@@ -399,6 +399,183 @@ impl BSplineCurve {
     }
 }
 
+/// Merge adjacent equal knot values (summing their multiplicities) —
+/// a lenient normalisation for writers that list a repeated knot twice.
+fn merge_equal_knots(knots: &[f64], mults: &[usize]) -> (Vec<f64>, Vec<usize>) {
+    let mut k: Vec<f64> = Vec::with_capacity(knots.len());
+    let mut m: Vec<usize> = Vec::with_capacity(mults.len());
+    for (&kv, &mv) in knots.iter().zip(mults) {
+        match (k.last(), m.last_mut()) {
+            (Some(&last), Some(lm)) if last == kv => *lm = lm.saturating_add(mv),
+            _ => {
+                k.push(kv);
+                m.push(mv);
+            }
+        }
+    }
+    (k, m)
+}
+
+impl BSplineCurve {
+    /// Build from neutral data: `degree`, the control points, optional
+    /// positive weights (one per control point), and the distinct knot
+    /// values with their multiplicities (ISO 10303-42
+    /// `b_spline_curve_with_knots` semantics; equal adjacent knots are
+    /// merged leniently).
+    pub(super) fn from_data(
+        degree: usize,
+        control: &[[f64; 3]],
+        weights: Option<&[f64]>,
+        knots: &[f64],
+        mults: &[usize],
+    ) -> Result<Self, GeometryError> {
+        if !(1..=32).contains(&degree) || control.len() < 2 || control.len() > MAX_CONTROL_POINTS {
+            return Err(GeometryError::BadProfile);
+        }
+        if knots.len() != mults.len() || knots.len() > MAX_CONTROL_POINTS {
+            return Err(GeometryError::BadProfile);
+        }
+        if control.iter().flatten().any(|c| !c.is_finite()) {
+            return Err(GeometryError::BadCoordinate);
+        }
+        let (k, m) = merge_equal_knots(knots, mults);
+        let knots = expand_knots(degree, control.len(), &k, &m)?;
+        let points = homogenise(control, weights)?;
+        Ok(Self {
+            degree,
+            points,
+            knots,
+        })
+    }
+
+    /// A piecewise Bézier curve of `degree` (knots synthesised as in
+    /// ISO 10303-42 `bezier_curve`: one span per `degree` control
+    /// points).
+    pub(super) fn bezier_data(
+        degree: usize,
+        control: &[[f64; 3]],
+        weights: Option<&[f64]>,
+    ) -> Result<Self, GeometryError> {
+        if !(1..=32).contains(&degree) || control.len() < 2 || control.len() > MAX_CONTROL_POINTS {
+            return Err(GeometryError::BadProfile);
+        }
+        let knots = bezier_knots(degree, control.len())?;
+        let points = homogenise(control, weights)?;
+        Ok(Self {
+            degree,
+            points,
+            knots,
+        })
+    }
+
+    /// The curve degree.
+    pub(super) fn degree(&self) -> usize {
+        self.degree
+    }
+
+    /// The distinct knot values inside the parameter domain (span
+    /// boundaries), domain ends included.
+    pub(super) fn breaks(&self) -> Vec<f64> {
+        let n = self.points.len() - 1;
+        let mut out: Vec<f64> = Vec::new();
+        for &k in &self.knots[self.degree..=n + 1] {
+            if !matches!(out.last(), Some(&b) if k <= b) {
+                out.push(k);
+            }
+        }
+        out
+    }
+}
+
+impl BSplineSurface {
+    /// Build from neutral data: degrees, the control net
+    /// (`control[i][j]`, `i` along `u`), optional weights in the same
+    /// shape, the distinct knots + multiplicities per direction, and the
+    /// authored closure flags (ISO 10303-42
+    /// `b_spline_surface_with_knots` semantics).
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn from_data(
+        u_degree: usize,
+        v_degree: usize,
+        control: &[Vec<[f64; 3]>],
+        weights: Option<&[Vec<f64>]>,
+        u_knots: (&[f64], &[usize]),
+        v_knots: (&[f64], &[usize]),
+        u_closed: Option<bool>,
+        v_closed: Option<bool>,
+    ) -> Result<Self, GeometryError> {
+        if !(1..=32).contains(&u_degree) || !(1..=32).contains(&v_degree) {
+            return Err(GeometryError::BadProfile);
+        }
+        if control.len() < 2 || control.len() > MAX_CONTROL_POINTS {
+            return Err(GeometryError::BadProfile);
+        }
+        let v_count = control[0].len();
+        let total = control.iter().map(Vec::len).try_fold(0usize, |a, b| {
+            a.checked_add(b).filter(|&t| t <= MAX_CONTROL_POINTS)
+        });
+        if v_count < 2 || total.is_none() || control.iter().any(|r| r.len() != v_count) {
+            return Err(GeometryError::BadProfile);
+        }
+        if control.iter().flatten().flatten().any(|c| !c.is_finite()) {
+            return Err(GeometryError::BadCoordinate);
+        }
+        if u_knots.0.len() != u_knots.1.len() || v_knots.0.len() != v_knots.1.len() {
+            return Err(GeometryError::BadProfile);
+        }
+        let (uk, um) = merge_equal_knots(u_knots.0, u_knots.1);
+        let (vk, vm) = merge_equal_knots(v_knots.0, v_knots.1);
+        let u_knots = expand_knots(u_degree, control.len(), &uk, &um)?;
+        let v_knots = expand_knots(v_degree, v_count, &vk, &vm)?;
+        if let Some(w) = weights {
+            if w.len() != control.len() {
+                return Err(GeometryError::BadProfile);
+            }
+        }
+        let mut points = Vec::with_capacity(control.len());
+        for (i, row) in control.iter().enumerate() {
+            points.push(homogenise(row, weights.map(|w| w[i].as_slice()))?);
+        }
+        Ok(Self {
+            u_degree,
+            v_degree,
+            points,
+            u_knots,
+            v_knots,
+            u_closed,
+            v_closed,
+        })
+    }
+
+    /// The distinct `u` knots inside the domain (span boundaries).
+    pub(super) fn u_breaks(&self) -> Vec<f64> {
+        let n = self.points.len() - 1;
+        distinct(&self.u_knots[self.u_degree..=n + 1])
+    }
+
+    /// The distinct `v` knots inside the domain (span boundaries).
+    pub(super) fn v_breaks(&self) -> Vec<f64> {
+        let m = self.points[0].len() - 1;
+        distinct(&self.v_knots[self.v_degree..=m + 1])
+    }
+
+    /// The `(u, v)` degrees.
+    pub(super) fn degrees(&self) -> (usize, usize) {
+        (self.u_degree, self.v_degree)
+    }
+}
+
+/// The strictly increasing subsequence of distinct values of `knots`.
+fn distinct(knots: &[f64]) -> Vec<f64> {
+    let mut out: Vec<f64> = Vec::new();
+    for &k in knots {
+        if !matches!(out.last(), Some(&b) if k <= b) {
+            out.push(k);
+        }
+    }
+    out
+}
+
 /// Lift control points to homogeneous coordinates with the optional
 /// weights (`IfcCurveWeightsPositive`: every weight > 0).
 fn homogenise(
