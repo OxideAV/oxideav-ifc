@@ -23,7 +23,7 @@
 //! T web, the L legs) the thickness is taken at the mid-length of the
 //! tapered face and the choice is recorded in the function docs.
 
-use super::{GeometryError, CIRCLE_SEGMENTS};
+use super::{CIRCLE_SEGMENTS, GeometryError};
 use crate::parser::StepFile;
 use crate::value::Value;
 
@@ -224,10 +224,11 @@ fn unit(v: [f64; 2]) -> Result<[f64; 2], GeometryError> {
 }
 
 fn push_unique(out: &mut Vec<[f64; 2]>, p: [f64; 2]) {
-    if let Some(last) = out.last() {
-        if (last[0] - p[0]).abs() < 1e-9 && (last[1] - p[1]).abs() < 1e-9 {
-            return;
-        }
+    if let Some(last) = out.last()
+        && (last[0] - p[0]).abs() < 1e-9
+        && (last[1] - p[1]).abs() < 1e-9
+    {
+        return;
     }
     out.push(p);
 }
@@ -623,8 +624,8 @@ fn trapezium(args: &[Value]) -> Result<Vec<[f64; 2]>, GeometryError> {
 
 #[cfg(test)]
 mod tests {
-    use super::super::{tessellate_item, GeometryError, TriMesh};
-    use crate::parser::{parse_step, StepFile};
+    use super::super::{GeometryError, TriMesh, tessellate_item};
+    use crate::parser::{StepFile, parse_step};
 
     fn parse(data: &str) -> StepFile {
         let text = format!(
@@ -806,10 +807,11 @@ mod tests {
         assert_close(m.signed_volume(), 1216.0, 1e-9);
         assert_centred(&m, 60.0, 100.0);
         // The vertical leg is on the LEFT: material at x=−30..−22 for all y.
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] + 22.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] + 22.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9)
+        );
         // Width omitted → equal legs of Depth.
         let e = extrude("#1=IFCLSHAPEPROFILEDEF(.AREA.,$,$,100.,$,8.,$,$,$);");
         assert_close(e.signed_volume(), 100.0 * 8.0 + 92.0 * 8.0, 1e-9);
@@ -831,15 +833,17 @@ mod tests {
         assert_close(m.signed_volume(), 2040.0, 1e-9);
         assert_centred(&m, 80.0, 120.0);
         // Flange occupies y ∈ [48, 60] across the full width.
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] - 40.0).abs() < 1e-9 && (p[1] - 48.0).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] - 40.0).abs() < 1e-9 && (p[1] - 48.0).abs() < 1e-9)
+        );
         // Web end at y = −60 with x = ±5.
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] - 5.0).abs() < 1e-9 && (p[1] + 60.0).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] - 5.0).abs() < 1e-9 && (p[1] + 60.0).abs() < 1e-9)
+        );
     }
 
     #[test]
@@ -884,10 +888,11 @@ mod tests {
         assert_close(m.signed_volume(), 1304.0, 1e-9);
         assert_centred(&m, 50.0, 100.0);
         // Inner web face at x = −25 + 6 = −19.
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] + 19.0).abs() < 1e-9 && (p[1] - 42.0).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] + 19.0).abs() < 1e-9 && (p[1] - 42.0).abs() < 1e-9)
+        );
         let r = extrude("#1=IFCUSHAPEPROFILEDEF(.AREA.,$,$,100.,50.,6.,8.,3.,2.,$);");
         let k = 1.0 - core::f64::consts::FRAC_PI_4;
         let expect = 1304.0 + 2.0 * k * 9.0 - 2.0 * k * 4.0;
@@ -909,17 +914,20 @@ mod tests {
             .filter(|p| p[2] == 0.0)
             .collect();
         for p in &ring {
-            assert!(ring
-                .iter()
-                .any(|q| (q[0] + p[0]).abs() < 1e-9 && (q[1] + p[1]).abs() < 1e-9));
+            assert!(
+                ring.iter()
+                    .any(|q| (q[0] + p[0]).abs() < 1e-9 && (q[1] + p[1]).abs() < 1e-9)
+            );
         }
         // Lower flange to +x: (37, −50) is a vertex; upper flange to −x.
-        assert!(ring
-            .iter()
-            .any(|p| (p[0] - 37.0).abs() < 1e-9 && (p[1] + 50.0).abs() < 1e-9));
-        assert!(ring
-            .iter()
-            .any(|p| (p[0] + 37.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9));
+        assert!(
+            ring.iter()
+                .any(|p| (p[0] - 37.0).abs() < 1e-9 && (p[1] + 50.0).abs() < 1e-9)
+        );
+        assert!(
+            ring.iter()
+                .any(|p| (p[0] + 37.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9)
+        );
         // tw ≥ b inverts the flanges → rejected.
         let f = parse(
             "#1=IFCZSHAPEPROFILEDEF(.AREA.,$,$,100.,40.,40.,8.,$,$);\n\
@@ -940,10 +948,11 @@ mod tests {
         assert_centred(&m, 50.0, 100.0);
         // Lip free end at y = −50 + 15 = −35 on x ∈ [48 − 2, 25]... i.e.
         // vertices (25, −35) and (23, −35).
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] - 23.0).abs() < 1e-9 && (p[1] + 35.0).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] - 23.0).abs() < 1e-9 && (p[1] + 35.0).abs() < 1e-9)
+        );
         // Internal fillet adds material at four re-entrant corners.
         let r = extrude("#1=IFCCSHAPEPROFILEDEF(.AREA.,$,$,100.,50.,2.,15.,3.);");
         let k = 1.0 - core::f64::consts::FRAC_PI_4;
@@ -985,10 +994,11 @@ mod tests {
         let m = extrude("#1=IFCTRAPEZIUMPROFILEDEF(.AREA.,$,$,3.,2.,1.,0.5);");
         assert_close(m.signed_volume(), 2.5, 1e-9);
         assert_centred(&m, 3.0, 1.0);
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] - 1.0).abs() < 1e-9 && (p[1] - 0.5).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] - 1.0).abs() < 1e-9 && (p[1] - 0.5).abs() < 1e-9)
+        );
         // Negative offset overhangs the bottom; the origin stays on the
         // BottomXDim × YDim rectangle (bbox is NOT re-centred).
         let o = extrude("#1=IFCTRAPEZIUMPROFILEDEF(.AREA.,$,$,3.,2.,1.,-1.);");

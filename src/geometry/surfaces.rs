@@ -14,8 +14,8 @@
 //! centre, and the torus's outward radial from the tube centre circle.
 
 use super::{
-    axis1_placement, axis2_placement_3d, cross_raw, curve_points_2d, dot_raw, normalise,
-    profile_ring, GeometryError, Transform,
+    GeometryError, Transform, axis1_placement, axis2_placement_3d, cross_raw, curve_points_2d,
+    dot_raw, normalise, profile_ring,
 };
 use crate::parser::StepFile;
 use crate::value::Value;
@@ -770,11 +770,7 @@ impl ParamSurface {
                 Some(p) => {
                     let r = x.rem_euclid(p);
                     // A value within tolerance of the period wraps to 0.
-                    if (p - r).abs() < 1e-9 * p {
-                        0.0
-                    } else {
-                        r
-                    }
+                    if (p - r).abs() < 1e-9 * p { 0.0 } else { r }
                 }
                 None => x,
             };

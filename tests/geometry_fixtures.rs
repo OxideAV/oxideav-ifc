@@ -3,8 +3,8 @@
 //! exercise the std-only `geometry` API; no `registry` feature needed.
 
 use oxideav_ifc::{
-    mesh_from_product_shape, parse_step, placement_transform, tessellate_item, GeometryError,
-    TriMesh,
+    GeometryError, TriMesh, mesh_from_product_shape, parse_step, placement_transform,
+    tessellate_item,
 };
 
 const BASIN: &[u8] = include_bytes!("fixtures/ifc4-basin-tessellation.ifc");

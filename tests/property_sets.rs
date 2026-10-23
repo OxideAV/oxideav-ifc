@@ -3,7 +3,7 @@
 //! staged IFC 4 fixtures (buildingSMART Sample-Test-Files, CC-BY 4.0 —
 //! see README "Fixtures").
 
-use oxideav_ifc::{parse_step, Model, PropertyValue};
+use oxideav_ifc::{Model, PropertyValue, parse_step};
 
 const WALL: &[u8] = include_bytes!("fixtures/ifc4-wall-with-opening-and-window.ifc");
 const BASIN: &[u8] = include_bytes!("fixtures/ifc4-basin-tessellation.ifc");

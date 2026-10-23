@@ -8,7 +8,7 @@
 //! registry decode.
 
 use oxideav_ifc::{
-    map_conversion, mesh_from_product_shape, parse_step, placement_transform, TriMesh,
+    TriMesh, map_conversion, mesh_from_product_shape, parse_step, placement_transform,
 };
 
 const MODEL: &str = "ISO-10303-21;
@@ -103,9 +103,10 @@ fn column_with_tapered_u_profile() {
         .filter(|p| (p[2] - 4000.0).abs() < 1e-9)
         .collect();
     assert!(!top.is_empty());
-    assert!(top
-        .iter()
-        .all(|p| p[0].abs() <= 40.0 + 1e-9 && p[1].abs() <= 100.0 + 1e-9));
+    assert!(
+        top.iter()
+            .all(|p| p[0].abs() <= 40.0 + 1e-9 && p[1].abs() <= 100.0 + 1e-9)
+    );
     // The loft's volume lies strictly between the two prisms.
     let k = 1.0 - core::f64::consts::FRAC_PI_4;
     let base = 2.0 * 100.0 * 15.0 + 270.0 * 9.5 + 2.0 * k * 225.0;

@@ -41,7 +41,7 @@
 //! what the author meant.
 
 use super::surfaces::{ParamSurface, Uv};
-use super::{triangulate_profile, GeometryError, ProfileArea, VertexPool};
+use super::{GeometryError, ProfileArea, VertexPool, triangulate_profile};
 use std::collections::HashMap;
 
 /// One loop vertex handed to the trimmer: its mesh vertex and world
@@ -1562,20 +1562,20 @@ fn midpoint(
     let pb = as_pvert(kinds[b as usize], ub);
     // Two parameter images of one mesh vertex (a pole line): the
     // midpoint is that vertex again, so the triangles collapse.
-    if let (PVert::Loop { id: ia, .. }, PVert::Loop { id: ib, .. }) = (&pa, &pb) {
-        if ia == ib {
-            // A point inside the pole line borders no boundary chord.
-            let m = kinds.len() as u32;
-            kinds.push(Local::Loop {
-                id: *ia,
-                prev: *ia,
-                next: *ia,
-            });
-            uvs.push(uv);
-            pos.push(pos[a as usize]);
-            midpoints.insert(key, m);
-            return m;
-        }
+    if let (PVert::Loop { id: ia, .. }, PVert::Loop { id: ib, .. }) = (&pa, &pb)
+        && ia == ib
+    {
+        // A point inside the pole line borders no boundary chord.
+        let m = kinds.len() as u32;
+        kinds.push(Local::Loop {
+            id: *ia,
+            prev: *ia,
+            next: *ia,
+        });
+        uvs.push(uv);
+        pos.push(pos[a as usize]);
+        midpoints.insert(key, m);
+        return m;
     }
     let (kind, p) = match chord_between(&pa, &pb) {
         Some((ca, cb, ta, tb)) => {

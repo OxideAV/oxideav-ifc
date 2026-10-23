@@ -183,7 +183,7 @@ mod profiles;
 mod surfaces;
 mod trim;
 
-pub use csg::{mesh_boolean, BooleanOperator};
+pub use csg::{BooleanOperator, mesh_boolean};
 
 /// A flat, indexed triangle mesh in the local coordinate space of the
 /// representation item it was extracted from.
@@ -4317,17 +4317,16 @@ fn sectioned_spine(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryE
         let frame = axis2_placement_3d(step, pl_id)?;
         let (dist_along, on_spine) = project(frame.translation);
         let rings: Vec<Vec<[f64; 2]>> = area.rings().cloned().collect();
-        if let Some(prev) = authored.last() {
-            if prev.rings.len() != rings.len()
+        if let Some(prev) = authored.last()
+            && (prev.rings.len() != rings.len()
                 || prev
                     .rings
                     .iter()
                     .zip(&rings)
                     .any(|(a, b)| a.len() != b.len())
-                || dist_along <= prev.dist
-            {
-                return Err(GeometryError::BadProfile);
-            }
+                || dist_along <= prev.dist)
+        {
+            return Err(GeometryError::BadProfile);
         }
         authored.push(Station {
             dist: dist_along,
@@ -6941,8 +6940,8 @@ fn edge_run(
                     .iter()
                     .enumerate()
                     .min_by(|a, b| {
-                        dist(a.1 .1, p)
-                            .partial_cmp(&dist(b.1 .1, p))
+                        dist(a.1.1, p)
+                            .partial_cmp(&dist(b.1.1, p))
                             .unwrap_or(core::cmp::Ordering::Equal)
                     })
                     .map_or(0, |(i, _)| i)
@@ -8500,9 +8499,10 @@ mod tests {
         let trimmed = tessellate_item(&f, 12).unwrap();
         assert!((trimmed.signed_volume() - a.signed_volume() / 2.0).abs() < 1e-9);
         let zs: Vec<f64> = trimmed.positions.iter().map(|p| p[2]).collect();
-        assert!(zs
-            .iter()
-            .all(|z| (*z - 2.0).abs() < 1e-9 || (*z - 7.0).abs() < 1e-9));
+        assert!(
+            zs.iter()
+                .all(|z| (*z - 2.0).abs() < 1e-9 || (*z - 7.0).abs() < 1e-9)
+        );
     }
 
     #[test]
@@ -8564,10 +8564,12 @@ mod tests {
         let curved = tessellate_item(&f, 10).unwrap();
         let v = curved.signed_volume();
         assert!(v > 0.0 && v < 12.0, "{v}");
-        assert!(curved
-            .positions
-            .iter()
-            .all(|p| p[0] >= -1e-12 && p[0] <= 4.0 && p[1] >= -1e-12 && p[1] <= 3.0));
+        assert!(
+            curved
+                .positions
+                .iter()
+                .all(|p| p[0] >= -1e-12 && p[0] <= 4.0 && p[1] >= -1e-12 && p[1] <= 3.0)
+        );
     }
 
     #[test]
@@ -9977,9 +9979,10 @@ mod tests {
         let m = tessellate_item(&f, 3).unwrap();
         assert!((m.signed_volume() - 32.0).abs() < 1e-9);
         let xs: Vec<f64> = m.positions.iter().map(|p| p[0]).collect();
-        assert!(xs
-            .iter()
-            .all(|x| (x - 8.0).abs() < 1e-9 || (x - 12.0).abs() < 1e-9));
+        assert!(
+            xs.iter()
+                .all(|x| (x - 8.0).abs() < 1e-9 || (x - 12.0).abs() < 1e-9)
+        );
         // Non-uniform 2-D operator: Scale2 stretches y only.
         let f = parse(
             "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,4.);\n\
@@ -10009,10 +10012,11 @@ mod tests {
             "{}",
             m.signed_volume()
         );
-        assert!(m
-            .positions
-            .iter()
-            .any(|p| (p[0] - 22.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .any(|p| (p[0] - 22.0).abs() < 1e-9 && (p[1] - 50.0).abs() < 1e-9)
+        );
         // A derived profile whose parent is itself is bounded.
         let f = parse(
             "#6=IFCMIRROREDPROFILEDEF(.AREA.,$,#6,*,$);\n\
@@ -10506,10 +10510,11 @@ mod tests {
             "{}",
             m.signed_volume()
         );
-        assert!(m
-            .positions
-            .iter()
-            .all(|p| p[0] >= -1e-9 && p[0] <= 0.5 + 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .all(|p| p[0] >= -1e-9 && p[0] <= 0.5 + 1e-9)
+        );
     }
 
     #[test]
@@ -11111,10 +11116,11 @@ mod tests {
             "{v} vs {analytic}"
         );
         // The sweep stays in the first quadrant (x, y ≥ −r).
-        assert!(m
-            .positions
-            .iter()
-            .all(|p| p[0] >= -1.0 - 1e-9 && p[1] >= -1.0 - 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .all(|p| p[0] >= -1.0 - 1e-9 && p[1] >= -1.0 - 1e-9)
+        );
     }
 
     #[test]
@@ -11165,10 +11171,11 @@ mod tests {
             m.signed_volume()
         );
         // Level sections: the profile height lands on global z.
-        assert!(m
-            .positions
-            .iter()
-            .all(|p| p[2].abs() <= 0.5 + 1e-9 && p[1].abs() <= 1.0 + 1e-9));
+        assert!(
+            m.positions
+                .iter()
+                .all(|p| p[2].abs() <= 0.5 + 1e-9 && p[1].abs() <= 1.0 + 1e-9)
+        );
     }
 
     #[test]

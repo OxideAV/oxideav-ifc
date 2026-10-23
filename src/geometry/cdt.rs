@@ -384,10 +384,10 @@ impl Mesh {
                     if (v[i] == a && v[(i + 1) % 3] == b) || (v[i] == b && v[(i + 1) % 3] == a) {
                         self.con[t as usize][i] = true;
                         let n = self.adj[t as usize][i];
-                        if n != NONE {
-                            if let Some(j) = self.edge_index(n, v[(i + 1) % 3], v[i]) {
-                                self.con[n as usize][j] = true;
-                            }
+                        if n != NONE
+                            && let Some(j) = self.edge_index(n, v[(i + 1) % 3], v[i])
+                        {
+                            self.con[n as usize][j] = true;
                         }
                         return Ok(());
                     }

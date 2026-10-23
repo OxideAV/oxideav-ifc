@@ -4,7 +4,7 @@
 //! exact instance counts, schema identification, and spot-checked
 //! entities.
 
-use oxideav_ifc::{parse_step, probe_step, StepFile, Value};
+use oxideav_ifc::{StepFile, Value, parse_step, probe_step};
 
 const BASIN: &[u8] = include_bytes!("fixtures/ifc4-basin-tessellation.ifc");
 const COLUMN: &[u8] = include_bytes!("fixtures/ifc4-column-straight-rectangle-tessellation.ifc");

@@ -33,8 +33,8 @@
 use super::bspline;
 use super::surfaces::{ElementarySurface, ParamSurface, SurfaceKind};
 use super::{
-    cross_raw, dot_raw, normalise, triangulate_face_3d, triangulate_profile, trim, GeometryError,
-    ProfileArea, Transform, TriMesh, VertexPool,
+    GeometryError, ProfileArea, Transform, TriMesh, VertexPool, cross_raw, dot_raw, normalise,
+    triangulate_face_3d, triangulate_profile, trim,
 };
 
 /// Default angular density: the circle segment count the IFC
@@ -1144,7 +1144,7 @@ mod tests {
                 .triangles
                 .iter()
                 .zip(&tags)
-                .filter(|(_, &g)| g == tag)
+                .filter(|&(_, &g)| g == tag)
                 .map(|(t, _)| {
                     let [a, b, c] = t.map(|i| mesh.positions[i as usize]);
                     let n = cross_raw(

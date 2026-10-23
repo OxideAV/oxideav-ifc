@@ -3,7 +3,7 @@
 //! spatial-structure graph over the five staged IFC 4 fixtures
 //! (buildingSMART Sample-Test-Files, CC-BY 4.0 — see README "Fixtures").
 
-use oxideav_ifc::{parse_step, EntityKind, Model, SpatialKind, TypedEntity};
+use oxideav_ifc::{EntityKind, Model, SpatialKind, TypedEntity, parse_step};
 
 const COLUMN: &[u8] = include_bytes!("fixtures/ifc4-column-straight-rectangle-tessellation.ifc");
 const ITEM: &[u8] = include_bytes!("fixtures/ifc4-tessellated-item.ifc");

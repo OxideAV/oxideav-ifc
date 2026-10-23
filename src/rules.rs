@@ -68,7 +68,7 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
     // Option-valued attributes) inside its own closure, so a missing
     // attribute fails just that rule instead of aborting the walk.
     macro_rules! rule {
-        ($label:expr, $body:expr $(,)?) => {
+        ($label:expr_2021, $body:expr_2021 $(,)?) => {
             check($label, evaluate(|| Some($body)))
         };
     }
@@ -341,7 +341,7 @@ pub fn where_rule_violations(step: &StepFile, id: u64) -> Option<Vec<RuleViolati
                     directrix.map(|d| {
                         d.keyword == "IFCPOLYLINE"
                             || (d.keyword == "IFCINDEXEDPOLYCURVE"
-                                && d.args.get(1).map_or(true, Value::is_unset))
+                                && d.args.get(1).is_none_or(Value::is_unset))
                     }),
                 );
             }

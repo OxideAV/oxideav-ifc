@@ -139,37 +139,37 @@ pub mod decoder;
 
 pub use error::{Error, Result};
 pub use external::{
-    classification_assignment, document_assignment, ClassificationAssignment, DocumentAssignment,
+    ClassificationAssignment, DocumentAssignment, classification_assignment, document_assignment,
 };
 pub use geo::{
+    MapConversion, ProjectedCrs, RigidCoordinateKind, RigidOperation, SiteGeolocation,
     map_conversion, map_conversion_by_id, rigid_operation_by_id, rigid_operations,
-    site_geolocation, MapConversion, ProjectedCrs, RigidCoordinateKind, RigidOperation,
-    SiteGeolocation,
+    site_geolocation,
 };
 pub use geometry::kernel;
 pub use geometry::{
-    mesh_boolean, mesh_from_product_shape, mesh_from_shape_representation,
-    meshed_items_from_product_shape, placement_transform, tessellate_item, BooleanOperator,
-    GeometryError, Transform, TriMesh,
+    BooleanOperator, GeometryError, Transform, TriMesh, mesh_boolean, mesh_from_product_shape,
+    mesh_from_shape_representation, meshed_items_from_product_shape, placement_transform,
+    tessellate_item,
 };
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
-pub use material::{material_assignment, MaterialAssignment};
+pub use material::{MaterialAssignment, material_assignment};
 pub use parser::{
-    parse_step, parse_step_with_limits, probe_step, EntityPart, ParsedInstance, StepFile,
-    StepLimits,
+    EntityPart, ParsedInstance, StepFile, StepLimits, parse_step, parse_step_with_limits,
+    probe_step,
 };
 pub use props::{
-    element_quantity, property_set, ElementQuantity, IfcValue, Property, PropertySet,
-    PropertyValue, Quantity, QuantityValue,
+    ElementQuantity, IfcValue, Property, PropertySet, PropertyValue, Quantity, QuantityValue,
+    element_quantity, property_set,
 };
-pub use rules::{model_where_rule_violations, where_rule_violations, RuleViolation};
+pub use rules::{RuleViolation, model_where_rule_violations, where_rule_violations};
 pub use schema::{
-    area_unit_scale, area_unit_scale_with, length_unit_scale, mass_unit_scale, named_unit_scale,
-    named_unit_scale_with, plane_angle_unit_scale, schema_of, time_unit_scale, volume_unit_scale,
-    volume_unit_scale_with, EntityKind, EntitySchema, Model, PrefixedDerivedUnit, SpatialKind,
-    TypedEntity, UnitScale, SCHEMA,
+    EntityKind, EntitySchema, Model, PrefixedDerivedUnit, SCHEMA, SpatialKind, TypedEntity,
+    UnitScale, area_unit_scale, area_unit_scale_with, length_unit_scale, mass_unit_scale,
+    named_unit_scale, named_unit_scale_with, plane_angle_unit_scale, schema_of, time_unit_scale,
+    volume_unit_scale, volume_unit_scale_with,
 };
 pub use value::Value;
 
 #[cfg(feature = "registry")]
-pub use decoder::{make_decoder, register_mesh3d, IfcDecoder};
+pub use decoder::{IfcDecoder, make_decoder, register_mesh3d};

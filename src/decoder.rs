@@ -28,12 +28,12 @@ use oxideav_mesh3d::{
     Topology,
 };
 
-use crate::geometry::{
-    meshed_items_from_product_shape, placement_transform, GeometryError, TriMesh,
-};
-use crate::parser::{parse_step_with_limits, probe_step, StepFile, StepLimits};
-use crate::value::Value;
 use crate::Error;
+use crate::geometry::{
+    GeometryError, TriMesh, meshed_items_from_product_shape, placement_transform,
+};
+use crate::parser::{StepFile, StepLimits, parse_step_with_limits, probe_step};
+use crate::value::Value;
 
 /// IFC decoder front-end for the OxideAV 3D-format registry.
 #[derive(Debug, Clone, Default)]
@@ -137,17 +137,17 @@ fn build_scene(step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
                 // occurrence-overrides-type): a named, colourless
                 // Material so the substance ("Ceramic") reaches the
                 // scene graph.
-                if mesh.primitives.iter().any(|p| p.material.is_none()) {
-                    if let Some((select_id, name)) = semantic_material_name(step, &model, inst.id) {
-                        let mat_id = *semantic_cache.entry(select_id).or_insert_with(|| {
-                            let mut mat = Material::new();
-                            mat.name = Some(name);
-                            scene.add_material(mat)
-                        });
-                        for prim in mesh.primitives.iter_mut() {
-                            if prim.material.is_none() {
-                                prim.material = Some(mat_id);
-                            }
+                if mesh.primitives.iter().any(|p| p.material.is_none())
+                    && let Some((select_id, name)) = semantic_material_name(step, &model, inst.id)
+                {
+                    let mat_id = *semantic_cache.entry(select_id).or_insert_with(|| {
+                        let mut mat = Material::new();
+                        mat.name = Some(name);
+                        scene.add_material(mat)
+                    });
+                    for prim in mesh.primitives.iter_mut() {
+                        if prim.material.is_none() {
+                            prim.material = Some(mat_id);
                         }
                     }
                 }
@@ -412,10 +412,10 @@ fn shape_node_name(step: &StepFile, shape_id: u64) -> String {
             && inst.args.first().and_then(Value::as_str).is_some()
         {
             // IfcRoot(GlobalId, OwnerHistory, Name, Description).
-            if let Some(name) = inst.args.get(2).and_then(Value::as_str) {
-                if !name.is_empty() {
-                    return name.to_string();
-                }
+            if let Some(name) = inst.args.get(2).and_then(Value::as_str)
+                && !name.is_empty()
+            {
+                return name.to_string();
             }
             return format!("{}#{}", inst.keyword, inst.id);
         }
@@ -440,27 +440,27 @@ fn tri_to_primitive(tri: &TriMesh, step: &StepFile, item_id: u64) -> Primitive {
     let is_triangulated = step
         .get(item_id)
         .is_some_and(|i| i.keyword == "IFCTRIANGULATEDFACESET");
-    if is_triangulated {
-        if let Some((opacity, colours, colour_index)) = indexed_colour_map_of(step, item_id) {
-            let alpha = 1.0f32.min(opacity.unwrap_or(1.0) as f32).max(0.0);
-            let mut positions = Vec::with_capacity(tri.triangles.len() * 3);
-            let mut vert_colours = Vec::with_capacity(tri.triangles.len() * 3);
-            for (face, t) in tri.triangles.iter().enumerate() {
-                let rgb = colour_index
-                    .get(face)
-                    .and_then(|&one_based| colours.get(one_based - 1))
-                    .copied()
-                    .unwrap_or([1.0, 1.0, 1.0]);
-                for &v in t {
-                    let p = tri.positions[v as usize];
-                    positions.push([p[0] as f32, p[1] as f32, p[2] as f32]);
-                    vert_colours.push([rgb[0], rgb[1], rgb[2], alpha]);
-                }
+    if is_triangulated
+        && let Some((opacity, colours, colour_index)) = indexed_colour_map_of(step, item_id)
+    {
+        let alpha = 1.0f32.min(opacity.unwrap_or(1.0) as f32).max(0.0);
+        let mut positions = Vec::with_capacity(tri.triangles.len() * 3);
+        let mut vert_colours = Vec::with_capacity(tri.triangles.len() * 3);
+        for (face, t) in tri.triangles.iter().enumerate() {
+            let rgb = colour_index
+                .get(face)
+                .and_then(|&one_based| colours.get(one_based - 1))
+                .copied()
+                .unwrap_or([1.0, 1.0, 1.0]);
+            for &v in t {
+                let p = tri.positions[v as usize];
+                positions.push([p[0] as f32, p[1] as f32, p[2] as f32]);
+                vert_colours.push([rgb[0], rgb[1], rgb[2], alpha]);
             }
-            prim.positions = positions;
-            prim.colors = vec![vert_colours];
-            return prim;
         }
+        prim.positions = positions;
+        prim.colors = vec![vert_colours];
+        return prim;
     }
 
     prim.positions = tri

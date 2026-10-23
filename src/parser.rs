@@ -151,7 +151,10 @@ impl StepFile {
 
     /// Iterate all instances of one entity keyword
     /// (case-insensitive: `"IfcWall"` matches `IFCWALL` records).
-    pub fn instances_of<'a>(&'a self, keyword: &str) -> impl Iterator<Item = &'a ParsedInstance> {
+    pub fn instances_of<'a>(
+        &'a self,
+        keyword: &str,
+    ) -> impl Iterator<Item = &'a ParsedInstance> + use<'a> {
         let want = keyword.to_ascii_uppercase();
         self.instances
             .values()

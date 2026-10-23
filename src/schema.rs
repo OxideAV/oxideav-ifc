@@ -133,7 +133,7 @@ pub enum SpatialKind {
 const ROOT: &[&str] = &["GlobalId", "OwnerHistory", "Name", "Description"];
 
 macro_rules! chain {
-    ($($seg:expr),+ $(,)?) => {{
+    ($($seg:expr_2021),+ $(,)?) => {{
         // Build a flat &'static [&str] at compile time by const concat.
         const N: usize = 0 $(+ $seg.len())+;
         const A: [&str; N] = {
@@ -2449,7 +2449,7 @@ impl<'a> TypedEntity<'a> {
     /// Iterate `(attribute_name, value)` pairs in serialisation order.
     /// Stops at the shorter of the schema length and the argument count
     /// (so a truncated record yields only the attributes it carries).
-    pub fn attrs(&self) -> impl Iterator<Item = (&'static str, &'a Value)> {
+    pub fn attrs(&self) -> impl Iterator<Item = (&'static str, &'a Value)> + use<'a> {
         self.schema.attrs.iter().copied().zip(self.inst.args.iter())
     }
 
@@ -2693,21 +2693,19 @@ impl<'a> Model<'a> {
                 EntityKind::RelAggregates => {
                     if let (Some(rel), Some(items)) =
                         (view.attr("RelatingObject"), view.attr("RelatedObjects"))
+                        && let Some(parent) = rel.as_reference()
                     {
-                        if let Some(parent) = rel.as_reference() {
-                            let kids = aggregates.entry(parent).or_default();
-                            push_refs(items, kids);
-                        }
+                        let kids = aggregates.entry(parent).or_default();
+                        push_refs(items, kids);
                     }
                 }
                 EntityKind::RelContained => {
                     if let (Some(items), Some(structure)) =
                         (view.attr("RelatedElements"), view.attr("RelatingStructure"))
+                        && let Some(parent) = structure.as_reference()
                     {
-                        if let Some(parent) = structure.as_reference() {
-                            let kids = contains.entry(parent).or_default();
-                            push_refs(items, kids);
-                        }
+                        let kids = contains.entry(parent).or_default();
+                        push_refs(items, kids);
                     }
                 }
                 EntityKind::RelDefinesByProperties => {
@@ -2729,26 +2727,24 @@ impl<'a> Model<'a> {
                 EntityKind::RelDefinesByType => {
                     if let (Some(objects), Some(ty)) =
                         (view.attr("RelatedObjects"), view.attr("RelatingType"))
+                        && let Some(type_id) = ty.as_reference()
                     {
-                        if let Some(type_id) = ty.as_reference() {
-                            let mut object_ids = Vec::new();
-                            push_refs(objects, &mut object_ids);
-                            for object in object_ids {
-                                typed_by.entry(object).or_insert(type_id);
-                            }
+                        let mut object_ids = Vec::new();
+                        push_refs(objects, &mut object_ids);
+                        for object in object_ids {
+                            typed_by.entry(object).or_insert(type_id);
                         }
                     }
                 }
                 EntityKind::RelAssociatesMaterial => {
                     if let (Some(objects), Some(material)) =
                         (view.attr("RelatedObjects"), view.attr("RelatingMaterial"))
+                        && let Some(material_id) = material.as_reference()
                     {
-                        if let Some(material_id) = material.as_reference() {
-                            let mut object_ids = Vec::new();
-                            push_refs(objects, &mut object_ids);
-                            for object in object_ids {
-                                materials.entry(object).or_insert(material_id);
-                            }
+                        let mut object_ids = Vec::new();
+                        push_refs(objects, &mut object_ids);
+                        for object in object_ids {
+                            materials.entry(object).or_insert(material_id);
                         }
                     }
                 }
@@ -2968,12 +2964,12 @@ impl<'a> Model<'a> {
     /// object's (occurrence first, duplicates dropped).
     fn merged_assoc(&self, table: &BTreeMap<u64, Vec<u64>>, id: u64) -> Vec<u64> {
         let mut out: Vec<u64> = table.get(&id).cloned().unwrap_or_default();
-        if let Some(type_id) = self.type_of(id) {
-            if let Some(from_type) = table.get(&type_id) {
-                for target in from_type {
-                    if !out.contains(target) {
-                        out.push(*target);
-                    }
+        if let Some(type_id) = self.type_of(id)
+            && let Some(from_type) = table.get(&type_id)
+        {
+            for target in from_type {
+                if !out.contains(target) {
+                    out.push(*target);
                 }
             }
         }
@@ -3049,14 +3045,14 @@ impl<'a> Model<'a> {
         // HasPropertySets (occurrences cannot be assigned to it — the
         // NoRelatedTypeObject WHERE rule bars direct assignment).
         if self.is_type_object(id) {
-            if let Some(inst) = self.step.get(id) {
-                if let Some(Value::List(sets)) = inst.args.get(5) {
-                    for set in sets {
-                        if let Some(sid) = set.as_reference() {
-                            if !out.contains(&sid) {
-                                out.push(sid);
-                            }
-                        }
+            if let Some(inst) = self.step.get(id)
+                && let Some(Value::List(sets)) = inst.args.get(5)
+            {
+                for set in sets {
+                    if let Some(sid) = set.as_reference()
+                        && !out.contains(&sid)
+                    {
+                        out.push(sid);
                     }
                 }
             }

@@ -1061,8 +1061,8 @@ mod tests {
         // The explicit opt-in reads the prefix on the underlying length
         // (mm² = 10⁻⁶ m², cm³ = 10⁻⁶ m³) and flags the assumption.
         use crate::schema::{
-            area_unit_scale_with, named_unit_scale_with, volume_unit_scale_with,
-            PrefixedDerivedUnit,
+            PrefixedDerivedUnit, area_unit_scale_with, named_unit_scale_with,
+            volume_unit_scale_with,
         };
         let a = area_unit_scale_with(&f, PrefixedDerivedUnit::PrefixScalesLength).unwrap();
         assert!((a.factor - 1e-6).abs() < 1e-18 && a.assumed_prefix_on_length);

@@ -25,7 +25,7 @@
 //! the same density as an `IfcCircle`, and capped in total so a hostile
 //! control net cannot demand an unbounded point run.
 
-use super::{cartesian_point, GeometryError, CIRCLE_SEGMENTS};
+use super::{CIRCLE_SEGMENTS, GeometryError, cartesian_point};
 use crate::parser::StepFile;
 use crate::value::Value;
 
@@ -163,7 +163,7 @@ fn expand_knots(
     }
     let mut out = Vec::with_capacity(sum);
     for (&k, &m) in knots.iter().zip(mults) {
-        out.extend(core::iter::repeat(k).take(m));
+        out.extend(std::iter::repeat_n(k, m));
     }
     Ok(out)
 }
@@ -172,7 +172,7 @@ fn expand_knots(
 /// over `control_count` control points (IFC 2x3 `IfcBezierCurve`): the
 /// control count minus one must be a multiple of the degree.
 fn bezier_knots(degree: usize, control_count: usize) -> Result<Vec<f64>, GeometryError> {
-    if degree < 1 || control_count < degree + 1 || (control_count - 1) % degree != 0 {
+    if degree < 1 || control_count < degree + 1 || !(control_count - 1).is_multiple_of(degree) {
         return Err(GeometryError::BadProfile);
     }
     let spans = (control_count - 1) / degree;
@@ -527,10 +527,10 @@ impl BSplineSurface {
         let (vk, vm) = merge_equal_knots(v_knots.0, v_knots.1);
         let u_knots = expand_knots(u_degree, control.len(), &uk, &um)?;
         let v_knots = expand_knots(v_degree, v_count, &vk, &vm)?;
-        if let Some(w) = weights {
-            if w.len() != control.len() {
-                return Err(GeometryError::BadProfile);
-            }
+        if let Some(w) = weights
+            && w.len() != control.len()
+        {
+            return Err(GeometryError::BadProfile);
         }
         let mut points = Vec::with_capacity(control.len());
         for (i, row) in control.iter().enumerate() {
