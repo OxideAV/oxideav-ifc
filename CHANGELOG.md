@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.3...v0.0.4) - 2026-10-23
+
+### Other
+
+- edition 2024, MSRV 1.95
+- README examples use the current registry API
+
 - edition 2024, MSRV 1.95
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.2...v0.0.3) - 2026-10-04
