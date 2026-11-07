@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.4...v0.0.5) - 2026-11-07
+
+### Other
+
+- API hygiene: #[non_exhaustive] on growable enums + parsed records, constructors / with_* setters
+
 ### Added
 
 - `new(..)` (every field, in declaration order) on the parsed records that have no `Default`: `Classification`, `ClassificationReference`, `DocumentInformation`, `DocumentReference`, `ProjectedCrs`, `MapConversion`, `RigidOperation`, `SiteGeolocation`, `HeaderRecord`, `Material`, `MaterialLayer`, `MaterialLayerSet`, `MaterialProfile`, `MaterialProfileSet`, `MaterialConstituent`, `MaterialConstituentSet`, `EntityPart`, `ParsedInstance`, `Property`, `PropertySet`, `Quantity`, `ElementQuantity`, `RuleViolation`, `EntitySchema`, `UnitScale`.
