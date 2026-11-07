@@ -32,6 +32,7 @@ use crate::value::Value;
 /// A resolved `IfcProjectedCRS` — the projected coordinate reference
 /// system a map conversion targets.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct ProjectedCrs<'a> {
     /// The `#id` of the `IfcProjectedCRS` instance.
     pub id: u64,
@@ -55,9 +56,36 @@ pub struct ProjectedCrs<'a> {
     pub map_unit: Option<u64>,
 }
 
+impl<'a> ProjectedCrs<'a> {
+    /// Build `ProjectedCrs` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        geodetic_datum: Option<&'a str>,
+        vertical_datum: Option<&'a str>,
+        map_projection: Option<&'a str>,
+        map_zone: Option<&'a str>,
+        map_unit: Option<u64>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            geodetic_datum,
+            vertical_datum,
+            map_projection,
+            map_zone,
+            map_unit,
+        }
+    }
+}
+
 /// A resolved `IfcMapConversion` — the engineering-to-map coordinate
 /// operation.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MapConversion<'a> {
     /// The `#id` of the `IfcMapConversion` instance.
     pub id: u64,
@@ -86,6 +114,36 @@ pub struct MapConversion<'a> {
     /// coordinate factors (IFC 4.3), `None` for a plain
     /// `IfcMapConversion`.
     pub factors: Option<[f64; 3]>,
+}
+
+impl<'a> MapConversion<'a> {
+    /// Build `MapConversion` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        source: Option<u64>,
+        target_crs: Option<ProjectedCrs<'a>>,
+        eastings: f64,
+        northings: f64,
+        orthogonal_height: f64,
+        x_axis_abscissa: Option<f64>,
+        x_axis_ordinate: Option<f64>,
+        scale: Option<f64>,
+        factors: Option<[f64; 3]>,
+    ) -> Self {
+        Self {
+            id,
+            source,
+            target_crs,
+            eastings,
+            northings,
+            orthogonal_height,
+            x_axis_abscissa,
+            x_axis_ordinate,
+            scale,
+            factors,
+        }
+    }
 }
 
 impl MapConversion<'_> {
@@ -172,6 +230,7 @@ impl MapConversion<'_> {
 /// `SameCoordinateType` WHERE rule requires both to be lengths or both
 /// plane angles.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum RigidCoordinateKind {
     /// Both coordinates are `IfcLengthMeasure` (a projected source).
     Length,
@@ -187,6 +246,7 @@ pub enum RigidCoordinateKind {
 /// that is a pure translation of the source CRS origin to
 /// (`FirstCoordinate`, `SecondCoordinate`[, `Height`]) in the target.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct RigidOperation<'a> {
     /// The `#id` of the `IfcRigidOperation` instance.
     pub id: u64,
@@ -204,6 +264,32 @@ pub struct RigidOperation<'a> {
     pub height: Option<f64>,
     /// Which measure type the pair was written with.
     pub kind: RigidCoordinateKind,
+}
+
+impl<'a> RigidOperation<'a> {
+    /// Build `RigidOperation` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        source: Option<u64>,
+        target: Option<u64>,
+        target_crs: Option<ProjectedCrs<'a>>,
+        first: f64,
+        second: f64,
+        height: Option<f64>,
+        kind: RigidCoordinateKind,
+    ) -> Self {
+        Self {
+            id,
+            source,
+            target,
+            target_crs,
+            first,
+            second,
+            height,
+            kind,
+        }
+    }
 }
 
 /// Resolve one `IfcRigidOperation` instance.
@@ -348,6 +434,7 @@ pub fn compound_angle_degrees(value: &Value) -> Option<f64> {
 /// degrees (WGS84 per the schema note), plus the optional
 /// `RefElevation` in model length units.
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct SiteGeolocation {
     /// The `#id` of the `IfcSite`.
     pub site: u64,
@@ -357,6 +444,18 @@ pub struct SiteGeolocation {
     pub longitude: f64,
     /// `RefElevation`, when set.
     pub elevation: Option<f64>,
+}
+
+impl SiteGeolocation {
+    /// Build `SiteGeolocation` from every field, in declaration order.
+    pub fn new(site: u64, latitude: f64, longitude: f64, elevation: Option<f64>) -> Self {
+        Self {
+            site,
+            latitude,
+            longitude,
+            elevation,
+        }
+    }
 }
 
 /// The first `IfcSite` carrying both `RefLatitude` and `RefLongitude`,

@@ -42,6 +42,7 @@ use crate::value::Value;
 /// the typed layer cares about; `attrs` are the positional attribute
 /// names matching the wire argument order one-for-one.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct EntitySchema {
     /// Upper-cased entity keyword (`"IFCWALL"`).
     pub keyword: &'static str,
@@ -51,9 +52,21 @@ pub struct EntitySchema {
     pub attrs: &'static [&'static str],
 }
 
+impl EntitySchema {
+    /// Build `EntitySchema` from every field, in declaration order.
+    pub fn new(keyword: &'static str, kind: EntityKind, attrs: &'static [&'static str]) -> Self {
+        Self {
+            keyword,
+            kind,
+            attrs,
+        }
+    }
+}
+
 /// Structural classification of a typed entity — the coarse role the
 /// spatial-model builder routes on.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum EntityKind {
     /// `IfcProject` — the single model root context.
     Project,
@@ -111,6 +124,7 @@ pub enum EntityKind {
 
 /// The four IFC spatial-structure levels.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum SpatialKind {
     /// `IfcSite`.
     Site,
@@ -2087,6 +2101,7 @@ struct UnitDimension {
 /// specification leaves undefined (units digest §2: the conforming
 /// form is an `IfcDerivedUnit` over a prefixed base unit).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
 pub enum PrefixedDerivedUnit {
     /// Resolve to `None` — the only reading that cannot yield a
     /// 1 000× wrong area. The default of every `*_unit_scale` function.
@@ -2103,12 +2118,23 @@ pub enum PrefixedDerivedUnit {
 /// prefixed-derived-unit form was read under
 /// [`PrefixedDerivedUnit::PrefixScalesLength`].
 #[derive(Debug, Clone, Copy, PartialEq)]
+#[non_exhaustive]
 pub struct UnitScale {
     /// Reference units per model unit.
     pub factor: f64,
     /// `true` when the factor rests on the prefix-scales-length
     /// assumption rather than on the specification.
     pub assumed_prefix_on_length: bool,
+}
+
+impl UnitScale {
+    /// Build `UnitScale` from every field, in declaration order.
+    pub fn new(factor: f64, assumed_prefix_on_length: bool) -> Self {
+        Self {
+            factor,
+            assumed_prefix_on_length,
+        }
+    }
 }
 
 const LENGTH_DIMENSION: UnitDimension = UnitDimension {

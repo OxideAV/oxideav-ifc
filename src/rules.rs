@@ -15,6 +15,7 @@ use crate::value::Value;
 
 /// One failed WHERE rule on one instance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct RuleViolation {
     /// The `#id` of the instance.
     pub id: u64,
@@ -22,6 +23,13 @@ pub struct RuleViolation {
     pub entity: String,
     /// The EXPRESS rule label (`ValidFilletRadius`).
     pub rule: &'static str,
+}
+
+impl RuleViolation {
+    /// Build `RuleViolation` from every field, in declaration order.
+    pub fn new(id: u64, entity: String, rule: &'static str) -> Self {
+        Self { id, entity, rule }
+    }
 }
 
 /// Numeric attribute, unwrapping a typed measure wrapper.

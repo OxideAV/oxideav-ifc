@@ -136,6 +136,7 @@ fn opt_str<'a>(entity: &TypedEntity<'a>, name: &str) -> Option<&'a str> {
 /// One property inside an `IfcPropertySet` (or a nested complex
 /// group): the shared `IfcProperty` header plus the subtype payload.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Property<'a> {
     /// The `#id` of the property instance.
     pub id: u64,
@@ -145,6 +146,23 @@ pub struct Property<'a> {
     pub description: Option<&'a str>,
     /// The subtype payload.
     pub value: PropertyValue<'a>,
+}
+
+impl<'a> Property<'a> {
+    /// Build `Property` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        value: PropertyValue<'a>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            value,
+        }
+    }
 }
 
 impl<'a> Property<'a> {
@@ -165,6 +183,7 @@ impl<'a> Property<'a> {
 /// family plus `IfcComplexProperty` (ISO 16739 §8.11: property
 /// resource).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum PropertyValue<'a> {
     /// `IfcPropertySingleValue(NominalValue, Unit)`.
     Single {
@@ -242,6 +261,7 @@ pub enum PropertyValue<'a> {
 /// A resolved `IfcPropertySet`: the `IfcRoot` header plus its named
 /// properties.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct PropertySet<'a> {
     /// The `#id` of the `IfcPropertySet` instance.
     pub id: u64,
@@ -255,6 +275,25 @@ pub struct PropertySet<'a> {
     /// The member properties, in serialisation order. Property names
     /// are unique within the set (`UniquePropertyNames`).
     pub properties: Vec<Property<'a>>,
+}
+
+impl<'a> PropertySet<'a> {
+    /// Build `PropertySet` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        global_id: Option<&'a str>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        properties: Vec<Property<'a>>,
+    ) -> Self {
+        Self {
+            id,
+            global_id,
+            name,
+            description,
+            properties,
+        }
+    }
 }
 
 impl<'a> PropertySet<'a> {
@@ -369,6 +408,7 @@ fn resolve_property(step: &StepFile, id: u64, depth: usize) -> Option<Property<'
 /// `IfcPhysicalSimpleQuantity` family plus
 /// `IfcPhysicalComplexQuantity` groups.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum QuantityValue<'a> {
     /// `IfcQuantityLength.LengthValue` (model length unit unless the
     /// quantity carries a `Unit` override).
@@ -402,6 +442,7 @@ pub enum QuantityValue<'a> {
 /// One quantity inside an `IfcElementQuantity`: the shared
 /// `IfcPhysicalQuantity` header plus the measured payload.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct Quantity<'a> {
     /// The `#id` of the quantity instance.
     pub id: u64,
@@ -417,6 +458,27 @@ pub struct Quantity<'a> {
     pub formula: Option<&'a str>,
     /// The measured payload.
     pub value: QuantityValue<'a>,
+}
+
+impl<'a> Quantity<'a> {
+    /// Build `Quantity` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        unit: Option<u64>,
+        formula: Option<&'a str>,
+        value: QuantityValue<'a>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            unit,
+            formula,
+            value,
+        }
+    }
 }
 
 impl Quantity<'_> {
@@ -487,6 +549,7 @@ impl Quantity<'_> {
 /// A resolved `IfcElementQuantity`: the `IfcRoot` header plus its
 /// measured quantities.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ElementQuantity<'a> {
     /// The `#id` of the `IfcElementQuantity` instance.
     pub id: u64,
@@ -501,6 +564,27 @@ pub struct ElementQuantity<'a> {
     /// The member quantities, in serialisation order. Quantity names
     /// are unique within the set (`UniqueQuantityNames`).
     pub quantities: Vec<Quantity<'a>>,
+}
+
+impl<'a> ElementQuantity<'a> {
+    /// Build `ElementQuantity` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        global_id: Option<&'a str>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        method_of_measurement: Option<&'a str>,
+        quantities: Vec<Quantity<'a>>,
+    ) -> Self {
+        Self {
+            id,
+            global_id,
+            name,
+            description,
+            method_of_measurement,
+            quantities,
+        }
+    }
 }
 
 impl<'a> ElementQuantity<'a> {

@@ -20,6 +20,7 @@ use crate::value::Value;
 
 /// A plain `IfcMaterial`: the named homogeneous substance.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Material<'a> {
     /// The `#id` of the `IfcMaterial` instance.
     pub id: u64,
@@ -31,8 +32,26 @@ pub struct Material<'a> {
     pub category: Option<&'a str>,
 }
 
+impl<'a> Material<'a> {
+    /// Build `Material` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        category: Option<&'a str>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            category,
+        }
+    }
+}
+
 /// One `IfcMaterialLayer` of a layer set.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MaterialLayer<'a> {
     /// The `#id` of the layer instance.
     pub id: u64,
@@ -55,8 +74,35 @@ pub struct MaterialLayer<'a> {
     pub priority: Option<i64>,
 }
 
+impl<'a> MaterialLayer<'a> {
+    /// Build `MaterialLayer` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        material: Option<Material<'a>>,
+        thickness: f64,
+        is_ventilated: Option<bool>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        category: Option<&'a str>,
+        priority: Option<i64>,
+    ) -> Self {
+        Self {
+            id,
+            material,
+            thickness,
+            is_ventilated,
+            name,
+            description,
+            category,
+            priority,
+        }
+    }
+}
+
 /// An `IfcMaterialLayerSet`: ordered layers through the element.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MaterialLayerSet<'a> {
     /// The `#id` of the layer-set instance.
     pub id: u64,
@@ -66,6 +112,23 @@ pub struct MaterialLayerSet<'a> {
     pub description: Option<&'a str>,
     /// The layers, in the set's list order.
     pub layers: Vec<MaterialLayer<'a>>,
+}
+
+impl<'a> MaterialLayerSet<'a> {
+    /// Build `MaterialLayerSet` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        layers: Vec<MaterialLayer<'a>>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            layers,
+        }
+    }
 }
 
 impl MaterialLayerSet<'_> {
@@ -79,6 +142,7 @@ impl MaterialLayerSet<'_> {
 
 /// One `IfcMaterialProfile` of a profile set.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MaterialProfile<'a> {
     /// The `#id` of the material-profile instance.
     pub id: u64,
@@ -97,9 +161,33 @@ pub struct MaterialProfile<'a> {
     pub category: Option<&'a str>,
 }
 
+impl<'a> MaterialProfile<'a> {
+    /// Build `MaterialProfile` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        material: Option<Material<'a>>,
+        profile: Option<u64>,
+        priority: Option<i64>,
+        category: Option<&'a str>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            material,
+            profile,
+            priority,
+            category,
+        }
+    }
+}
+
 /// An `IfcMaterialProfileSet`: the cross-section make-up of a
 /// parametric member (beam / column).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct MaterialProfileSet<'a> {
     /// The `#id` of the profile-set instance.
     pub id: u64,
@@ -114,8 +202,28 @@ pub struct MaterialProfileSet<'a> {
     pub composite_profile: Option<u64>,
 }
 
+impl<'a> MaterialProfileSet<'a> {
+    /// Build `MaterialProfileSet` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        profiles: Vec<MaterialProfile<'a>>,
+        composite_profile: Option<u64>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            profiles,
+            composite_profile,
+        }
+    }
+}
+
 /// One `IfcMaterialConstituent` of a constituent set.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MaterialConstituent<'a> {
     /// The `#id` of the constituent instance.
     pub id: u64,
@@ -131,9 +239,31 @@ pub struct MaterialConstituent<'a> {
     pub category: Option<&'a str>,
 }
 
+impl<'a> MaterialConstituent<'a> {
+    /// Build `MaterialConstituent` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        material: Option<Material<'a>>,
+        fraction: Option<f64>,
+        category: Option<&'a str>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            material,
+            fraction,
+            category,
+        }
+    }
+}
+
 /// An `IfcMaterialConstituentSet`: named parts with distinct
 /// materials (window frame vs glazing).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct MaterialConstituentSet<'a> {
     /// The `#id` of the constituent-set instance.
     pub id: u64,
@@ -145,9 +275,27 @@ pub struct MaterialConstituentSet<'a> {
     pub constituents: Vec<MaterialConstituent<'a>>,
 }
 
+impl<'a> MaterialConstituentSet<'a> {
+    /// Build `MaterialConstituentSet` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        constituents: Vec<MaterialConstituent<'a>>,
+    ) -> Self {
+        Self {
+            id,
+            name,
+            description,
+            constituents,
+        }
+    }
+}
+
 /// A resolved `IfcMaterialSelect` — what an
 /// `IfcRelAssociatesMaterial` assigned to an object.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum MaterialAssignment<'a> {
     /// A single `IfcMaterial`.
     Material(Material<'a>),

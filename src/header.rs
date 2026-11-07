@@ -10,6 +10,7 @@ use crate::value::Value;
 
 /// One raw header record (`KEYWORD(args);` — no `#id`).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct HeaderRecord {
     /// Upper-cased keyword, e.g. `FILE_NAME`.
     pub keyword: String,
@@ -17,8 +18,16 @@ pub struct HeaderRecord {
     pub args: Vec<Value>,
 }
 
+impl HeaderRecord {
+    /// Build `HeaderRecord` from every field, in declaration order.
+    pub fn new(keyword: String, args: Vec<Value>) -> Self {
+        Self { keyword, args }
+    }
+}
+
 /// `FILE_DESCRIPTION` — informal description + implementation level.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct FileDescription {
     /// Free-text description lines (often the ViewDefinition tag).
     pub description: Vec<String>,
@@ -27,8 +36,25 @@ pub struct FileDescription {
     pub implementation_level: String,
 }
 
+impl FileDescription {
+    /// Set `description`.
+    #[must_use]
+    pub fn with_description(mut self, description: Vec<String>) -> Self {
+        self.description = description;
+        self
+    }
+
+    /// Set `implementation_level`.
+    #[must_use]
+    pub fn with_implementation_level(mut self, implementation_level: String) -> Self {
+        self.implementation_level = implementation_level;
+        self
+    }
+}
+
 /// `FILE_NAME` — provenance of the exchange structure.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct FileName {
     /// Name of the exchange structure (usually the file name).
     pub name: String,
@@ -46,8 +72,60 @@ pub struct FileName {
     pub authorization: String,
 }
 
+impl FileName {
+    /// Set `name`.
+    #[must_use]
+    pub fn with_name(mut self, name: String) -> Self {
+        self.name = name;
+        self
+    }
+
+    /// Set `time_stamp`.
+    #[must_use]
+    pub fn with_time_stamp(mut self, time_stamp: String) -> Self {
+        self.time_stamp = time_stamp;
+        self
+    }
+
+    /// Set `author`.
+    #[must_use]
+    pub fn with_author(mut self, author: Vec<String>) -> Self {
+        self.author = author;
+        self
+    }
+
+    /// Set `organization`.
+    #[must_use]
+    pub fn with_organization(mut self, organization: Vec<String>) -> Self {
+        self.organization = organization;
+        self
+    }
+
+    /// Set `preprocessor_version`.
+    #[must_use]
+    pub fn with_preprocessor_version(mut self, preprocessor_version: String) -> Self {
+        self.preprocessor_version = preprocessor_version;
+        self
+    }
+
+    /// Set `originating_system`.
+    #[must_use]
+    pub fn with_originating_system(mut self, originating_system: String) -> Self {
+        self.originating_system = originating_system;
+        self
+    }
+
+    /// Set `authorization`.
+    #[must_use]
+    pub fn with_authorization(mut self, authorization: String) -> Self {
+        self.authorization = authorization;
+        self
+    }
+}
+
 /// Parsed HEADER section.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct Header {
     /// Typed `FILE_DESCRIPTION` record.
     pub file_description: FileDescription,
@@ -58,6 +136,36 @@ pub struct Header {
     /// Every raw header record in file order (the three mandatory
     /// ones included), so optional records stay accessible.
     pub records: Vec<HeaderRecord>,
+}
+
+impl Header {
+    /// Set `file_description`.
+    #[must_use]
+    pub fn with_file_description(mut self, file_description: FileDescription) -> Self {
+        self.file_description = file_description;
+        self
+    }
+
+    /// Set `file_name`.
+    #[must_use]
+    pub fn with_file_name(mut self, file_name: FileName) -> Self {
+        self.file_name = file_name;
+        self
+    }
+
+    /// Set `file_schema`.
+    #[must_use]
+    pub fn with_file_schema(mut self, file_schema: Vec<String>) -> Self {
+        self.file_schema = file_schema;
+        self
+    }
+
+    /// Set `records`.
+    #[must_use]
+    pub fn with_records(mut self, records: Vec<HeaderRecord>) -> Self {
+        self.records = records;
+        self
+    }
 }
 
 /// `$`-tolerant string extraction (`$` ↦ empty string).

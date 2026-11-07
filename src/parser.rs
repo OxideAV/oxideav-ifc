@@ -22,6 +22,7 @@ use crate::value::Value;
 /// DoS-hardening caps applied while parsing. All caps reject the
 /// input with [`Error::LimitExceeded`] when crossed.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct StepLimits {
     /// Maximum accepted input size in bytes.
     pub max_input_len: usize,
@@ -32,6 +33,36 @@ pub struct StepLimits {
     pub max_depth: usize,
     /// Maximum decoded length of a single string or binary literal.
     pub max_string_len: usize,
+}
+
+impl StepLimits {
+    /// Set `max_input_len`.
+    #[must_use]
+    pub fn with_max_input_len(mut self, max_input_len: usize) -> Self {
+        self.max_input_len = max_input_len;
+        self
+    }
+
+    /// Set `max_instances`.
+    #[must_use]
+    pub fn with_max_instances(mut self, max_instances: usize) -> Self {
+        self.max_instances = max_instances;
+        self
+    }
+
+    /// Set `max_depth`.
+    #[must_use]
+    pub fn with_max_depth(mut self, max_depth: usize) -> Self {
+        self.max_depth = max_depth;
+        self
+    }
+
+    /// Set `max_string_len`.
+    #[must_use]
+    pub fn with_max_string_len(mut self, max_string_len: usize) -> Self {
+        self.max_string_len = max_string_len;
+        self
+    }
 }
 
 impl Default for StepLimits {
@@ -50,6 +81,7 @@ impl Default for StepLimits {
 /// One partial entity record of a complex (external-mapping)
 /// instance: `KEYWORD(args)` inside `#id = ( … );`.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct EntityPart {
     /// Upper-cased keyword of this partial entity, e.g. `SI_UNIT`.
     pub keyword: String,
@@ -58,11 +90,19 @@ pub struct EntityPart {
     pub args: Vec<Value>,
 }
 
+impl EntityPart {
+    /// Build `EntityPart` from every field, in declaration order.
+    pub fn new(keyword: String, args: Vec<Value>) -> Self {
+        Self { keyword, args }
+    }
+}
+
 /// One DATA-section instance record: `#id = KEYWORD(args);` (internal
 /// mapping) or `#id = (A(…) B(…) …);` (external mapping, ISO 10303-21
 /// §12.2.5 — the complex-entity form STEP application protocols use for
 /// e.g. `(LENGTH_UNIT() NAMED_UNIT(*) SI_UNIT(.MILLI.,.METRE.))`).
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ParsedInstance {
     /// The `#id` instance name (unique per file).
     pub id: u64,
@@ -77,6 +117,18 @@ pub struct ParsedInstance {
     /// The partial entity records of a complex instance, in file order;
     /// empty for an ordinary (internal-mapping) instance.
     pub parts: Vec<EntityPart>,
+}
+
+impl ParsedInstance {
+    /// Build `ParsedInstance` from every field, in declaration order.
+    pub fn new(id: u64, keyword: String, args: Vec<Value>, parts: Vec<EntityPart>) -> Self {
+        Self {
+            id,
+            keyword,
+            args,
+            parts,
+        }
+    }
 }
 
 impl ParsedInstance {
@@ -119,12 +171,29 @@ impl ParsedInstance {
 
 /// A fully parsed STEP physical file.
 #[derive(Debug, Clone, PartialEq, Default)]
+#[non_exhaustive]
 pub struct StepFile {
     /// Typed + raw HEADER section.
     pub header: Header,
     /// Instance graph, keyed by `#id` (sorted map so iteration order
     /// is deterministic).
     pub instances: BTreeMap<u64, ParsedInstance>,
+}
+
+impl StepFile {
+    /// Set `header`.
+    #[must_use]
+    pub fn with_header(mut self, header: Header) -> Self {
+        self.header = header;
+        self
+    }
+
+    /// Set `instances`.
+    #[must_use]
+    pub fn with_instances(mut self, instances: BTreeMap<u64, ParsedInstance>) -> Self {
+        self.instances = instances;
+        self
+    }
 }
 
 impl StepFile {

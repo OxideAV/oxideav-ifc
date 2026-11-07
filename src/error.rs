@@ -8,6 +8,7 @@ use std::fmt;
 
 /// Errors produced while parsing a STEP physical file (ISO 10303-21).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// Lexical or syntactic violation of the ISO 10303-21 grammar.
     /// `line` / `column` are 1-based and point at the offending token.

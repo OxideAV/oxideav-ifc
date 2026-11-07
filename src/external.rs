@@ -28,6 +28,7 @@ const MAX_CHAIN_DEPTH: usize = 16;
 /// An `IfcClassification` — the root of an external classification
 /// system.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct Classification<'a> {
     /// The `#id` of the `IfcClassification` instance.
     pub id: u64,
@@ -45,9 +46,33 @@ pub struct Classification<'a> {
     pub location: Option<&'a str>,
 }
 
+impl<'a> Classification<'a> {
+    /// Build `Classification` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        source: Option<&'a str>,
+        edition: Option<&'a str>,
+        edition_date: Option<&'a str>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        location: Option<&'a str>,
+    ) -> Self {
+        Self {
+            id,
+            source,
+            edition,
+            edition_date,
+            name,
+            description,
+            location,
+        }
+    }
+}
+
 /// An `IfcClassificationReference` — one entry (code) of a
 /// classification system.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub struct ClassificationReference<'a> {
     /// The `#id` of the reference instance.
     pub id: u64,
@@ -68,6 +93,29 @@ pub struct ClassificationReference<'a> {
 }
 
 impl<'a> ClassificationReference<'a> {
+    /// Build `ClassificationReference` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        location: Option<&'a str>,
+        identification: Option<&'a str>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        sort: Option<&'a str>,
+        source: Option<Box<ClassificationParent<'a>>>,
+    ) -> Self {
+        Self {
+            id,
+            location,
+            identification,
+            name,
+            description,
+            sort,
+            source,
+        }
+    }
+}
+
+impl<'a> ClassificationReference<'a> {
     /// The classification system at the root of the
     /// `ReferencedSource` chain, when reachable.
     pub fn system(&self) -> Option<&Classification<'a>> {
@@ -80,6 +128,7 @@ impl<'a> ClassificationReference<'a> {
 
 /// The `ReferencedSource` of a classification reference.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ClassificationParent<'a> {
     /// The classification system root.
     Classification(Classification<'a>),
@@ -90,6 +139,7 @@ pub enum ClassificationParent<'a> {
 /// A resolved `IfcClassificationSelect` — what an
 /// `IfcRelAssociatesClassification` assigned.
 #[derive(Debug, Clone, PartialEq)]
+#[non_exhaustive]
 pub enum ClassificationAssignment<'a> {
     /// The whole system was associated.
     Classification(Classification<'a>),
@@ -111,6 +161,7 @@ impl<'a> ClassificationAssignment<'a> {
 /// `IfcDocumentInformation` metadata (the identifying subset —
 /// actors and validity dates stay accessible positionally).
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DocumentInformation<'a> {
     /// The `#id` of the information instance.
     pub id: u64,
@@ -134,8 +185,39 @@ pub struct DocumentInformation<'a> {
     pub status: Option<&'a str>,
 }
 
+impl<'a> DocumentInformation<'a> {
+    /// Build `DocumentInformation` from every field, in declaration order.
+    #[allow(clippy::too_many_arguments)]
+    pub fn new(
+        id: u64,
+        identification: Option<&'a str>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        location: Option<&'a str>,
+        purpose: Option<&'a str>,
+        revision: Option<&'a str>,
+        electronic_format: Option<&'a str>,
+        confidentiality: Option<&'a str>,
+        status: Option<&'a str>,
+    ) -> Self {
+        Self {
+            id,
+            identification,
+            name,
+            description,
+            location,
+            purpose,
+            revision,
+            electronic_format,
+            confidentiality,
+            status,
+        }
+    }
+}
+
 /// An `IfcDocumentReference` — a pointer into (a part of) a document.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct DocumentReference<'a> {
     /// The `#id` of the reference instance.
     pub id: u64,
@@ -151,9 +233,31 @@ pub struct DocumentReference<'a> {
     pub document: Option<DocumentInformation<'a>>,
 }
 
+impl<'a> DocumentReference<'a> {
+    /// Build `DocumentReference` from every field, in declaration order.
+    pub fn new(
+        id: u64,
+        location: Option<&'a str>,
+        identification: Option<&'a str>,
+        name: Option<&'a str>,
+        description: Option<&'a str>,
+        document: Option<DocumentInformation<'a>>,
+    ) -> Self {
+        Self {
+            id,
+            location,
+            identification,
+            name,
+            description,
+            document,
+        }
+    }
+}
+
 /// A resolved `IfcDocumentSelect` — what an
 /// `IfcRelAssociatesDocument` assigned.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum DocumentAssignment<'a> {
     /// Bare document metadata.
     Information(DocumentInformation<'a>),

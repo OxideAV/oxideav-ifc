@@ -4,6 +4,15 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+### Added
+
+- `new(..)` (every field, in declaration order) on the parsed records that have no `Default`: `Classification`, `ClassificationReference`, `DocumentInformation`, `DocumentReference`, `ProjectedCrs`, `MapConversion`, `RigidOperation`, `SiteGeolocation`, `HeaderRecord`, `Material`, `MaterialLayer`, `MaterialLayerSet`, `MaterialProfile`, `MaterialProfileSet`, `MaterialConstituent`, `MaterialConstituentSet`, `EntityPart`, `ParsedInstance`, `Property`, `PropertySet`, `Quantity`, `ElementQuantity`, `RuleViolation`, `EntitySchema`, `UnitScale`.
+- `with_<field>` setters on the `Default`-able records `StepLimits`, `StepFile`, `Header`, `FileDescription`, `FileName`.
+
+### Changed
+
+- `#[non_exhaustive]` on the growable enums `Error`, `ClassificationParent`, `ClassificationAssignment`, `DocumentAssignment`, `MaterialAssignment`, `PropertyValue`, `QuantityValue`, `EntityKind`, `SpatialKind`, `RigidCoordinateKind`, `PrefixedDerivedUnit`, and on every record listed under Added. `Value` (the ISO 10303-21 parameter grammar) and `BooleanOperator` (union / intersection / difference) stay exhaustive; `Transform` and `TriMesh` stay plain value types. `GeometryError` stays exhaustive for now because a sibling matches it exhaustively.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.3...v0.0.4) - 2026-10-23
 
 ### Other

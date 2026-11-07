@@ -10,12 +10,11 @@ use libfuzzer_sys::fuzz_target;
 use oxideav_ifc::{parse_step_with_limits, tessellate_item, StepLimits};
 
 fuzz_target!(|data: &[u8]| {
-    let limits = StepLimits {
-        max_input_len: 64 * 1024,
-        max_instances: 4096,
-        max_depth: 16,
-        max_string_len: 1024,
-    };
+    let limits = StepLimits::default()
+        .with_max_input_len(64 * 1024)
+        .with_max_instances(4096)
+        .with_max_depth(16)
+        .with_max_string_len(1024);
     let Ok(step) = parse_step_with_limits(data, &limits) else {
         return;
     };
