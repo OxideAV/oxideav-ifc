@@ -28,6 +28,8 @@ fn guid(n: u64) -> String {
 
 /// Generate the model text. `products` mapped proxies; walls with
 /// openings are added at one per thousand products (at least one).
+// Shared source: the tests call this form, the example the other.
+#[allow(dead_code)]
 pub fn synthetic_model(products: usize) -> String {
     synthetic_model_with(products, true)
 }
@@ -35,7 +37,6 @@ pub fn synthetic_model(products: usize) -> String {
 /// [`synthetic_model`] with a choice of sharing: `shared` FALSE gives
 /// every product a filleted I-section extrusion of its own (nothing to
 /// instance — the per-item tessellation cost in isolation).
-#[allow(dead_code)]
 pub fn synthetic_model_with(products: usize, shared: bool) -> String {
     let mut s = String::with_capacity(products * 420 + 16_384);
     s.push_str(
