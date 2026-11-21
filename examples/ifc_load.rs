@@ -22,6 +22,8 @@ fn main() {
     let mut instancing = false;
     let mut openings = true;
     let mut parse_only = false;
+    let mut curves = false;
+    let mut item: Option<u64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
         match a.as_str() {
@@ -31,6 +33,8 @@ fn main() {
             "--instancing" => instancing = true,
             "--keep-openings" => openings = false,
             "--parse-only" => parse_only = true,
+            "--curves" => curves = true,
+            "--item" => item = args.next().and_then(|v| v.parse().ok()),
             other => path = Some(other.to_string()),
         }
     }
@@ -44,7 +48,7 @@ fn main() {
         _ => {
             eprintln!(
                 "usage: ifc_load (<file.ifc> | --synthetic <products> | --boolean <segments>) \
-                 [--threads <n>] [--instancing] [--keep-openings] [--parse-only]"
+                 [--threads <n>] [--instancing] [--keep-openings] [--curves] [--parse-only] [--item <id>]"
             );
             std::process::exit(2);
         }
@@ -62,10 +66,25 @@ fn main() {
     if parse_only {
         return;
     }
+    if let Some(id) = item {
+        // One representation item on its own.
+        match oxideav_ifc::tessellate_item(&step, id) {
+            Ok(mesh) => println!(
+                "item #{id}: {} triangles, {} vertices, volume {:.6e}, closed: {}",
+                mesh.triangle_count(),
+                mesh.vertex_count(),
+                mesh.signed_volume(),
+                oxideav_ifc::is_closed_mesh(&mesh)
+            ),
+            Err(e) => println!("item #{id}: {e:?}"),
+        }
+        return;
+    }
     let decoder = IfcDecoder::new()
         .with_threads(threads)
         .with_instancing(instancing)
-        .with_opening_subtraction(openings);
+        .with_opening_subtraction(openings)
+        .with_curves(curves);
     let t = Instant::now();
     match decoder.decode_step(&step) {
         Ok(scene) => {

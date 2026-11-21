@@ -50,8 +50,8 @@ use oxideav_mesh3d::{
 use crate::Error;
 use crate::geometry::session::{Session, Shared};
 use crate::geometry::{
-    BooleanOperator, Transform, TriMesh, is_closed_mesh, mapped_item_transform, mesh_boolean,
-    placement_transform, tessellate_item, tessellated_face_indices,
+    BooleanOperator, Transform, TriMesh, curve_points, is_closed_mesh, mapped_item_transform,
+    mesh_boolean, placement_transform, tessellate_item, tessellated_face_indices,
 };
 use crate::parser::{ParsedInstance, StepFile, StepLimits, parse_step_with_limits, probe_step};
 use crate::schema::Model;
@@ -64,6 +64,7 @@ pub struct IfcDecoder {
     threads: usize,
     instancing: bool,
     subtract_openings: bool,
+    curves: bool,
 }
 
 impl Default for IfcDecoder {
@@ -73,6 +74,7 @@ impl Default for IfcDecoder {
             threads: 1,
             instancing: false,
             subtract_openings: true,
+            curves: false,
         }
     }
 }
@@ -133,6 +135,16 @@ impl IfcDecoder {
         self
     }
 
+    /// Draw curve items as line strips (default off): the axis and
+    /// footprint curves of products, the members of geometric curve
+    /// sets, alignment curves. Products represented only by curves —
+    /// an alignment — then appear in the scene.
+    #[must_use]
+    pub fn with_curves(mut self, curves: bool) -> Self {
+        self.curves = curves;
+        self
+    }
+
     /// Build the scene of an already parsed exchange structure.
     pub fn decode_step(&self, step: &StepFile) -> oxideav_mesh3d::Result<Scene3D> {
         build_scene(step, self)
@@ -157,6 +169,10 @@ impl Mesh3DDecoder for IfcDecoder {
 /// Deepest `IfcMappedItem` nesting the flattening follows.
 const MAX_MAPPED_DEPTH: usize = 64;
 
+/// Most items one product shape may flatten to (nested mapped items
+/// multiply; a hostile file must not make them explode).
+const MAX_SHAPE_ITEMS: usize = 1 << 16;
+
 /// Deepest ancestor chain followed when hanging a node in the tree.
 const MAX_TREE_DEPTH: usize = 256;
 
@@ -173,6 +189,8 @@ struct Index {
     colour_map: HashMap<u64, u64>,
     /// `IfcMaterial` → its `IfcMaterialDefinitionRepresentation`.
     material_representation: HashMap<u64, u64>,
+    /// Curves are drawn: geometric sets are opened into their members.
+    open_sets: bool,
 }
 
 impl Index {
@@ -294,9 +312,45 @@ fn plan_item(
     depth: usize,
     leaves: &mut Vec<Leaf>,
 ) {
+    if leaves.len() >= MAX_SHAPE_ITEMS {
+        return;
+    }
     let Some(inst) = step.get(id) else {
         return;
     };
+    if index.open_sets
+        && matches!(
+            inst.keyword.as_str(),
+            "IFCGEOMETRICSET" | "IFCGEOMETRICCURVESET"
+        )
+        && depth < MAX_MAPPED_DEPTH
+    {
+        // IfcGeometricSet(Elements): each member is drawn by itself.
+        for element in inst.args.first().and_then(Value::as_list).unwrap_or(&[]) {
+            // Members are points, curves and surfaces — never sets or
+            // mapped items, so this does not nest.
+            if let Some(member) = element.as_reference()
+                && step.get(member).is_some_and(|m| {
+                    !matches!(
+                        m.keyword.as_str(),
+                        "IFCGEOMETRICSET" | "IFCGEOMETRICCURVESET" | "IFCMAPPEDITEM"
+                    )
+                })
+            {
+                plan_item(
+                    step,
+                    index,
+                    member,
+                    xform,
+                    inherited_style,
+                    fallback,
+                    depth + 1,
+                    leaves,
+                );
+            }
+        }
+        return;
+    }
     if inst.keyword != "IFCMAPPEDITEM" {
         leaves.push(Leaf {
             item: id,
@@ -854,7 +908,8 @@ fn build_scene(step: &StepFile, options: &IfcDecoder) -> oxideav_mesh3d::Result<
     let session = Session::enter(step);
     let shared = session.shared();
     let model = Model::from_step(step);
-    let index = Index::build(step);
+    let mut index = Index::build(step);
+    index.open_sets = options.curves;
 
     // ---- Plan: flatten every product shape to its items. ------------
     let plans: Vec<ShapePlan> = step
@@ -890,6 +945,25 @@ fn build_scene(step: &StepFile, options: &IfcDecoder) -> oxideav_mesh3d::Result<
         },
     );
     let mesh_of = |leaf: &Leaf| meshes[slot_of[&leaf.item]].as_ref().ok();
+    // Items that are curves, sampled when curves are drawn.
+    let polylines: Vec<Option<Arc<Vec<[f64; 3]>>>> = if options.curves {
+        let pending: Vec<(usize, u64)> = distinct
+            .iter()
+            .enumerate()
+            .filter(|(slot, _)| matches!(meshes[*slot], Err(Some(_))))
+            .map(|(slot, &id)| (slot, id))
+            .collect();
+        let sampled = parallel_map(options.threads, step, &shared, &pending, |&(_, id)| {
+            curve_points(step, id).ok().filter(|pts| pts.len() >= 2)
+        });
+        let mut polylines = vec![None; distinct.len()];
+        for ((slot, _), pts) in pending.into_iter().zip(sampled) {
+            polylines[slot] = pts.map(Arc::new);
+        }
+        polylines
+    } else {
+        Vec::new()
+    };
 
     // ---- Openings: carve each host's closed body items. -------------
     let plan_of_owner: HashMap<u64, usize> = plans
@@ -1041,7 +1115,12 @@ fn build_scene(step: &StepFile, options: &IfcDecoder) -> oxideav_mesh3d::Result<
             .filter(|(_, leaf)| leaf.fallback != any)
             .filter_map(|(i, leaf)| Some((i, leaf, mesh_of(leaf)?)))
             .collect();
-        if drawn.is_empty() {
+        let lines: Vec<(&Leaf, &Arc<Vec<[f64; 3]>>)> = plan
+            .leaves
+            .iter()
+            .filter_map(|leaf| Some((leaf, polylines.get(slot_of[&leaf.item])?.as_ref()?)))
+            .collect();
+        if drawn.is_empty() && lines.is_empty() {
             continue;
         }
         let world = owner_world(step, plan.owner, plan.shape);
@@ -1061,7 +1140,7 @@ fn build_scene(step: &StepFile, options: &IfcDecoder) -> oxideav_mesh3d::Result<
         let semantic_select = plan.owner.and_then(|o| model.material_of(o));
 
         let instance_key: Option<InstanceKey> =
-            (options.instancing && carved_here.is_none()).then(|| {
+            (options.instancing && carved_here.is_none() && lines.is_empty()).then(|| {
                 (
                     drawn
                         .iter()
@@ -1143,6 +1222,23 @@ fn build_scene(step: &StepFile, options: &IfcDecoder) -> oxideav_mesh3d::Result<
                             }
                         }
                     }
+                }
+                // Curve items as line strips (unstyled).
+                for (leaf, points) in &lines {
+                    let xform = if options.instancing {
+                        leaf.xform
+                    } else {
+                        world.compose(&leaf.xform)
+                    };
+                    let mut prim = Primitive::new(Topology::LineStrip);
+                    prim.positions = points
+                        .iter()
+                        .map(|p| {
+                            let q = xform.apply(*p);
+                            [q[0] as f32, q[1] as f32, q[2] as f32]
+                        })
+                        .collect();
+                    mesh.primitives.push(prim);
                 }
                 let id = scene.add_mesh(mesh);
                 if let Some(key) = instance_key {

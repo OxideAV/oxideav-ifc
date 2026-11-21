@@ -6,6 +6,15 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- IFC 4.3 alignment curves (`geometry::alignment`): composite curves of `IfcCurveSegment`s over `IfcLine`, `IfcCircle`, `IfcClothoid` and `IfcCosineSpiral` parents (curvature integrated over arc length from the segment placement; the Annex E listings' transition end points reproduce to 1e-6), `IfcGradientCurve` (base curve lifted to its elevation profile) and `IfcOffsetCurveByDistances` (lateral / vertical offsets interpolated between distances). They serve as directrices of the swept and sectioned solids and as profile / boundary curves, and carry their true distance-along, which linear placements and length-valued sweep trims now use. The remaining spirals, `IfcPolynomialCurve` and `IfcSegmentedReferenceCurve` are refused by keyword (no staged definition).
+- `curve_points(step, id)` — any bounded curve item as a 3-D polyline; `IfcDecoder::with_curves(true)` draws curve items (axis / footprint curves, geometric curve set members, alignments) as line strips.
+- `IfcAnnotationFillArea` (planar region with inner boundaries), `IfcGeometricSet` / `IfcGeometricCurveSet` (their surface members mesh), `IfcTrimmedCurve` over a 3-D `IfcLine`.
+
+### Fixed
+
+- The curve-dimension query (2-D or 3-D boundary?) visits a bounded number of instances: a wide reference lattice that never reaches a point was walked path by path (found by the fuzz target once it sampled curves).
+- `IfcCartesianTransformationOperator2D` axes follow the EXPRESS `IfcBaseAxis`: with `Axis1` alone `U2` is its orthogonal complement (an operator giving `Axis1 = (0, −1)` used to collapse the derived profile), with `Axis2` alone `U1` is derived from it; a 3-D operator with an authored `Axis3` is built from that axis first.
+
 - Scene hierarchy: the project is the scene root, the spatial structure (`IfcRelAggregates`) and element decomposition are nested nodes, and each product hangs under the structure element containing it. Nodes carry `ifc:global_id` / `ifc:class` extras. `Model::aggregating_parent` / `Model::container_of` expose the back edges.
 - Opening subtraction: the bodies of the opening elements voiding a host (`IfcRelVoidsElement`) are subtracted from the host's closed body items (bounding boxes first, in the host's local frame) and the openings themselves are not drawn. `IfcDecoder::with_opening_subtraction(false)` restores the as-authored scene.
 - `IfcDecoder::with_threads` / `with_execution_context` (item tessellation and opening subtraction on the caller's thread budget; serial by default, identical scene at every budget), `with_instancing` (local-frame meshes shared between products mapping the same source items, placement on the node), and `decode_step` for an already parsed file.

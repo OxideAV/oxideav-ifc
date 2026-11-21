@@ -148,9 +148,9 @@ pub use geo::{
 };
 pub use geometry::kernel;
 pub use geometry::{
-    BooleanOperator, GeometryError, Transform, TriMesh, mesh_boolean, mesh_from_product_shape,
-    mesh_from_shape_representation, meshed_items_from_product_shape, placement_transform,
-    tessellate_item,
+    BooleanOperator, GeometryError, Transform, TriMesh, curve_points, is_closed_mesh, mesh_boolean,
+    mesh_from_product_shape, mesh_from_shape_representation, meshed_items_from_product_shape,
+    placement_transform, tessellate_item, tessellated_face_indices,
 };
 pub use header::{FileDescription, FileName, Header, HeaderRecord};
 pub use material::{MaterialAssignment, material_assignment};

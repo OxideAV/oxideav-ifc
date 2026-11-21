@@ -175,6 +175,7 @@
 use crate::parser::StepFile;
 use crate::value::Value;
 
+mod alignment;
 pub(crate) mod bspline;
 mod cdt;
 mod csg;
@@ -350,6 +351,10 @@ fn tessellate_item_depth(step: &StepFile, id: u64, depth: usize) -> Result<TriMe
         "IFCSECTIONEDSPINE" => sectioned_spine(step, &inst.args),
         // Bounded surfaces as representation items (open sheets).
         "IFCCURVEBOUNDEDPLANE" => curve_bounded_plane(step, &inst.args),
+        // Annotation fill: a planar region between boundary curves.
+        "IFCANNOTATIONFILLAREA" => annotation_fill_area(step, &inst.args),
+        // A set of points, curves and surfaces: its surfaces mesh.
+        "IFCGEOMETRICSET" | "IFCGEOMETRICCURVESET" => geometric_set(step, &inst.args, depth),
         "IFCRECTANGULARTRIMMEDSURFACE" => rectangular_trimmed_surface(step, &inst.args),
         "IFCCURVEBOUNDEDSURFACE" => curve_bounded_surface(step, &inst.args),
         // Parametric CSG primitives (swept-disk digest §3) and the CSG
@@ -3097,14 +3102,10 @@ fn directrix_points_measured(
     if s0.is_none() && s1.is_none() {
         return Ok(path);
     }
-    // Cumulative arc length of the sampled run.
-    let mut cum = Vec::with_capacity(path.len());
-    let mut total = 0.0;
-    cum.push(0.0);
-    for w in path.windows(2) {
-        total += dist(w[0], w[1]);
-        cum.push(total);
-    }
+    // Distance along the sampled run (an alignment curve's own
+    // stations, else the chord sum).
+    let cum = directrix_stations(step, id, &path);
+    let total = cum.last().copied().unwrap_or(0.0);
     let s0 = s0.unwrap_or(0.0).clamp(0.0, total);
     let s1 = s1.unwrap_or(total).clamp(0.0, total);
     if s1 <= s0 {
@@ -3360,9 +3361,26 @@ fn directrix_swept_area_solid(
 /// `IfcCartesianPointList{2,3}D` a curve refers to (`None` if it has
 /// none within the nesting bound).
 pub(crate) fn curve_dimension(step: &StepFile, id: u64, depth: usize) -> Option<usize> {
-    if depth >= MAX_CURVE_DEPTH {
+    // The search follows every reference; a budget of visits keeps a
+    // hostile reference graph (wide, deep, pointless) from being walked
+    // path by path.
+    let mut budget = MAX_DIMENSION_VISITS;
+    curve_dimension_within(step, id, depth, &mut budget)
+}
+
+/// Most instances one dimension query may visit.
+const MAX_DIMENSION_VISITS: usize = 4096;
+
+fn curve_dimension_within(
+    step: &StepFile,
+    id: u64,
+    depth: usize,
+    budget: &mut usize,
+) -> Option<usize> {
+    if depth >= MAX_CURVE_DEPTH || *budget == 0 {
         return None;
     }
+    *budget -= 1;
     let inst = step.get(id)?;
     match inst.keyword.as_str() {
         "IFCCARTESIANPOINT" => inst
@@ -3372,13 +3390,15 @@ pub(crate) fn curve_dimension(step: &StepFile, id: u64, depth: usize) -> Option<
             .map(<[Value]>::len),
         "IFCCARTESIANPOINTLIST2D" => Some(2),
         "IFCCARTESIANPOINTLIST3D" => Some(3),
+        // Lifted out of the plane of their 2-D base / basis curve.
+        "IFCGRADIENTCURVE" | "IFCSEGMENTEDREFERENCECURVE" | "IFCOFFSETCURVEBYDISTANCES" => Some(3),
         _ => {
             let mut refs = Vec::new();
             for a in &inst.args {
                 a.collect_references(&mut refs);
             }
             refs.into_iter()
-                .find_map(|r| curve_dimension(step, r, depth + 1))
+                .find_map(|r| curve_dimension_within(step, r, depth + 1, budget))
         }
     }
 }
@@ -3400,11 +3420,29 @@ fn curve_bounded_plane(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadCoordinates)?;
     let frame = axis2_placement_3d(step, pos_id)?;
-    let outer_id = args
-        .get(1)
+    planar_region(step, &frame, args.get(1), args.get(2))
+}
+
+/// `IfcAnnotationFillArea(OuterBoundary, InnerBoundaries)`: a planar
+/// filled region — 2-D boundaries lie in the xy-plane of the
+/// representation, 3-D ones are taken as authored — triangulated
+/// hole-aware with its normal along +z.
+fn annotation_fill_area(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    planar_region(step, &Transform::IDENTITY, args.first(), args.get(1))
+}
+
+/// A planar region bounded by an outer curve and optional inner
+/// curves, in the plane of `frame`.
+fn planar_region(
+    step: &StepFile,
+    frame: &Transform,
+    outer: Option<&Value>,
+    inner: Option<&Value>,
+) -> Result<TriMesh, GeometryError> {
+    let outer_id = outer
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadCoordinates)?;
-    let inner_ids: Vec<u64> = match args.get(2) {
+    let inner_ids: Vec<u64> = match inner {
         None | Some(Value::Unset) => Vec::new(),
         Some(v) => v
             .as_list()
@@ -3458,6 +3496,88 @@ fn curve_bounded_plane(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         positions,
         triangles,
     })
+}
+
+/// `IfcGeometricSet(Elements)`: the meshable members (surfaces) merged.
+/// Points and curves have no area; a set of only those is reported by
+/// its first curve / point keyword (see [`curve_points`] for curves).
+fn geometric_set(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMesh, GeometryError> {
+    if depth >= MAX_MAP_DEPTH {
+        return Err(GeometryError::Unsupported("IFCGEOMETRICSET".to_string()));
+    }
+    let elements = args
+        .first()
+        .and_then(Value::as_list)
+        .ok_or(GeometryError::BadCoordinates)?;
+    let mut merged = TriMesh::default();
+    let mut refused: Option<GeometryError> = None;
+    for element in elements {
+        let Some(id) = element.as_reference() else {
+            continue;
+        };
+        // Elements : SET OF IfcGeometricSetSelect — points, curves and
+        // surfaces only; of those the bounded surfaces mesh. (A set is
+        // not a member of a set: nothing here recurses.)
+        let Some(member) = step.get(id) else {
+            continue;
+        };
+        if !matches!(
+            member.keyword.as_str(),
+            "IFCCURVEBOUNDEDPLANE"
+                | "IFCCURVEBOUNDEDSURFACE"
+                | "IFCRECTANGULARTRIMMEDSURFACE"
+                | "IFCSECTIONEDSURFACE"
+                | "IFCANNOTATIONFILLAREA"
+        ) {
+            refused.get_or_insert(GeometryError::Unsupported(member.keyword.clone()));
+            continue;
+        }
+        match tessellate_item_depth(step, id, depth + 1) {
+            Ok(mesh) => append_mesh(&mut merged, mesh),
+            Err(e @ GeometryError::Unsupported(_)) => {
+                refused.get_or_insert(e);
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    if merged.is_empty() {
+        return Err(refused.unwrap_or(GeometryError::BadCoordinates));
+    }
+    Ok(merged)
+}
+
+/// Sample any bounded curve item into a 3-D polyline (a 2-D curve lies
+/// in z = 0): polylines, indexed poly-curves, full and trimmed conics,
+/// trimmed lines, composite curves, the B-spline family, and the
+/// IFC 4.3 alignment curves — composite curves of `IfcCurveSegment`s
+/// over lines, circles, clothoids and cosine spirals,
+/// `IfcGradientCurve` and `IfcOffsetCurveByDistances`.
+pub fn curve_points(step: &StepFile, id: u64) -> Result<Vec<[f64; 3]>, GeometryError> {
+    let _session = session::Session::enter(step);
+    if alignment::stationed(step, id, 0)?.is_none() && curve_dimension(step, id, 0) == Some(2) {
+        return Ok(curve_points_2d(step, id)?
+            .into_iter()
+            .map(|p| [p[0], p[1], 0.0])
+            .collect());
+    }
+    curve_points_3d(step, id, 0)
+}
+
+/// The distance along curve `directrix_id` at each of its samples
+/// `path`: true stations for an alignment curve, the chord sum for
+/// anything else.
+fn directrix_stations(step: &StepFile, directrix_id: u64, path: &[[f64; 3]]) -> Vec<f64> {
+    if let Some(stations) = alignment::stations(step, directrix_id, path.len()) {
+        return stations;
+    }
+    let mut cumulative = Vec::with_capacity(path.len());
+    let mut total = 0.0;
+    cumulative.push(0.0);
+    for w in path.windows(2) {
+        total += dist(w[0], w[1]);
+        cumulative.push(total);
+    }
+    cumulative
 }
 
 /// Cap on the grid cells of one rectangular trimmed surface.
@@ -3955,15 +4075,10 @@ fn sectioned_station_rings(
     if path.len() < 2 {
         return Err(GeometryError::BadProfile);
     }
-    // Cumulative chord lengths for distance-along lookup.
-    let mut cumulative: Vec<f64> = Vec::with_capacity(path.len());
-    let mut total = 0.0;
-    cumulative.push(0.0);
-    for w in path.windows(2) {
-        let d = [w[1][0] - w[0][0], w[1][1] - w[0][1], w[1][2] - w[0][2]];
-        total += dot_raw(d, d).sqrt();
-        cumulative.push(total);
-    }
+    // Distances along the path for the station lookup (an alignment
+    // curve's own stations, else the chord sum).
+    let cumulative = directrix_stations(step, directrix_id, &path);
+    let total = cumulative.last().copied().unwrap_or(0.0);
     // (point, unit tangent) at a distance along the tessellated path,
     // clamped to the ends.
     let point_at = |dist: f64| -> Result<([f64; 3], [f64; 3]), GeometryError> {
@@ -4834,6 +4949,9 @@ fn curve_points_3d(step: &StepFile, id: u64, depth: usize) -> Result<Vec<[f64; 3
         return Err(GeometryError::BadProfile);
     }
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
+    if let Some(run) = alignment::stationed(step, id, depth)? {
+        return Ok(run.points);
+    }
     match inst.keyword.as_str() {
         "IFCPOLYLINE" => {
             let points = inst
@@ -4988,6 +5106,52 @@ fn trimmed_curve_points_3d(
     let basis = step
         .get(basis_id)
         .ok_or(GeometryError::MissingInstance(basis_id))?;
+    if basis.keyword == "IFCLINE" {
+        // IfcLine(Pnt, Dir : IfcVector(Orientation, Magnitude)): the
+        // point at parameter u is Pnt + u · Magnitude · Orientation.
+        let origin = cartesian_point(step, basis.args.first())?;
+        let vector = basis
+            .args
+            .get(1)
+            .and_then(|v| step.resolve(v))
+            .ok_or(GeometryError::BadProfile)?;
+        let unit = direction(step, vector.args.first())?
+            .and_then(normalise)
+            .ok_or(GeometryError::BadProfile)?;
+        let magnitude = vector
+            .args
+            .get(1)
+            .and_then(Value::as_number)
+            .filter(|m| *m > 0.0)
+            .ok_or(GeometryError::BadProfile)?;
+        let master = args
+            .get(4)
+            .and_then(Value::as_enum)
+            .unwrap_or("UNSPECIFIED");
+        let end = |trim: &TrimSelect| -> Result<[f64; 3], GeometryError> {
+            let by_param = trim.param.map(|u| {
+                let d = u * magnitude;
+                [
+                    origin[0] + d * unit[0],
+                    origin[1] + d * unit[1],
+                    origin[2] + d * unit[2],
+                ]
+            });
+            match master {
+                "PARAMETER" => by_param.or(trim.point),
+                _ => trim.point.or(by_param),
+            }
+            .ok_or(GeometryError::BadProfile)
+        };
+        let a = end(&trim_select(step, args.get(1))?)?;
+        let b = end(&trim_select(step, args.get(2))?)?;
+        if dist(a, b) <= 0.0 {
+            return Err(GeometryError::BadProfile);
+        }
+        // Trim1 → Trim2 already is the direction of travel: a FALSE
+        // SenseAgreement on a line names the same segment.
+        return Ok(vec![a, b]);
+    }
     if basis.keyword != "IFCCIRCLE" && basis.keyword != "IFCELLIPSE" {
         return Err(GeometryError::Unsupported(basis.keyword.clone()));
     }
@@ -5261,19 +5425,56 @@ fn transformation_operator(step: &StepFile, id: u64) -> Result<Transform, Geomet
 /// `IfcBaseAxis(Dim, Axis1, Axis2[, Axis3])` → orthonormal axes
 /// `[U1, U2, U3]`.
 ///
-/// The operator convention (distinct from `IfcBuildAxes`, which is
-/// driven by a Z `Axis`): `U1` is `normalise(Axis1)` defaulting to world
-/// X; `U2` is the part of `Axis2` orthogonal to `U1`, defaulting to
-/// world Y; `U3 = U1 × U2` for the 3-D case (world Z when both inputs
-/// default). For the 2-D case `U3` is left as world Z (unused by the
-/// 2-D column write since the source geometry is planar, but kept so the
-/// returned basis is well-formed).
+/// Follows the EXPRESS function: in 2-D `Axis1` leads and `U2` is its
+/// orthogonal complement (turned over when `Axis2` points the other
+/// way); in 3-D an authored `Axis3` leads, `U1` / `U2` being `Axis1` /
+/// `Axis2` made orthogonal to it. A 3-D operator without `Axis3` whose
+/// other axes leave the xy-plane has no orthonormal reading under the
+/// function (its default `Axis3` is world Z); it is read leniently as
+/// `U1 = Axis1`, `U2 = Axis2 ⟂ U1`, `U3 = U1 × U2`. For the 2-D case
+/// `U3` is world Z.
 fn base_axes(
     axis1: Option<[f64; 3]>,
     axis2: Option<[f64; 3]>,
     axis3: Option<[f64; 3]>,
     is_3d: bool,
 ) -> [[f64; 3]; 3] {
+    if !is_3d {
+        // The 2-D branch of IfcBaseAxis: Axis1 leads and U2 is its
+        // orthogonal complement (−y, x), turned over when Axis2 points
+        // the other way; with only Axis2, U1 is the complement's
+        // negative (y, −x).
+        let flat = |a: Option<[f64; 3]>| a.and_then(|a| normalise([a[0], a[1], 0.0]));
+        let (u1, u2) = match (flat(axis1), flat(axis2)) {
+            (Some(u1), a2) => {
+                let mut u2 = [-u1[1], u1[0], 0.0];
+                if a2.is_some_and(|a2| dot(a2, u2) < 0.0) {
+                    u2 = [-u2[0], -u2[1], 0.0];
+                }
+                (u1, u2)
+            }
+            (None, Some(u2)) => ([u2[1], -u2[0], 0.0], u2),
+            (None, None) => ([1.0, 0.0, 0.0], [0.0, 1.0, 0.0]),
+        };
+        return [u1, u2, [0.0, 0.0, 1.0]];
+    }
+    if let Some(d1) = axis3.and_then(normalise) {
+        // The 3-D branch: Axis3 leads (IfcFirstProjAxis /
+        // IfcSecondProjAxis) — U1 is Axis1 made ⟂ to it, U2 is Axis2
+        // (default world Y) made ⟂ to both. A left-handed result is a
+        // mirror, as authored.
+        let d2 = first_proj_axis(d1, axis1);
+        let v = axis2.unwrap_or([0.0, 1.0, 0.0]);
+        let (vz, vx) = (dot(v, d1), dot(v, d2));
+        let y = [
+            v[0] - vz * d1[0] - vx * d2[0],
+            v[1] - vz * d1[1] - vx * d2[1],
+            v[2] - vz * d1[2] - vx * d2[2],
+        ];
+        if let Some(y) = normalise(y) {
+            return [d2, y, d1];
+        }
+    }
     let u1 = axis1.and_then(normalise).unwrap_or([1.0, 0.0, 0.0]);
     // U2: Axis2 made ⟂ to U1, or world Y projected ⟂ to U1.
     let raw2 = axis2.and_then(normalise).unwrap_or([0.0, 1.0, 0.0]);
@@ -5835,6 +6036,10 @@ fn composite_curve_points_2d(
     args: &[Value],
     depth: usize,
 ) -> Result<Vec<[f64; 2]>, GeometryError> {
+    if alignment::has_curve_segments(step, args) {
+        // IFC 4.3 curve segments place and trim their parents themselves.
+        return alignment::composite_points_2d(step, args);
+    }
     let segments = args
         .first()
         .and_then(Value::as_list)

@@ -242,3 +242,31 @@ fn instancing_shares_one_mesh_per_mapped_type() {
     }
     assert!(shared.vertex_count() * 20 < baked.vertex_count());
 }
+
+#[test]
+fn curve_items_are_drawn_on_request() {
+    // A product represented only by its axis curve: nothing to draw by
+    // default, a line strip once curves are asked for.
+    let src = b"ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n\
+        FILE_NAME('','',(''),(''),'','','');\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n\
+        #1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCCARTESIANPOINT((5.,0.,0.));\n\
+        #3=IFCCARTESIANPOINT((5.,5.,0.));\n#4=IFCPOLYLINE((#1,#2,#3));\n\
+        #5=IFCGEOMETRICCURVESET((#4));\n\
+        #6=IFCSHAPEREPRESENTATION($,'Axis','GeometricCurveSet',(#5));\n\
+        #7=IFCPRODUCTDEFINITIONSHAPE($,$,(#6));\n\
+        #8=IFCAXIS2PLACEMENT3D(#3,$,$);\n#9=IFCLOCALPLACEMENT($,#8);\n\
+        #10=IFCBUILDINGELEMENTPROXY('0000000000000000000001',$,'Axis only',$,$,#9,#7,$,$);\n\
+        ENDSEC;\nEND-ISO-10303-21;\n";
+    assert!(make_decoder().decode(src).is_err());
+    let scene = make_decoder()
+        .with_curves(true)
+        .decode(src)
+        .expect("decodes");
+    let prim = &scene.meshes[0].primitives[0];
+    assert_eq!(prim.topology, oxideav_mesh3d::Topology::LineStrip);
+    // Placed at (5, 5, 0).
+    assert_eq!(
+        prim.positions,
+        vec![[5.0, 5.0, 0.0], [10.0, 5.0, 0.0], [10.0, 10.0, 0.0]]
+    );
+}
