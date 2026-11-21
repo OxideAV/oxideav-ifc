@@ -180,6 +180,7 @@ mod cdt;
 mod csg;
 pub mod kernel;
 mod profiles;
+pub(crate) mod session;
 mod surfaces;
 mod trim;
 
@@ -288,6 +289,7 @@ impl std::error::Error for GeometryError {}
 /// most callers want [`mesh_from_shape_representation`] or the
 /// `Model`-level walk.
 pub fn tessellate_item(step: &StepFile, id: u64) -> Result<TriMesh, GeometryError> {
+    let _session = session::Session::enter(step);
     tessellate_item_depth(step, id, 0)
 }
 
@@ -1519,6 +1521,7 @@ pub fn mesh_from_shape_representation(
     step: &StepFile,
     shape_rep_id: u64,
 ) -> Result<TriMesh, GeometryError> {
+    let _session = session::Session::enter(step);
     mesh_from_shape_representation_depth(step, shape_rep_id, 0)
 }
 
@@ -1589,6 +1592,7 @@ pub fn mesh_from_product_shape(
     step: &StepFile,
     product_def_shape_id: u64,
 ) -> Result<TriMesh, GeometryError> {
+    let _session = session::Session::enter(step);
     let inst = step
         .get(product_def_shape_id)
         .ok_or(GeometryError::MissingInstance(product_def_shape_id))?;
@@ -1647,6 +1651,7 @@ pub fn meshed_items_from_product_shape(
     step: &StepFile,
     product_def_shape_id: u64,
 ) -> Result<Vec<(u64, TriMesh)>, GeometryError> {
+    let _session = session::Session::enter(step);
     let inst = step
         .get(product_def_shape_id)
         .ok_or(GeometryError::MissingInstance(product_def_shape_id))?;
@@ -1840,11 +1845,19 @@ pub fn placement_transform(step: &StepFile, placement_id: u64) -> Result<Transfo
     // Walk parent-ward collecting each link's local transform, then fold
     // root-first so the outermost placement is applied last.
     const MAX_DEPTH: usize = 4096;
+    let _session = session::Session::enter(step);
     let mut chain: Vec<Transform> = Vec::new();
+    // The world transform of the first ancestor already resolved in
+    // this session (thousands of products share a storey placement).
+    let mut world = Transform::IDENTITY;
     let mut current = Some(placement_id);
     let mut depth = 0usize;
     while let Some(id) = current {
         if depth >= MAX_DEPTH {
+            break;
+        }
+        if let Some(known) = session::placement(step, id) {
+            world = known;
             break;
         }
         depth += 1;
@@ -1866,9 +1879,12 @@ pub fn placement_transform(step: &StepFile, placement_id: u64) -> Result<Transfo
         }
     }
     // Fold root-first: world = root ∘ … ∘ leaf.
-    let mut world = Transform::IDENTITY;
     for link in chain.iter().rev() {
         world = world.compose(link);
+    }
+    // A chain cut by the depth cap is not a placement's true transform.
+    if depth < MAX_DEPTH {
+        session::remember_placement(step, placement_id, world);
     }
     Ok(world)
 }
@@ -2085,6 +2101,37 @@ fn triangulated_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
 //     inner list is one hole loop of the planar face (§8.8.3.39).
 // ---------------------------------------------------------------------
 fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, GeometryError> {
+    polygonal_face_set_tagged(step, args, None)
+}
+
+/// The triangles of a tessellated face set together with the zero-based
+/// index of the authored face each one came from — what a per-face
+/// presentation map (`IfcIndexedColourMap.ColourIndex`, one entry per
+/// face) needs. A triangulated face set maps one to one; a polygonal
+/// face contributes as many triangles as its triangulation produced.
+/// `None` for any other item kind.
+pub fn tessellated_face_indices(step: &StepFile, id: u64) -> Option<(TriMesh, Vec<u32>)> {
+    let inst = step.get(id)?;
+    match inst.keyword.as_str() {
+        "IFCTRIANGULATEDFACESET" | "IFCTRIANGULATEDIRREGULARNETWORK" => {
+            let mesh = triangulated_face_set(step, &inst.args).ok()?;
+            let faces = (0..mesh.triangles.len() as u32).collect();
+            Some((mesh, faces))
+        }
+        "IFCPOLYGONALFACESET" => {
+            let mut faces = Vec::new();
+            let mesh = polygonal_face_set_tagged(step, &inst.args, Some(&mut faces)).ok()?;
+            Some((mesh, faces))
+        }
+        _ => None,
+    }
+}
+
+fn polygonal_face_set_tagged(
+    step: &StepFile,
+    args: &[Value],
+    mut face_of: Option<&mut Vec<u32>>,
+) -> Result<TriMesh, GeometryError> {
     let positions = coordinates(step, args.first())?;
     let pn = pn_index(args.get(3))?;
     // Faces is the 3rd attribute (index 2).
@@ -2107,7 +2154,8 @@ fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geomet
         }
         Ok(out)
     };
-    for face_ref in faces {
+    for (face_index, face_ref) in faces.iter().enumerate() {
+        let before = triangles.len();
         let face_id = face_ref
             .as_reference()
             .ok_or(GeometryError::BadCoordinates)?;
@@ -2137,11 +2185,34 @@ fn polygonal_face_set(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geomet
             }
         }
         triangulate_face_3d(&outer, &holes, &mut triangles)?;
+        if let Some(tags) = face_of.as_deref_mut() {
+            tags.resize(tags.len() + (triangles.len() - before), face_index as u32);
+        }
     }
     Ok(TriMesh {
         positions,
         triangles,
     })
+}
+
+/// Whether `mesh` is a closed surface (every directed edge balanced by
+/// its reverse).
+pub fn is_closed_mesh(mesh: &TriMesh) -> bool {
+    csg::is_closed(mesh)
+}
+
+/// The frame of an `IfcRepresentationMap.MappingOrigin` followed by an
+/// `IfcMappedItem.MappingTarget` operator: the transform a mapped
+/// item applies to its source representation.
+#[cfg(feature = "registry")]
+pub(crate) fn mapped_item_transform(
+    step: &StepFile,
+    origin_id: u64,
+    target_id: u64,
+) -> Result<Transform, GeometryError> {
+    let origin = axis2_placement_3d(step, origin_id)?;
+    let target = transformation_operator(step, target_id)?;
+    Ok(target.compose(&origin))
 }
 
 // ---------------------------------------------------------------------
@@ -2512,7 +2583,7 @@ fn revolved_area_solid(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geome
         .get(3)
         .and_then(Value::as_number)
         .ok_or(GeometryError::BadCoordinate)?
-        * crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+        * session::angle_scale(step);
     if angle == 0.0 {
         return Err(GeometryError::BadProfile);
     }
@@ -3417,7 +3488,7 @@ fn rectangular_trimmed_surface(step: &StepFile, args: &[Value]) -> Result<TriMes
     let sense = |i: usize| !matches!(args.get(i).and_then(Value::as_enum), Some("F"));
     let (usense, vsense) = (sense(5), sense(6));
     // Angular parameters follow the model's plane-angle unit.
-    let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+    let angle_scale = session::angle_scale(step);
     let (au, av) = surface.angular();
     if au {
         u1 *= angle_scale;
@@ -3539,7 +3610,7 @@ fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
         .filter_map(Value::as_reference)
         .collect();
     let implicit_outer = matches!(args.get(2).and_then(Value::as_enum), Some("T"));
-    let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+    let angle_scale = session::angle_scale(step);
     let (au, av) = surface.angular();
     let scale = [
         if au { angle_scale } else { 1.0 },
@@ -4645,7 +4716,7 @@ fn directrix_points_3d(
         let two_pi = 2.0 * core::f64::consts::PI;
         let (u1, sweep) = match (start, end) {
             (Some(s), Some(e)) => {
-                let scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+                let scale = session::angle_scale(step);
                 let (s, e) = (s * scale, e * scale);
                 let mut d = (e - s).rem_euclid(two_pi);
                 if d < 1e-12 {
@@ -4932,7 +5003,7 @@ fn trimmed_curve_points_3d(
         .get(4)
         .and_then(Value::as_enum)
         .unwrap_or("UNSPECIFIED");
-    let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+    let angle_scale = session::angle_scale(step);
     let angle_of = |trim: &TrimSelect| -> Result<f64, GeometryError> {
         let by_param = trim.param.map(|p| p * angle_scale);
         let by_point = trim.point.map(|p| conic.param_of(p));
@@ -5077,7 +5148,19 @@ fn mapped_item(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMesh,
     // Mesh the source representation's items (recursing one level deeper
     // so nested mapped items are bounded). Vertices come out in the
     // source representation's own local frame.
-    let mut mesh = mesh_from_shape_representation_depth(step, mapped_rep_id, depth + 1)?;
+    // The source is meshed once per session however many items map it
+    // (at depth 0 only: a deeper first visit could hit the depth cap a
+    // shallower one would not).
+    let mut mesh = if depth == 0 {
+        match &*session::representation(step, mapped_rep_id, || {
+            mesh_from_shape_representation_depth(step, mapped_rep_id, 1)
+        }) {
+            Ok(mesh) => mesh.clone(),
+            Err(e) => return Err(e.clone()),
+        }
+    } else {
+        mesh_from_shape_representation_depth(step, mapped_rep_id, depth + 1)?
+    };
 
     // MappingOrigin : IfcAxis2Placement (2D or 3D); fold it in first so
     // the source geometry sits in the map's reference frame.
@@ -5667,7 +5750,7 @@ fn trimmed_curve_points_2d(
         "IFCCIRCLE" | "IFCELLIPSE" => {
             let conic = conic_2d(step, &basis.keyword, &basis.args)?;
             // Angle-unit scale for parameter trims (radians default).
-            let angle_scale = crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+            let angle_scale = session::angle_scale(step);
             let angle_of = |trim: &TrimSelect| -> Result<f64, GeometryError> {
                 let by_param = trim.param.map(|p| p * angle_scale);
                 let by_point = trim.point.map(|p| conic.param_of([p[0], p[1]]));

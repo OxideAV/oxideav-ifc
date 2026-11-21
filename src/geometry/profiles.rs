@@ -92,7 +92,7 @@ fn slope_tan(step: &StepFile, args: &[Value], index: usize) -> Result<f64, Geome
     match args.get(index).and_then(number) {
         None => Ok(0.0),
         Some(a) => {
-            let rad = a * crate::schema::plane_angle_unit_scale(step).unwrap_or(1.0);
+            let rad = a * super::session::angle_scale(step);
             if !rad.is_finite() || rad.abs() >= core::f64::consts::FRAC_PI_2 {
                 return Err(GeometryError::BadProfile);
             }

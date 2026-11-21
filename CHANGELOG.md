@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Scene hierarchy: the project is the scene root, the spatial structure (`IfcRelAggregates`) and element decomposition are nested nodes, and each product hangs under the structure element containing it. Nodes carry `ifc:global_id` / `ifc:class` extras. `Model::aggregating_parent` / `Model::container_of` expose the back edges.
+- Opening subtraction: the bodies of the opening elements voiding a host (`IfcRelVoidsElement`) are subtracted from the host's closed body items (bounding boxes first, in the host's local frame) and the openings themselves are not drawn. `IfcDecoder::with_opening_subtraction(false)` restores the as-authored scene.
+- `IfcDecoder::with_threads` / `with_execution_context` (item tessellation and opening subtraction on the caller's thread budget; serial by default, identical scene at every budget), `with_instancing` (local-frame meshes shared between products mapping the same source items, placement on the node), and `decode_step` for an already parsed file.
+- Mapped items are flattened into their source representation's items: one primitive per source item, the source item's own surface style (else the mapped item's) applied, each source item tessellated once per model.
+- Materials: surface-style `Side` `.BOTH.` → two-sided, transparency → blended alpha, `IfcSurfaceStyleRendering` diffuse colour / specular roughness / metal reflectance; unstyled items take the surface style of the product's associated material (`IfcMaterialDefinitionRepresentation`) before the name-only fallback. `IfcIndexedColourMap` on an `IfcPolygonalFaceSet` colours every triangle of a face (`tessellated_face_indices`).
+- Scene facts: Z-up, the project length unit (`Scene3D::unit` + `ifc:metres_per_unit`), `ifc:map_conversion` and `ifc:site_geolocation` extras.
+- `examples/ifc_load` (stage timings for a file or a generated model of N products sharing mapped representations) and `is_closed_mesh`.
+
 - Half-space solids on an `IfcToroidalSurface` base: `AgreementFlag` TRUE is the inside of the tube, FALSE its outside; the closed tube is the Boolean tool (`IfcHalfSpaceSolid`, and the boxed / polygonal-bounded subtypes restrict it as for the other curved bases).
 - `IfcCurveBoundedSurface` with `ImplicitOuter` on a basis closed in both parameters (a torus): the whole surface minus the listed boundaries; both seams are placed in the widest parameter band no boundary reaches, so a hole straddling `u = 0` or `v = 0` is not cut.
 - Faces of a closed curved surface bounded by an `IfcVertexLoop` (a whole sphere, a whole torus; optionally with edge-loop holes) mesh over the surface's own parameter extent — watertight through the seams and the sphere's poles.
@@ -15,6 +23,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- The scene build is linear in the model size: product ownership, styled items, colour maps and material representations are indexed in one pass (each was a scan of the whole file per product), placement chains and the plane-angle unit are resolved once per model, and a shared `IfcRepresentationMap` source is meshed once however many items map it.
+- Surface-style materials are dielectric (`metallic` 0) unless the style says metal; representations identified `Box`, `Clearance`, `Lighting`, `CoG` and `Reference` are not drawn and `Body-FallBack` only stands in for a `Body` that produced nothing; a malformed item no longer drops its whole product.
 - A curved half-space selecting the inside of its base (`AgreementFlag` TRUE, no enclosure) uses the finite base solid directly as the Boolean tool — one mesh–mesh Boolean instead of two.
 - `#[non_exhaustive]` on the growable enums `Error`, `ClassificationParent`, `ClassificationAssignment`, `DocumentAssignment`, `MaterialAssignment`, `PropertyValue`, `QuantityValue`, `EntityKind`, `SpatialKind`, `RigidCoordinateKind`, `PrefixedDerivedUnit`, and on every record listed under Added. `Value` (the ISO 10303-21 parameter grammar) and `BooleanOperator` (union / intersection / difference) stay exhaustive; `Transform` and `TriMesh` stay plain value types. `GeometryError` stays exhaustive for now because a sibling matches it exhaustively.
 

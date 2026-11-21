@@ -2675,6 +2675,12 @@ pub struct Model<'a> {
     /// `system -> serviced spatial elements` edges from
     /// `IfcRelServicesBuildings`.
     services: BTreeMap<u64, Vec<u64>>,
+    /// `part -> whole` back edges of `IfcRelAggregates` (first edge
+    /// wins).
+    aggregated_by: BTreeMap<u64, u64>,
+    /// `element -> spatial structure` back edges of
+    /// `IfcRelContainedInSpatialStructure` (first edge wins).
+    contained_in: BTreeMap<u64, u64>,
 }
 
 impl<'a> Model<'a> {
@@ -2847,9 +2853,24 @@ impl<'a> Model<'a> {
             }
         }
 
+        let mut aggregated_by: BTreeMap<u64, u64> = BTreeMap::new();
+        for (&parent, kids) in &aggregates {
+            for &kid in kids {
+                aggregated_by.entry(kid).or_insert(parent);
+            }
+        }
+        let mut contained_in: BTreeMap<u64, u64> = BTreeMap::new();
+        for (&parent, kids) in &contains {
+            for &kid in kids {
+                contained_in.entry(kid).or_insert(parent);
+            }
+        }
+
         Self {
             step,
             project,
+            aggregated_by,
+            contained_in,
             aggregates,
             contains,
             defines,
@@ -2894,6 +2915,18 @@ impl<'a> Model<'a> {
     /// Empty when `id` aggregates nothing.
     pub fn aggregated_children(&self, id: u64) -> &[u64] {
         self.aggregates.get(&id).map(Vec::as_slice).unwrap_or(&[])
+    }
+
+    /// The object `id` is a part of (`IfcRelAggregates.RelatingObject`):
+    /// the site of a building, the stair of a flight.
+    pub fn aggregating_parent(&self, id: u64) -> Option<u64> {
+        self.aggregated_by.get(&id).copied()
+    }
+
+    /// The spatial structure element `id` is contained in
+    /// (`IfcRelContainedInSpatialStructure.RelatingStructure`).
+    pub fn container_of(&self, id: u64) -> Option<u64> {
+        self.contained_in.get(&id).copied()
     }
 
     /// The products contained directly in the spatial structure `id`

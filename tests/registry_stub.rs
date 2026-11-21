@@ -94,7 +94,8 @@ fn decode_extruded_swept_solid_model_yields_scene() {
     // profiles: a 3000×300×2000 wall plus an opening and a window box.
     // Each extrudes a 4-point profile into an 8-vertex / 12-triangle
     // prism, so the scene holds three boxes (24 verts, 36 triangles).
-    let mut decoder = make_decoder();
+    // Drawn as authored (no opening subtraction), all three are solids.
+    let mut decoder = make_decoder().with_opening_subtraction(false);
     let scene = decoder
         .decode(WALL)
         .expect("wall swept-solid model decodes");

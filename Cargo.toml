@@ -22,6 +22,8 @@ exclude = ["/tests", "/fuzz"]
 # primitives, with no framework dependency tree.
 oxideav-core = { version = "0.1", optional = true }
 oxideav-mesh3d = { version = "0.0", optional = true, default-features = false }
+# Scene / node `extras` values (already in the tree through oxideav-mesh3d).
+serde_json = { version = "1", optional = true }
 
 [features]
 default = ["registry"]
@@ -32,4 +34,8 @@ default = ["registry"]
 # stub (probes the `ISO-10303-21;` magic, parses the full exchange
 # structure, and reports geometry tessellation as unsupported until
 # Phase 3 lands).
-registry = ["dep:oxideav-core", "dep:oxideav-mesh3d", "oxideav-mesh3d/registry"]
+registry = ["dep:oxideav-core", "dep:oxideav-mesh3d", "dep:serde_json", "oxideav-mesh3d/registry"]
+
+[[example]]
+name = "ifc_load"
+required-features = ["registry"]
