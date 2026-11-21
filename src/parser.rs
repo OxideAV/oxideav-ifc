@@ -548,11 +548,15 @@ impl<'a> Parser<'a> {
                     if self.tok == Token::RParen {
                         // Trailing comma tolerance.
                         self.bump()?;
+                        args.shrink_to_fit();
                         return Ok(args);
                     }
                 }
                 Token::RParen => {
                     self.bump()?;
+                    // The list is final: give back the growth slack
+                    // (up to half the buffer on a large model).
+                    args.shrink_to_fit();
                     return Ok(args);
                 }
                 other => {

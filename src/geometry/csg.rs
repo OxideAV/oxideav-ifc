@@ -396,22 +396,6 @@ impl Bsp {
         }
         Ok(out)
     }
-
-    /// Remove every part of this tree's polygons inside `other`.
-    fn clip_to(&mut self, other: &Bsp, eps: f64, budget: &mut Budget) -> Result<(), GeometryError> {
-        for i in 0..self.nodes.len() {
-            let polys = std::mem::take(&mut self.nodes[i].polys);
-            self.nodes[i].polys = other.clip_polys(polys, eps, budget)?;
-        }
-        Ok(())
-    }
-
-    fn all_polys(&self) -> Vec<Poly> {
-        self.nodes
-            .iter()
-            .flat_map(|n| n.polys.iter().cloned())
-            .collect()
-    }
 }
 
 /// The triangles of `mesh` as polygons (degenerate ones dropped).
@@ -435,6 +419,131 @@ fn polys_of(mesh: &TriMesh) -> Vec<Poly> {
         }
     }
     out
+}
+
+/// Fewest polygons an operand must have before its classifier is built
+/// from a window of it.
+const LOCALISE_MIN_POLYGONS: usize = 256;
+
+/// The inside / outside test of one closed operand.
+#[derive(Default)]
+struct Classifier {
+    /// The partition; `None` (or a tree with no plane) when the solid
+    /// has no boundary where it is asked.
+    tree: Option<Bsp>,
+    /// With no boundary: whether the solid fills the space.
+    everywhere: bool,
+}
+
+impl Classifier {
+    /// The classifier of `mesh` (its polygons `polys`, `near` of them
+    /// meeting the other operand) for questions asked inside `window`,
+    /// a box around the other operand.
+    ///
+    /// A large closed mesh of which only a small part meets the window
+    /// is first cut down to the window (plane splits with re-capped
+    /// cuts — linear in the mesh): inside the window that solid and the
+    /// whole one are the same point set, and its partition is built
+    /// from the few faces there instead of from all of them.
+    fn new(
+        mesh: &TriMesh,
+        polys: Vec<Poly>,
+        near: usize,
+        window: &([f64; 3], [f64; 3]),
+        eps: f64,
+        budget: &mut Budget,
+    ) -> Result<Self, GeometryError> {
+        if polys.len() >= LOCALISE_MIN_POLYGONS
+            && near.saturating_mul(4) <= polys.len()
+            && is_closed(mesh)
+        {
+            let mut region: Vec<super::Plane> = Vec::with_capacity(6);
+            for axis in 0..3 {
+                for (corner, sign) in [(window.0, -1.0), (window.1, 1.0)] {
+                    let mut normal = [0.0; 3];
+                    normal[axis] = sign;
+                    region.push(super::Plane {
+                        point: corner,
+                        normal,
+                    });
+                }
+            }
+            let local = super::intersect_convex_region(mesh, &region);
+            if local.is_empty() {
+                // The solid stays clear of the window.
+                return Ok(Self::default());
+            }
+            if is_closed(&local) {
+                let local = polys_of(&local);
+                budget.spend(local.len())?;
+                return Ok(Self {
+                    tree: Some(Bsp::new(local, eps, budget)?),
+                    everywhere: false,
+                });
+            }
+        }
+        Ok(Self {
+            tree: Some(Bsp::new(polys, eps, budget)?),
+            everywhere: false,
+        })
+    }
+
+    fn partition(&self) -> Option<&Bsp> {
+        self.tree.as_ref().filter(|t| t.nodes[0].plane.is_some())
+    }
+
+    /// Swap solid and empty space.
+    fn invert(&mut self) {
+        match &mut self.tree {
+            Some(tree) if tree.nodes[0].plane.is_some() => tree.invert(),
+            _ => self.everywhere = !self.everywhere,
+        }
+    }
+
+    /// Remove every part of `polys` inside the solid.
+    fn clip(
+        &self,
+        polys: Vec<Poly>,
+        eps: f64,
+        budget: &mut Budget,
+    ) -> Result<Vec<Poly>, GeometryError> {
+        match self.partition() {
+            Some(tree) => tree.clip_polys(polys, eps, budget),
+            None if self.everywhere => Ok(Vec::new()),
+            None => Ok(polys),
+        }
+    }
+}
+
+/// Largest side of the box around a polygon list.
+fn extent_of(polys: &[Poly]) -> f64 {
+    let (lo, hi) = box_of(polys, 0.0);
+    (0..3).map(|k| hi[k] - lo[k]).fold(0.0, f64::max).max(0.0)
+}
+
+/// The axis-aligned box of a polygon list, grown by `pad`.
+fn box_of(polys: &[Poly], pad: f64) -> ([f64; 3], [f64; 3]) {
+    let mut lo = [f64::INFINITY; 3];
+    let mut hi = [f64::NEG_INFINITY; 3];
+    for v in polys.iter().flat_map(|p| p.verts.iter()) {
+        for k in 0..3 {
+            lo[k] = lo[k].min(v[k] - pad);
+            hi[k] = hi[k].max(v[k] + pad);
+        }
+    }
+    (lo, hi)
+}
+
+/// Whether a polygon's own box meets `bounds`.
+fn touches(poly: &Poly, bounds: &([f64; 3], [f64; 3])) -> bool {
+    (0..3).all(|k| {
+        let (mut lo, mut hi) = (f64::INFINITY, f64::NEG_INFINITY);
+        for v in &poly.verts {
+            lo = lo.min(v[k]);
+            hi = hi.max(v[k]);
+        }
+        lo <= bounds.1[k] && hi >= bounds.0[k]
+    })
 }
 
 /// Fan-triangulate convex polygons into a mesh.
@@ -470,43 +579,77 @@ pub fn mesh_boolean(
     let pa = polys_of(a);
     let pb = polys_of(b);
     budget.spend(pa.len() + pb.len())?;
-    let mut ta = Bsp::new(pa, eps, &mut budget)?;
-    let mut tb = Bsp::new(pb, eps, &mut budget)?;
+    // Spatial pre-filter: a polygon whose box misses the other
+    // operand's box lies wholly outside that operand, so its fate is
+    // known without classifying (or splitting) it. Only the polygons
+    // near the other operand meet its partition.
+    let pad = 1e-7 * scale;
+    let (box_a, box_b) = (box_of(&pa, pad), box_of(&pb, pad));
+    let (a_near, a_far): (Vec<Poly>, Vec<Poly>) =
+        pa.iter().cloned().partition(|p| touches(p, &box_b));
+    let (b_near, b_far): (Vec<Poly>, Vec<Poly>) =
+        pb.iter().cloned().partition(|p| touches(p, &box_a));
+    // Each classifier partitions a complete closed solid, built only
+    // when the other operand has polygons to ask — and, for a large
+    // operand met by a small one, from the part of it inside a window
+    // around the other operand instead of from every face.
+    let window_a = box_of(&pa, pad + 0.01 * extent_of(&pa));
+    let window_b = box_of(&pb, pad + 0.01 * extent_of(&pb));
+    let mut ta = if b_near.is_empty() {
+        Classifier::default()
+    } else {
+        Classifier::new(a, pa, a_near.len(), &window_b, eps, &mut budget)?
+    };
+    let mut tb = if a_near.is_empty() {
+        Classifier::default()
+    } else {
+        Classifier::new(b, pb, b_near.len(), &window_a, eps, &mut budget)?
+    };
+    let mut cut = |solid: &Classifier, polys: Vec<Poly>| -> Result<Vec<Poly>, GeometryError> {
+        if polys.is_empty() {
+            return Ok(polys);
+        }
+        solid.clip(polys, eps, &mut budget)
+    };
+    let flipped = |mut polys: Vec<Poly>| -> Vec<Poly> {
+        for p in &mut polys {
+            p.flip();
+        }
+        polys
+    };
+    let invert = |solid: &mut Classifier| solid.invert();
     let polys = match op {
         BooleanOperator::Union => {
-            // Keep ∂A outside B and ∂B outside A; the extra inverted
-            // clip of B drops B's faces coincident with A's (which A
-            // already contributes once).
-            ta.clip_to(&tb, eps, &mut budget)?;
-            tb.clip_to(&ta, eps, &mut budget)?;
-            tb.invert();
-            tb.clip_to(&ta, eps, &mut budget)?;
-            tb.invert();
-            ta.build(0, tb.all_polys(), eps, &mut budget)?;
-            ta.all_polys()
+            // Keep ∂A outside B and ∂B outside A; the extra clip of
+            // the reversed ∂B drops B's faces coincident with A's
+            // (which A already contributes once).
+            let mut out = cut(&tb, a_near)?;
+            let kept = cut(&ta, b_near)?;
+            let kept = flipped(cut(&ta, flipped(kept))?);
+            out.extend(kept);
+            out.extend(a_far);
+            out.extend(b_far);
+            out
         }
         BooleanOperator::Difference => {
-            // A − B = ¬(¬A ∪ B).
-            ta.invert();
-            ta.clip_to(&tb, eps, &mut budget)?;
-            tb.clip_to(&ta, eps, &mut budget)?;
-            tb.invert();
-            tb.clip_to(&ta, eps, &mut budget)?;
-            tb.invert();
-            ta.build(0, tb.all_polys(), eps, &mut budget)?;
-            ta.invert();
-            ta.all_polys()
+            // A − B = ¬(¬A ∪ B): ∂A outside B, and ∂B inside A turned
+            // inward. Far faces of A stand; far faces of B are outside A.
+            invert(&mut ta);
+            let mut out = flipped(cut(&tb, flipped(a_near))?);
+            let kept = cut(&ta, b_near)?;
+            out.extend(cut(&ta, flipped(kept))?);
+            out.extend(a_far);
+            out
         }
         BooleanOperator::Intersection => {
-            // A ∩ B = ¬(¬A ∪ ¬B).
-            ta.invert();
-            tb.clip_to(&ta, eps, &mut budget)?;
-            tb.invert();
-            ta.clip_to(&tb, eps, &mut budget)?;
-            tb.clip_to(&ta, eps, &mut budget)?;
-            ta.build(0, tb.all_polys(), eps, &mut budget)?;
-            ta.invert();
-            ta.all_polys()
+            // A ∩ B = ¬(¬A ∪ ¬B): ∂A inside B and ∂B inside A. Far
+            // faces of either operand are outside the other.
+            invert(&mut ta);
+            let kept = cut(&ta, b_near)?;
+            invert(&mut tb);
+            let mut out = flipped(cut(&tb, flipped(a_near))?);
+            out.extend(flipped(cut(&ta, flipped(kept))?));
+            out
         }
     };
     let mut mesh = mesh_of(&polys);
@@ -886,6 +1029,59 @@ mod tests {
         let want = sphere.signed_volume();
         assert!((total - want).abs() < 1e-9 * want, "{total} != {want}");
         assert!(i.signed_volume() > 0.9 * core::f64::consts::PI * 6.0);
+    }
+
+    #[test]
+    fn small_tool_against_a_dense_host_uses_a_window_of_it() {
+        // A 2256-triangle sphere (r = 10) against small cubes: one
+        // straddling the surface, one wholly inside (a cavity), one
+        // wholly outside but inside the sphere's box, and the roles
+        // swapped. Only the host's faces near the tool are classified;
+        // the partition identity and watertightness hold as for the
+        // whole-solid partition, and untouched host faces come through
+        // unsplit.
+        let host = crate::geometry::sphere_mesh(10.0);
+        assert!(host.triangle_count() >= LOCALISE_MIN_POLYGONS);
+        let va = host.signed_volume();
+        for (lo, hi, inside_fraction) in [
+            ([9.0, -1.0, -1.0], [11.0, 1.0, 1.0], None),
+            ([-1.0, -1.0, -1.0], [1.0, 1.0, 1.0], Some(1.0)),
+            ([8.0, 8.0, 8.0], [9.0, 9.0, 9.0], Some(0.0)),
+        ] {
+            let tool = cube(lo, hi);
+            let vb = tool.signed_volume();
+            let d = mesh_boolean(&host, &tool, BooleanOperator::Difference).unwrap();
+            let i = mesh_boolean(&host, &tool, BooleanOperator::Intersection).unwrap();
+            let u = mesh_boolean(&host, &tool, BooleanOperator::Union).unwrap();
+            let r = mesh_boolean(&tool, &host, BooleanOperator::Difference).unwrap();
+            for m in [&d, &u] {
+                assert_closed(m);
+            }
+            let (vd, vi, vu, vr) = (
+                d.signed_volume(),
+                if i.is_empty() { 0.0 } else { i.signed_volume() },
+                u.signed_volume(),
+                if r.is_empty() { 0.0 } else { r.signed_volume() },
+            );
+            assert!(
+                (vd + vi - va).abs() < 1e-9 * va,
+                "{lo:?}: {vd} + {vi} != {va}"
+            );
+            assert!(
+                (vu - (va + vb - vi)).abs() < 1e-9 * va,
+                "{lo:?}: union {vu}"
+            );
+            assert!((vr - (vb - vi)).abs() < 1e-9 * va, "{lo:?}: reverse {vr}");
+            if let Some(f) = inside_fraction {
+                assert!((vi - f * vb).abs() < 1e-9, "{lo:?}: {vi}");
+            } else {
+                assert!(vi > 0.0 && vi < vb, "{lo:?}: {vi}");
+                assert_closed(&i);
+                assert_closed(&r);
+            }
+            // The host's far faces are not fragmented.
+            assert!(d.triangle_count() < host.triangle_count() + 200);
+        }
     }
 
     #[test]

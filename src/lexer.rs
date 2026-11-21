@@ -217,16 +217,25 @@ impl<'a> Lexer<'a> {
         }
     }
 
+    /// Consume `len` ASCII bytes (none of them a line break) as an
+    /// upper-cased string of exactly that capacity.
+    fn take_ascii_upper(&mut self, len: usize) -> String {
+        let run = &self.input[self.pos..self.pos + len];
+        let mut out = String::with_capacity(len);
+        out.extend(run.iter().map(|b| b.to_ascii_uppercase() as char));
+        self.pos += len;
+        self.col += len;
+        out
+    }
+
     fn lex_keyword(&mut self) -> Result<Token> {
-        let mut out = String::new();
-        while let Some(b) = self.peek() {
-            if b.is_ascii_alphanumeric() || b == b'_' || b == b'-' {
-                out.push(b.to_ascii_uppercase() as char);
-                self.bump();
-            } else {
-                break;
-            }
-        }
+        // Measure the run first so the keyword is allocated once, at
+        // its exact length.
+        let len = self.input[self.pos..]
+            .iter()
+            .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+            .count();
+        let out = self.take_ascii_upper(len);
         Ok(Token::Keyword(out))
     }
 
@@ -252,24 +261,19 @@ impl<'a> Lexer<'a> {
 
     fn lex_enum(&mut self) -> Result<Token> {
         self.bump(); // '.'
-        let mut name = String::new();
-        loop {
-            match self.peek() {
-                Some(b'.') => {
-                    self.bump();
-                    break;
-                }
-                Some(b) if b.is_ascii_alphanumeric() || b == b'_' => {
-                    name.push(b.to_ascii_uppercase() as char);
-                    self.bump();
-                }
-                Some(other) => {
-                    return Err(
-                        self.err(format!("invalid byte 0x{other:02X} in enumeration literal"))
-                    );
-                }
-                None => return Err(self.err("unterminated enumeration literal")),
+        let len = self.input[self.pos..]
+            .iter()
+            .take_while(|&&b| b.is_ascii_alphanumeric() || b == b'_')
+            .count();
+        let name = self.take_ascii_upper(len);
+        match self.peek() {
+            Some(b'.') => {
+                self.bump();
             }
+            Some(other) => {
+                return Err(self.err(format!("invalid byte 0x{other:02X} in enumeration literal")));
+            }
+            None => return Err(self.err("unterminated enumeration literal")),
         }
         if name.is_empty() {
             return Err(self.err("empty enumeration literal `..`"));

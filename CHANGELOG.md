@@ -23,6 +23,8 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- `mesh_boolean` pre-filters spatially: a polygon whose box misses the other operand's box is kept or dropped unclassified (and unsplit), and a large closed operand met by a small one is classified through the part of it inside a window around the small one (plane cuts with re-capped sections) instead of a partition of every face. A 65 024-triangle sphere minus a box: 15.6 s → 0.07 s, same volume, 2 040 fewer output triangles.
+- Parser: keywords and enumeration literals are allocated once at their exact length and argument lists give back their growth slack (−10 % resident memory on a 700 000-instance file, same throughput).
 - The scene build is linear in the model size: product ownership, styled items, colour maps and material representations are indexed in one pass (each was a scan of the whole file per product), placement chains and the plane-angle unit are resolved once per model, and a shared `IfcRepresentationMap` source is meshed once however many items map it.
 - Surface-style materials are dielectric (`metallic` 0) unless the style says metal; representations identified `Box`, `Clearance`, `Lighting`, `CoG` and `Reference` are not drawn and `Body-FallBack` only stands in for a `Body` that produced nothing; a malformed item no longer drops its whole product.
 - A curved half-space selecting the inside of its base (`AgreementFlag` TRUE, no enclosure) uses the finite base solid directly as the Boolean tool — one mesh–mesh Boolean instead of two.
