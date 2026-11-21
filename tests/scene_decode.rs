@@ -270,3 +270,159 @@ fn curve_items_are_drawn_on_request() {
         vec![[5.0, 5.0, 0.0], [10.0, 5.0, 0.0], [10.0, 10.0, 0.0]]
     );
 }
+
+/// A minimal model around `body`: `#50` is the product definition
+/// shape of proxy `#60` (placed at the origin).
+fn model(body: &str) -> Vec<u8> {
+    format!(
+        "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION((''),'2;1');\n\
+         FILE_NAME('','',(''),(''),'','','');\nFILE_SCHEMA(('IFC4'));\nENDSEC;\nDATA;\n\
+         #1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+         #3=IFCLOCALPLACEMENT($,#2);\n#4=IFCDIRECTION((0.,0.,1.));\n\
+         #5=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,2.,2.);\n\
+         #6=IFCEXTRUDEDAREASOLID(#5,$,#4,1.);\n\
+         #7=IFCEXTRUDEDAREASOLID(#5,$,#4,5.);\n\
+         {body}\n\
+         #60=IFCBUILDINGELEMENTPROXY('0000000000000000000001',$,'P',$,$,#3,#50,$,$);\n\
+         ENDSEC;\nEND-ISO-10303-21;\n"
+    )
+    .into_bytes()
+}
+
+#[test]
+fn unstyled_items_take_the_colour_of_the_associated_material() {
+    // No styled item on the body; the product's material has a
+    // representation whose surface style is a 25 %-transparent blue.
+    let src = model(
+        "#10=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#6));\n\
+         #50=IFCPRODUCTDEFINITIONSHAPE($,$,(#10));\n\
+         #20=IFCMATERIAL('Glass',$,$);\n\
+         #21=IFCCOLOURRGB($,0.1,0.2,0.9);\n\
+         #22=IFCSURFACESTYLESHADING(#21,0.25);\n\
+         #23=IFCSURFACESTYLE('Blue',.POSITIVE.,(#22));\n\
+         #24=IFCSTYLEDITEM($,(#23),$);\n\
+         #25=IFCSTYLEDREPRESENTATION($,'Style','Material',(#24));\n\
+         #26=IFCMATERIALDEFINITIONREPRESENTATION($,$,(#25),#20);\n\
+         #27=IFCMATERIALLAYER(#20,0.2,$,$,$,$,$);\n\
+         #28=IFCMATERIALLAYERSET((#27),$,$);\n\
+         #29=IFCRELASSOCIATESMATERIAL('0000000000000000000002',$,$,$,(#60),#28);",
+    );
+    let scene = make_decoder().decode(&src).expect("decodes");
+    assert_eq!(scene.materials.len(), 1);
+    let mat = &scene.materials[0];
+    assert_eq!(mat.base_color, [0.1, 0.2, 0.9, 0.75]);
+    assert_eq!(mat.alpha_mode, AlphaMode::Blend);
+    assert!(!mat.double_sided);
+    assert!(scene.meshes[0].primitives[0].material.is_some());
+}
+
+#[test]
+fn mapped_source_items_keep_their_own_style() {
+    // Two source items under one mapped item: the first styled red
+    // itself, the second inheriting the mapped item's green. A
+    // non-uniform operator stretches z by 3.
+    let src = model(
+        "#10=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#6,#7));\n\
+         #11=IFCREPRESENTATIONMAP(#2,#10);\n\
+         #12=IFCCARTESIANTRANSFORMATIONOPERATOR3DNONUNIFORM($,$,#1,1.,$,1.,3.);\n\
+         #13=IFCMAPPEDITEM(#11,#12);\n\
+         #14=IFCSHAPEREPRESENTATION($,'Body','MappedRepresentation',(#13));\n\
+         #50=IFCPRODUCTDEFINITIONSHAPE($,$,(#14));\n\
+         #20=IFCCOLOURRGB($,1.,0.,0.);\n#21=IFCSURFACESTYLERENDERING(#20,$,$,$,$,$,$,IFCSPECULARROUGHNESS(0.4),.METAL.);\n\
+         #22=IFCSURFACESTYLE('Red',.BOTH.,(#21));\n#23=IFCSTYLEDITEM(#6,(#22),$);\n\
+         #30=IFCCOLOURRGB($,0.,1.,0.);\n#31=IFCSURFACESTYLESHADING(#30,$);\n\
+         #32=IFCSURFACESTYLE('Green',.POSITIVE.,(#31));\n#33=IFCSTYLEDITEM(#13,(#32),$);",
+    );
+    let scene = make_decoder().decode(&src).expect("decodes");
+    let prims = &scene.meshes[0].primitives;
+    assert_eq!(prims.len(), 2);
+    let look = |i: usize| &scene.materials[prims[i].material.expect("styled").0 as usize];
+    assert_eq!(look(0).name.as_deref(), Some("Red"));
+    assert!(look(0).double_sided);
+    assert_eq!(look(0).metallic, 1.0);
+    assert!((look(0).roughness - 0.4).abs() < 1e-6);
+    assert_eq!(look(1).name.as_deref(), Some("Green"));
+    assert_eq!(look(1).metallic, 0.0);
+    // Heights 1 and 5, stretched to 3 and 15.
+    let top = |i: usize| {
+        prims[i]
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .fold(0.0f32, f32::max)
+    };
+    assert_eq!((top(0), top(1)), (3.0, 15.0));
+}
+
+#[test]
+fn only_body_representations_are_drawn() {
+    // A body, a fall-back body, a clearance volume and a bounding box:
+    // one primitive (the body). Without the body the fall-back stands in.
+    let reps = |body: &str| {
+        format!(
+            "{body}\
+             #11=IFCSHAPEREPRESENTATION($,'Body-FallBack','Tessellation',(#7));\n\
+             #12=IFCSHAPEREPRESENTATION($,'Clearance','SweptSolid',(#7));\n\
+             #13=IFCBOUNDINGBOX(#1,2.,2.,1.);\n\
+             #14=IFCSHAPEREPRESENTATION($,'Box','BoundingBox',(#13));\n\
+             #50=IFCPRODUCTDEFINITIONSHAPE($,$,(#10,#11,#12,#14));"
+        )
+    };
+    let top = |scene: &Scene3D| {
+        assert_eq!(scene.meshes[0].primitives.len(), 1);
+        scene.meshes[0].primitives[0]
+            .positions
+            .iter()
+            .map(|p| p[2])
+            .fold(0.0f32, f32::max)
+    };
+    let with_body = model(&reps(
+        "#10=IFCSHAPEREPRESENTATION($,'Body','SweptSolid',(#6));\n",
+    ));
+    assert_eq!(
+        top(&make_decoder().decode(&with_body).expect("decodes")),
+        1.0
+    );
+    // An axis curve is no body.
+    let without = model(&reps(
+        "#8=IFCCARTESIANPOINT((1.,0.,0.));\n#9=IFCPOLYLINE((#1,#8));\n\
+         #10=IFCSHAPEREPRESENTATION($,'Axis','Curve3D',(#9));\n",
+    ));
+    assert_eq!(top(&make_decoder().decode(&without).expect("decodes")), 5.0);
+}
+
+#[test]
+fn polygonal_face_sets_take_per_face_colours() {
+    // A unit square pyramid: a quad base (two triangles) coloured
+    // blue, four red sides.
+    let src = model(
+        "#10=IFCCARTESIANPOINTLIST3D(((0.,0.,0.),(1.,0.,0.),(1.,1.,0.),(0.,1.,0.),(0.5,0.5,1.)));\n\
+         #11=IFCINDEXEDPOLYGONALFACE((1,4,3,2));\n#12=IFCINDEXEDPOLYGONALFACE((1,2,5));\n\
+         #13=IFCINDEXEDPOLYGONALFACE((2,3,5));\n#14=IFCINDEXEDPOLYGONALFACE((3,4,5));\n\
+         #15=IFCINDEXEDPOLYGONALFACE((4,1,5));\n\
+         #16=IFCPOLYGONALFACESET(#10,.T.,(#11,#12,#13,#14,#15),$);\n\
+         #17=IFCCOLOURRGBLIST(((0.,0.,1.),(1.,0.,0.)));\n\
+         #18=IFCINDEXEDCOLOURMAP(#16,$,#17,(1,2,2,2,2));\n\
+         #19=IFCSHAPEREPRESENTATION($,'Body','Tessellation',(#16));\n\
+         #50=IFCPRODUCTDEFINITIONSHAPE($,$,(#19));",
+    );
+    let scene = make_decoder().decode(&src).expect("decodes");
+    let prim = &scene.meshes[0].primitives[0];
+    // Six triangles, vertices split per face.
+    assert_eq!(prim.positions.len(), 18);
+    let colours = &prim.colors[0];
+    for (p, c) in prim.positions.iter().zip(colours) {
+        let _ = p;
+        assert!(*c == [0.0, 0.0, 1.0, 1.0] || *c == [1.0, 0.0, 0.0, 1.0]);
+    }
+    // Both base triangles are blue (they lie in z = 0).
+    for t in 0..6 {
+        let flat = (0..3).all(|k| prim.positions[3 * t + k][2] == 0.0);
+        let want = if flat {
+            [0.0, 0.0, 1.0, 1.0]
+        } else {
+            [1.0, 0.0, 0.0, 1.0]
+        };
+        assert_eq!(colours[3 * t], want, "triangle {t}");
+    }
+}

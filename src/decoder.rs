@@ -246,7 +246,8 @@ struct Leaf {
     item: u64,
     /// Its frame within the product (the mapped items above it).
     xform: Transform,
-    /// The nearest enclosing mapped item carrying a style of its own.
+    /// The `IfcStyledItem` of the nearest enclosing mapped item that
+    /// carries a style of its own.
     inherited_style: Option<u64>,
     /// Part of a `Body-FallBack` representation.
     fallback: bool,
@@ -382,11 +383,7 @@ fn plan_item(
         return;
     };
     let xform = xform.compose(&mapped);
-    let inherited_style = if index.styled.contains_key(&id) {
-        Some(id)
-    } else {
-        inherited_style
-    };
+    let inherited_style = index.styled.get(&id).copied().or(inherited_style);
     let Some(items) = source.args.get(3).and_then(Value::as_list) else {
         return;
     };
