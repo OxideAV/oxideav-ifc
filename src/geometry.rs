@@ -1922,8 +1922,10 @@ fn cartesian_point(step: &StepFile, arg: Option<&Value>) -> Result<[f64; 3], Geo
         .and_then(Value::as_reference)
         .ok_or(GeometryError::BadCoordinates)?;
     let inst = step.get(id).ok_or(GeometryError::MissingInstance(id))?;
-    if inst.keyword != "IFCCARTESIANPOINT" {
-        return Err(GeometryError::BadCoordinates);
+    match inst.keyword.as_str() {
+        "IFCCARTESIANPOINT" => {}
+        "IFCPOINTONCURVE" | "IFCPOINTONSURFACE" => return parametric_point(step, inst),
+        _ => return Err(GeometryError::BadCoordinates),
     }
     let comps = inst
         .args
@@ -1938,6 +1940,110 @@ fn cartesian_point(step: &StepFile, arg: Option<&Value>) -> Result<[f64; 3], Geo
         out[i] = c.as_number().ok_or(GeometryError::BadCoordinate)?;
     }
     Ok(out)
+}
+
+/// A point given by parameters on a basis curve or surface.
+///
+/// `IfcPointOnCurve(BasisCurve, PointParameter)` on the curves whose
+/// parameterisation the trims already use: an `IfcLine` (`Pnt + u ·
+/// Magnitude · Orientation`), an `IfcCircle` / `IfcEllipse` (the angle
+/// from the placement's x axis, in the model plane-angle unit) and the
+/// B-spline curves (their knot parameter). `IfcPointOnSurface(
+/// BasisSurface, PointParameterU, PointParameterV)` on the surfaces
+/// with a schema parameterisation (plane, cylinder, sphere, torus,
+/// B-spline; angular parameters in the model unit).
+fn parametric_point(
+    step: &StepFile,
+    inst: &crate::parser::ParsedInstance,
+) -> Result<[f64; 3], GeometryError> {
+    // The basis may itself be placed by parametric points; a file
+    // that closes that chain into a loop must not recurse for ever.
+    thread_local! {
+        static NESTING: core::cell::Cell<u32> = const { core::cell::Cell::new(0) };
+    }
+    struct Nested;
+    impl Drop for Nested {
+        fn drop(&mut self) {
+            NESTING.with(|n| n.set(n.get() - 1));
+        }
+    }
+    if NESTING.with(|n| n.get()) >= 2 {
+        return Err(GeometryError::BadCoordinates);
+    }
+    NESTING.with(|n| n.set(n.get() + 1));
+    let _nested = Nested;
+    let basis = inst
+        .args
+        .first()
+        .and_then(|v| step.resolve(v))
+        .ok_or(GeometryError::BadCoordinates)?;
+    let param = |i: usize| -> Result<f64, GeometryError> {
+        match inst.args.get(i) {
+            Some(Value::Typed { args, .. }) => args.first().and_then(Value::as_number),
+            Some(v) => v.as_number(),
+            None => None,
+        }
+        .filter(|v| v.is_finite())
+        .ok_or(GeometryError::BadCoordinate)
+    };
+    let angle = session::angle_scale(step);
+    if inst.keyword == "IFCPOINTONSURFACE" {
+        let surface = surfaces::ParamSurface::from_id(step, basis.id)?;
+        if !surface.has_schema_parameters() {
+            return Err(GeometryError::Unsupported(basis.keyword.clone()));
+        }
+        let (au, av) = surface.angular();
+        let u = param(1)? * if au { angle } else { 1.0 };
+        let v = param(2)? * if av { angle } else { 1.0 };
+        return Ok(surface.eval([u, v]));
+    }
+    let u = param(1)?;
+    match basis.keyword.as_str() {
+        "IFCLINE" => {
+            let origin = cartesian_point(step, basis.args.first())?;
+            let vector = basis
+                .args
+                .get(1)
+                .and_then(|v| step.resolve(v))
+                .ok_or(GeometryError::BadCoordinates)?;
+            let unit = direction(step, vector.args.first())?
+                .and_then(normalise)
+                .ok_or(GeometryError::BadCoordinates)?;
+            let d = u * vector
+                .args
+                .get(1)
+                .and_then(Value::as_number)
+                .ok_or(GeometryError::BadCoordinate)?;
+            Ok([
+                origin[0] + d * unit[0],
+                origin[1] + d * unit[1],
+                origin[2] + d * unit[2],
+            ])
+        }
+        "IFCCIRCLE" | "IFCELLIPSE" => {
+            let placement = basis
+                .args
+                .first()
+                .and_then(|v| step.resolve(v))
+                .ok_or(GeometryError::BadCoordinates)?;
+            if placement.keyword == "IFCAXIS2PLACEMENT2D" {
+                let conic = conic_2d(step, &basis.keyword, &basis.args)?;
+                let p = conic.point_at(u * angle);
+                Ok([p[0], p[1], 0.0])
+            } else {
+                Ok(conic_3d(step, &basis.keyword, &basis.args)?.point_at(u * angle))
+            }
+        }
+        "IFCBSPLINECURVEWITHKNOTS"
+        | "IFCRATIONALBSPLINECURVEWITHKNOTS"
+        | "IFCBEZIERCURVE"
+        | "IFCRATIONALBEZIERCURVE" => {
+            let curve = bspline::BSplineCurve::from_instance(step, &basis.keyword, &basis.args)?;
+            let (lo, hi) = curve.domain();
+            Ok(curve.point_at(u.clamp(lo, hi)))
+        }
+        other => Err(GeometryError::Unsupported(other.to_string())),
+    }
 }
 
 /// Resolve an optional `IfcDirection` reference to a 3-D ratio vector

@@ -8,6 +8,7 @@ All notable changes to this project will be documented in this file.
 
 - IFC 4.3 alignment curves (`geometry::alignment`): composite curves of `IfcCurveSegment`s over `IfcLine`, `IfcCircle`, `IfcClothoid` and `IfcCosineSpiral` parents (curvature integrated over arc length from the segment placement; the Annex E listings' transition end points reproduce to 1e-6), `IfcGradientCurve` (base curve lifted to its elevation profile) and `IfcOffsetCurveByDistances` (lateral / vertical offsets interpolated between distances). They serve as directrices of the swept and sectioned solids and as profile / boundary curves, and carry their true distance-along, which linear placements and length-valued sweep trims now use. The remaining spirals, `IfcPolynomialCurve` and `IfcSegmentedReferenceCurve` are refused by keyword (no staged definition).
 - `curve_points(step, id)` — any bounded curve item (or a single `IfcCurveSegment`) as a 3-D polyline; `IfcDecoder::with_curves(true)` draws curve items (axis / footprint curves, geometric curve set members, alignments) as line strips.
+- `IfcPointOnCurve` / `IfcPointOnSurface` resolve wherever a point is read (vertex geometry, loop corners, locations) — on lines, conics and B-spline curves; on planes, cylinders, spheres, tori and B-spline surfaces; angular parameters in the model unit.
 - `IfcAnnotationFillArea` (planar region with inner boundaries), `IfcGeometricSet` / `IfcGeometricCurveSet` (their surface members mesh), `IfcTrimmedCurve` over a 3-D `IfcLine`.
 
 ### Fixed

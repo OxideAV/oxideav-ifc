@@ -566,12 +566,20 @@ toolchain) with two targets, run daily by the `Fuzz` workflow:
   tetrahedra and wedges, degenerate or inverted) through every operator
   of the mesh–mesh Boolean evaluator; on two well-formed boxes the
   partition identities and the watertightness of every result are
-  asserted, so a classification or stitching bug is a finding.
+  asserted, so a classification or stitching bug is a finding. One
+  input in eight also meets a dense sphere both ways round — the
+  window-localised classifier path.
 
 ```sh
 cd fuzz && cargo fuzz run tessellate seeds -- -max_total_time=300
 cd fuzz && cargo fuzz run mesh_boolean -- -max_total_time=300
 ```
+
+Bounded foreground runs of this release: `tessellate` 33 418 runs /
+100 s and `mesh_boolean` 20 388 runs / 110 s, no findings — after one
+earlier in the round: sampling curves exposed a per-path walk of
+reference lattices in the curve-dimension query, now bounded and
+pinned by a test.
 
 Hostile-geometry work is bounded throughout: curve samples, B-spline
 control nets, sweep sections, per-face triangles, refinement rounds,
@@ -618,11 +626,12 @@ surface members.
 Every entity under `IfcGeometricRepresentationItem` and
 `IfcTopologicalRepresentationItem` in the staged IFC4 ADD2 and
 IFC4X3 ADD2 schemas (153 entities; ³ = IFC 4.3 only). Of the 126
-instantiable ones, 35 tessellate as items, 10 sample as curves, 56
-are evaluated as parts or operands of those, 3 are typed only and 22
-are refused — 14 of them carrying no surface or curve of their own
-(lights, text, fill patterns, bare topology, parametric points) and
-8 for want of a staged definition.
+instantiable ones, 35 tessellate as items, 10 sample as curves, 58
+are evaluated as parts or operands of those, 3 are typed only and 20
+are refused — 12 of them carrying no surface or curve of their own
+(lights, text, fill patterns, bare topology) and 8 for want of a
+staged definition: 106 of the 114 geometry-bearing entities (93 %)
+are covered.
 
 | Family | Entities | Status | Notes |
 |---|---|---|---|
@@ -645,7 +654,7 @@ are refused — 14 of them carrying no surface or curve of their own
 | Other curves | `IfcPolynomialCurve`³, `IfcSegmentedReferenceCurve`³, `IfcOffsetCurve2D`, `IfcOffsetCurve3D` | **refused** | polynomial: parameter range and its relation to a segment length are not staged; segmented reference curve: the cant rules are only outlined; offset curves: the side a positive distance lies on is not staged (docs gaps) |
 | Placements, points, directions | `IfcAxis1Placement`, `IfcAxis2Placement2D`, `IfcAxis2Placement3D`, `IfcAxis2PlacementLinear`³, `IfcCartesianPoint`, `IfcCartesianPointList2D`, `IfcCartesianPointList3D`, `IfcDirection`, `IfcVector`, `IfcPointByDistanceExpression`³, `IfcCartesianTransformationOperator2D`, `IfcCartesianTransformationOperator2DnonUniform`, `IfcCartesianTransformationOperator3D`, `IfcCartesianTransformationOperator3DnonUniform` | evaluated in context | frames, coordinates, stations; mapped-item / derived-profile operators incl. non-uniform scales and mirrors |
 | Extents | `IfcBoundingBox`, `IfcPlanarExtent`, `IfcPlanarBox` | typed only | the enclosure of a boxed half-space; a `Box` representation is not drawn |
-| Points on geometry | `IfcPointOnCurve`, `IfcPointOnSurface` | **refused** | need each basis curve / surface parameterisation as a point source; only Cartesian vertex geometry is read |
+| Points on geometry | `IfcPointOnCurve`, `IfcPointOnSurface` | evaluated in context | wherever a point is read (vertex geometry, loop corners, locations): on a line, circle, ellipse or B-spline curve; on a plane, cylinder, sphere, torus or B-spline surface |
 | Lights | `IfcLightSourceAmbient`, `IfcLightSourceDirectional`, `IfcLightSourceGoniometric`, `IfcLightSourcePositional`, `IfcLightSourceSpot` | **refused** | not geometry; not mapped to scene lights |
 | Text and fill styles | `IfcTextLiteral`, `IfcTextLiteralWithExtent`, `IfcFillAreaStyleHatching`, `IfcFillAreaStyleTiles` | **refused** | text needs a font; fill areas are drawn solid, hatch / tile patterns are not applied |
 

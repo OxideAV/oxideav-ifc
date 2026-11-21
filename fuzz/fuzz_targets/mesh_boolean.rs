@@ -5,7 +5,9 @@
 //! evaluator must never panic or run away (its fragment budget bounds
 //! the work). When both operands are single well-formed boxes the exact
 //! partition identity vol(A − B) + vol(A ∩ B) = vol(A) and the
-//! watertightness of every result are asserted as well.
+//! watertightness of every result are asserted as well. The second
+//! operand also meets a dense sphere, the case the evaluator answers
+//! from a window of the large operand.
 
 #![no_main]
 
@@ -154,6 +156,34 @@ fn closed(m: &TriMesh) -> bool {
     net.values().all(|&n| n == 0)
 }
 
+/// A closed latitude / longitude sphere, wound outward.
+fn sphere(r: f64, n: usize, m: usize) -> TriMesh {
+    let tau = std::f64::consts::TAU;
+    let mut mesh = TriMesh::default();
+    mesh.positions.push([0.0, 0.0, -r]);
+    for j in 1..m {
+        let lat = -tau / 4.0 + tau / 2.0 * (j as f64) / (m as f64);
+        for i in 0..n {
+            let lon = tau * (i as f64) / (n as f64);
+            mesh.positions
+                .push([r * lat.cos() * lon.cos(), r * lat.cos() * lon.sin(), r * lat.sin()]);
+        }
+    }
+    mesh.positions.push([0.0, 0.0, r]);
+    let ring = |j: usize, i: usize| (1 + (j - 1) * n + i % n) as u32;
+    let top = (mesh.positions.len() - 1) as u32;
+    for i in 0..n {
+        mesh.triangles.push([0, ring(1, i + 1), ring(1, i)]);
+        for j in 1..m - 1 {
+            let (a, b, c, d) = (ring(j, i), ring(j, i + 1), ring(j + 1, i + 1), ring(j + 1, i));
+            mesh.triangles.push([a, b, c]);
+            mesh.triangles.push([a, c, d]);
+        }
+        mesh.triangles.push([top, ring(m - 1, i), ring(m - 1, i + 1)]);
+    }
+    mesh
+}
+
 fuzz_target!(|data: &[u8]| {
     if data.len() < 2 {
         return;
@@ -163,6 +193,23 @@ fuzz_target!(|data: &[u8]| {
     let (b, b_box) = operand(&data[split..]);
     if a.is_empty() || b.is_empty() {
         return;
+    }
+    // A dense closed host (a 24 × 12 latitude / longitude sphere of
+    // radius 6) against the same hostile operand, both ways round: a
+    // large operand met by a small one is classified through a window
+    // of it, which must hold up on any tool.
+    // (One input in eight: the dense case costs fifty times the small
+    // one and must not starve it.)
+    if data[0] % 8 == 0 {
+        let host = sphere(6.0, 24, 12);
+        for op in [
+            BooleanOperator::Difference,
+            BooleanOperator::Intersection,
+            BooleanOperator::Union,
+        ] {
+            let _ = mesh_boolean(&host, &b, op);
+            let _ = mesh_boolean(&b, &host, op);
+        }
     }
     let d = mesh_boolean(&a, &b, BooleanOperator::Difference);
     let i = mesh_boolean(&a, &b, BooleanOperator::Intersection);

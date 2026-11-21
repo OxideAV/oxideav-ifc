@@ -338,3 +338,43 @@ fn hostile_reference_lattices_are_not_walked_path_by_path() {
         assert!(tessellate_item(&f, id).is_err());
     }
 }
+
+#[test]
+fn parametric_points_are_vertex_geometry() {
+    // A triangle whose corners are a Cartesian point, a point on a
+    // circle (radius 2 about the origin, at 90° in a degree model) and
+    // a point on a cylinder (radius 2, u = 180°, v = 3); and a point
+    // on a curve that is defined through itself, which must fail
+    // rather than recurse.
+    let f = parse(
+        "#100=IFCDIMENSIONALEXPONENTS(0,0,0,0,0,0,0);\n\
+         #101=IFCSIUNIT(*,.PLANEANGLEUNIT.,$,.RADIAN.);\n\
+         #102=IFCMEASUREWITHUNIT(IFCPLANEANGLEMEASURE(0.017453292519943295),#101);\n\
+         #103=IFCCONVERSIONBASEDUNIT(#100,.PLANEANGLEUNIT.,'DEGREE',#102);\n\
+         #104=IFCUNITASSIGNMENT((#103));\n\
+         #105=IFCPROJECT('0000000000000000000001',$,'P',$,$,$,$,$,#104);\n\
+         #1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+         #3=IFCCIRCLE(#2,2.);\n#4=IFCCYLINDRICALSURFACE(#2,2.);\n\
+         #5=IFCPOINTONCURVE(#3,90.);\n#6=IFCPOINTONSURFACE(#4,180.,3.);\n\
+         #7=IFCPOLYLOOP((#1,#5,#6));\n#8=IFCFACEOUTERBOUND(#7,.T.);\n#9=IFCFACE((#8));\n\
+         #10=IFCOPENSHELL((#9));\n#11=IFCSHELLBASEDSURFACEMODEL((#10));\n\
+         #20=IFCVECTOR(#21,1.);\n#21=IFCDIRECTION((1.,0.,0.));\n\
+         #22=IFCLINE(#23,#20);\n#23=IFCPOINTONCURVE(#22,1.);\n\
+         #24=IFCPOLYLOOP((#1,#5,#23));\n#25=IFCFACEOUTERBOUND(#24,.T.);\n#26=IFCFACE((#25));\n\
+         #27=IFCOPENSHELL((#26));\n#28=IFCSHELLBASEDSURFACEMODEL((#27));",
+    );
+    let m = tessellate_item(&f, 11).unwrap();
+    assert_eq!(m.positions.len(), 3);
+    let close = |p: [f64; 3], q: [f64; 3]| (0..3).all(|k| (p[k] - q[k]).abs() < 1e-12);
+    assert!(
+        close(m.positions[1], [0.0, 2.0, 0.0]),
+        "{:?}",
+        m.positions[1]
+    );
+    assert!(
+        close(m.positions[2], [-2.0, 0.0, 3.0]),
+        "{:?}",
+        m.positions[2]
+    );
+    assert!(tessellate_item(&f, 28).is_err());
+}
