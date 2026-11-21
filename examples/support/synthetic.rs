@@ -29,6 +29,14 @@ fn guid(n: u64) -> String {
 /// Generate the model text. `products` mapped proxies; walls with
 /// openings are added at one per thousand products (at least one).
 pub fn synthetic_model(products: usize) -> String {
+    synthetic_model_with(products, true)
+}
+
+/// [`synthetic_model`] with a choice of sharing: `shared` FALSE gives
+/// every product a filleted I-section extrusion of its own (nothing to
+/// instance — the per-item tessellation cost in isolation).
+#[allow(dead_code)]
+pub fn synthetic_model_with(products: usize, shared: bool) -> String {
     let mut s = String::with_capacity(products * 420 + 16_384);
     s.push_str(
         "ISO-10303-21;\nHEADER;\nFILE_DESCRIPTION(('ViewDefinition [ReferenceView_V1.2]'),'2;1');\n\
@@ -133,6 +141,40 @@ pub fn synthetic_model(products: usize) -> String {
         let (x, y) = ((i % side) as f64 * 1500.0, (i / side) as f64 * 1500.0);
         let b = next;
         next += 7;
+        if !shared {
+            // Own profile + solid in place of the mapped item (#b+3).
+            let _ = write!(
+                s,
+                "#{b}=IFCCARTESIANPOINT(({x:.1},{y:.1},0.));\n\
+                 #{}=IFCAXIS2PLACEMENT3D(#{b},$,$);\n\
+                 #{}=IFCLOCALPLACEMENT(#8,#{});\n\
+                 #{}=IFCISHAPEPROFILEDEF(.AREA.,$,$,200.,{}.,12.,18.,15.,$,$);\n\
+                 #{}=IFCEXTRUDEDAREASOLID(#{},$,#15,3000.);\n\
+                 #{}=IFCPRODUCTDEFINITIONSHAPE($,$,(#{}));\n\
+                 #{}=IFCBUILDINGELEMENTPROXY('{}',$,'Proxy {i}',$,$,#{},#{},$,$);\n",
+                b + 1,
+                b + 2,
+                b + 1,
+                b + 3,
+                300 + (i % 97),
+                b + 4,
+                b + 3,
+                b + 5,
+                next,
+                b + 6,
+                guid(b),
+                b + 2,
+                b + 5
+            );
+            let _ = writeln!(
+                s,
+                "#{next}=IFCSHAPEREPRESENTATION(#6,'Body','SweptSolid',(#{}));",
+                b + 4
+            );
+            next += 1;
+            contained.push(b + 6);
+            continue;
+        }
         let _ = write!(
             s,
             "#{b}=IFCCARTESIANPOINT(({x:.1},{y:.1},0.));\n\

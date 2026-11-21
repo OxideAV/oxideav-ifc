@@ -23,6 +23,7 @@ extension.
 | **2** | EXPRESS-schema-aware typing: named attribute resolution per the IFC 4 EXPRESS inheritance chains, spatial-structure traversal | ✅ this release (core entity slice) |
 | **3** | Geometry extraction into `oxideav-mesh3d::Scene3D`: tessellations (incl. face voids + colour maps), faceted Breps (face holes + bound orientation, void shells as cavities, poly-loops and **edge loops** with line / conic / bounded-curve edge geometry), **advanced (curved) Breps** — cylindrical / spherical / toroidal / B-spline / revolved / extruded faces trimmed in parameter space, watertight across seams, poles and shared chords — face/shell surface models, bounded-surface sheets (curve-bounded planes, rectangular trims of any supported surface, **p-curve-bounded surfaces** with implicit outers), swept solids (extruded / revolved + their **tapered** subtypes, **directrix sweeps** with a fixed-reference or reference-surface frame) over the full profile family — arbitrary curves with arc and **B-spline** boundaries (trimmed conics, three-point arcs, composite curves, NURBS), **named parameterised sections** (I / asymmetric I / L/T/U/Z/C, rounded rectangle, trapezium, with fillet / edge radii and slopes), hollow, derived / mirrored and composite profiles — swept-disk tubes (polygonal subtype with **filleted** corners), sectioned (alignment) solids, sectioned surfaces and sectioned spines, triangulated irregular networks, CSG primitives and CSG trees, **real mesh–mesh booleans** (UNION / INTERSECTION / DIFFERENCE with non-convex tools, half-space clipping, watertight stitching), mapped-item instancing, `IfcLocalPlacement` world-positioning, surface-style materials, and EXPRESS WHERE-rule validation for the swept-solid / profile slice | ✅ this release |
 | **4** | Semantic data layer: property sets (`IfcPropertySet` — the full `IfcSimpleProperty` family + complex groups), quantity sets (`IfcElementQuantity` with SI scaling), type-object inheritance (`IfcRelDefinesByType` + `HasPropertySets` shadowing), material associations (`IfcRelAssociatesMaterial` — layer / profile / constituent sets), classification + document references, groups / systems / zones, void/fill opening graph, georeferencing (`IfcMapConversion` (+ `Scaled`) / `IfcRigidOperation` / `IfcProjectedCRS`, site lat/long), extended unit engine (area / volume / mass / time, prefixed-derived-unit policy) | ✅ this release |
+| **Scene** | Scene assembly: spatial hierarchy, openings subtracted from hosts, shared representations tessellated once (optionally instanced), surface-style / material looks, model units and georeferencing, caller-granted thread budget; load linear in the model size | ✅ this release |
 
 ## Phase 1 surface
 
@@ -359,9 +360,9 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
     `AgreementFlag` side convention) splits the operand's closed mesh
     along its base plane and **re-caps the cut watertight**
     (deterministic loop chaining, hole-aware annulus caps); a
-    half-space on a **cylindrical or spherical** base (its inside for
-    `AgreementFlag` TRUE — the negative side of the outward surface
-    normal — its outside for FALSE) is materialised as a finite solid
+    half-space on a **cylindrical, spherical or toroidal** base (its
+    inside for `AgreementFlag` TRUE — the negative side of the outward
+    surface normal — its outside for FALSE) is materialised as a finite solid
     over the operand's extent and carved by the evaluator below;
   - every other tool goes through the **mesh–mesh Boolean evaluator**
     (`mesh_boolean(a, b, op)`, also public): a binary space partition of
@@ -414,25 +415,59 @@ println!("{} verts, {} tris", mesh.vertex_count(), mesh.triangle_count());
   `TriMesh::transform` apply it to a mesh; cyclic `PlacementRelTo` chains
   are bounded by a depth cap.
 
-With the `registry` feature, `IfcDecoder` walks every
-`IfcProductDefinitionShape`, tessellates its supported body items —
-**one primitive per representation item** — and positions the result in
-**world space** via the owning product's `IfcLocalPlacement` chain. The
-scene node is named after the owning product's `Name` (the column
-fixture decodes as "Column #1"); the product is found by back-scanning
-for the instance whose `Representation` references the shape, so
-geometry-bearing products outside the typed schema slice
-(e.g. `IfcBuildingElementProxy`) are still placed and named.
-Presentation carries over: an `IfcStyledItem` → `IfcSurfaceStyle`
-shading colour becomes the primitive's `Material` (`base_color` with
-alpha `1 − Transparency`, named from the style, deduplicated per
-style), and an `IfcIndexedColourMap` on a triangulated face set becomes
-per-vertex colours (vertices split per face so each triangle keeps its
-flat colour — the individual-colors fixture decodes with its
-red/green/yellow faces). The five fixture models decode to their boxes
-and the dense basin mesh; the column body lands at its placed origin
-`(432, 288, 48)` and the wall model decodes to its wall body, opening
-and window prisms.
+### Scene decoding (`registry` feature)
+
+`IfcDecoder` builds a `Scene3D` from the whole model:
+
+* **Hierarchy.** The project is the scene root; the spatial structure
+  (`IfcRelAggregates`: site → building → storey → space) and element
+  decomposition are nested nodes, and each product hangs under the
+  structure element containing it
+  (`IfcRelContainedInSpatialStructure`). Nodes are named after the
+  object's `Name` and carry `ifc:global_id` / `ifc:class` extras;
+  `Model::aggregating_parent` / `Model::container_of` expose the back
+  edges.
+* **Items.** Every product shape is flattened to its representation
+  items — mapped items are followed into their shared source
+  representation (nested, any `IfcCartesianTransformationOperator`
+  incl. non-uniform scales and mirrors) — **one primitive per item**,
+  positioned through the product's `IfcLocalPlacement` chain. Each
+  distinct item is tessellated **once** per model however many
+  products map it. Representations identified `Box`, `Clearance`,
+  `Lighting`, `CoG` and `Reference` are not drawn, and `Body-FallBack`
+  only stands in for a `Body` that produced nothing.
+* **Openings.** The bodies of the opening elements voiding a host
+  (`IfcRelVoidsElement`) are subtracted from the host's closed body
+  items — bounding boxes first, in the host's local frame — and the
+  openings themselves are not drawn
+  (`with_opening_subtraction(false)` keeps the as-authored solids).
+* **Looks.** `IfcStyledItem` → `IfcSurfaceStyle` shading / rendering
+  becomes the primitive's `Material`: colour, `Transparency` → blended
+  alpha, `Side` `.BOTH.` → two-sided, diffuse colour or factor,
+  specular roughness, metal reflectance (surface colours are
+  dielectric otherwise), deduplicated per style. A source item keeps
+  its own style under a mapped item. An `IfcIndexedColourMap` on a
+  triangulated **or polygonal** face set becomes per-vertex colours
+  (vertices split per face). Unstyled items take the surface style of
+  the product's associated material
+  (`IfcMaterialDefinitionRepresentation`), else a named material
+  (the basin fixture decodes with `"Ceramic"`). Texture maps are not
+  read.
+* **Model facts.** The scene is Z-up and declares the project length
+  unit (`Scene3D::unit`, exact factor in `ifc:metres_per_unit` —
+  coordinates stay in model units); `ifc:map_conversion` (eastings /
+  northings / height / rotation / scale / CRS name) and
+  `ifc:site_geolocation` carry the georeferencing.
+
+Options (builder methods on `IfcDecoder`; defaults in bold):
+
+| Method | Effect |
+|---|---|
+| `with_threads(n)` / `with_execution_context(&ctx)` | item tessellation and opening subtraction on up to `n` threads (**1**); the scene is identical at every budget |
+| `with_instancing(bool)` | **off**: world-space vertices, one mesh per product. On: meshes in the product frame, placement as the node transform, and products mapping the same source items share **one** mesh |
+| `with_opening_subtraction(bool)` | **on**; off draws hosts and openings as authored |
+| `with_curves(bool)` | **off**; on draws curve items (axis / footprint curves, geometric curve set members, alignment curves) as line strips, so curve-only products appear |
+| `decode_step(&StepFile)` | build the scene of an already parsed file |
 
 `length_unit_scale(&StepFile)` resolves metres-per-model-unit from the
 project's `IfcUnitAssignment` (`IfcSIUnit` prefixes and
@@ -481,7 +516,15 @@ trimmed surfaces, B-spline curves
   winds around the seam), `ImplicitOuter` closes a periodic basis with
   winding rim loops at its parameter extents, and the sheet is meshed
   by the same parameter-space trimmer as the curved advanced faces —
-  watertight across seams and poles. WHERE rules `DimIs2D`,
+  watertight across seams and poles. On a basis closed in **both**
+  parameters (a torus) the implicit outer boundary is empty: the whole
+  surface is the region and every listed curve a hole, with both seams
+  placed in the widest parameter band no hole reaches (a hole
+  straddling `u = 0` or `v = 0` is not cut, no hole edge lies on a
+  seam, no sliver triangles). The same placement meshes an advanced
+  face whose bound is an `IfcVertexLoop` — a whole sphere or torus,
+  optionally with edge-loop holes — closed through the seams and the
+  sphere's poles. WHERE rules `DimIs2D`,
   `CurveIs3D` / `CurveIsNotPcurve` / `TwoPCurves` / `SameSurface` /
   `DistinctSurfaces` (surface curves, transcribing
   `IfcGetBasisSurface` / `IfcAssociatedSurface`), `SameSurface` /
@@ -515,7 +558,7 @@ watertightness.
 toolchain) with two targets, run daily by the `Fuzz` workflow:
 
 * `tessellate` — every instance of an arbitrary STEP file is run
-  through `tessellate_item` under tight `StepLimits`, so the face-set /
+  through `tessellate_item` and `curve_points` under tight `StepLimits`, so the face-set /
   Brep / sweep / Boolean / curved-face paths must never panic or run
   away on hostile input. `fuzz/seeds/` holds the seed corpus (the STEP
   snippets of the geometry tests).
@@ -534,6 +577,162 @@ Hostile-geometry work is bounded throughout: curve samples, B-spline
 control nets, sweep sections, per-face triangles, refinement rounds,
 Delaunay flips, the cross-face chord repair and the Boolean fragment
 count all carry hard caps.
+
+### Alignment curves (IFC 4.3)
+
+`curve_points(step, id)` samples any bounded curve item into a 3-D
+polyline, including the alignment family:
+
+* `IfcCompositeCurve` of **`IfcCurveSegment`s** — each segment is the
+  run of its `ParentCurve` from `SegmentStart` over `SegmentLength`
+  (lengths along the parent; negative runs against its sense),
+  inserted with its start on `Placement.Location` heading along
+  `Placement.RefDirection`. It is evaluated by integrating the
+  parent's curvature over arc length from that point and heading
+  (Simpson heading, three-point Gauss–Legendre position):
+  `IfcLine` (0), `IfcCircle` (1/R), **`IfcClothoid`**
+  (`s / (A·|A|)`, a negative constant turning right) and
+  **`IfcCosineSpiral`** (`1/ConstantTerm + cos(π·s/L)/CosineTerm`).
+  The clothoid and cosine laws are this crate's reading of the
+  attribute lists; they reproduce the transition end points, headings
+  and radii of the Annex E alignment listings to 1e-6.
+* **`IfcGradientCurve`** — the base curve lifted to the height of its
+  elevation profile (segments in the distance-along / height plane).
+* **`IfcOffsetCurveByDistances`** — lateral (left of travel) and
+  vertical offsets interpolated between distances along the basis.
+
+Every sample carries its true distance along the curve (arc length,
+not the chord sum; for a gradient curve the base curve's), which
+`IfcAxis2PlacementLinear` stations and length-valued sweep trims use
+— so `IfcSectionedSolidHorizontal`, `IfcSectionedSurface` and the
+directrix sweeps follow an alignment by its stationing. Alignment
+segments are sampled at a quarter of the circle step, sixteen samples
+at least on a curved run.
+
+`IfcAnnotationFillArea` meshes as a planar region with inner
+boundaries; an `IfcGeometricSet` / `IfcGeometricCurveSet` meshes its
+surface members.
+
+## Representation item coverage
+
+Every entity under `IfcGeometricRepresentationItem` and
+`IfcTopologicalRepresentationItem` in the staged IFC4 ADD2 and
+IFC4X3 ADD2 schemas (153 entities; ³ = IFC 4.3 only). Of the 126
+instantiable ones, 35 tessellate as items, 10 sample as curves, 56
+are evaluated as parts or operands of those, 3 are typed only and 22
+are refused — 14 of them carrying no surface or curve of their own
+(lights, text, fill patterns, bare topology, parametric points) and
+8 for want of a staged definition.
+
+| Family | Entities | Status | Notes |
+|---|---|---|---|
+| Tessellated face sets | `IfcTriangulatedFaceSet`, `IfcPolygonalFaceSet`, `IfcTriangulatedIrregularNetwork`³ | **tessellated** | indexed triangles / polygons (`PnIndex`, voids); per-face `IfcIndexedColourMap` colours on both face-set kinds; TIN `Flags` carry no geometry |
+| Tessellated faces | `IfcIndexedPolygonalFace`, `IfcIndexedPolygonalFaceWithVoids` | evaluated in context | faces of a polygonal face set (inner loops are holes) |
+| Boundary representations | `IfcFacetedBrep`, `IfcFacetedBrepWithVoids`, `IfcAdvancedBrep`, `IfcAdvancedBrepWithVoids`, `IfcFaceBasedSurfaceModel`, `IfcShellBasedSurfaceModel` | **tessellated** | planar faces by polygon triangulation, curved faces by parameter-space trimming; void shells are cavities |
+| Topology | `IfcClosedShell`, `IfcOpenShell`, `IfcConnectedFaceSet`, `IfcFace`, `IfcFaceSurface`, `IfcAdvancedFace`, `IfcFaceBound`, `IfcFaceOuterBound`, `IfcPolyLoop`, `IfcEdgeLoop`, `IfcVertexLoop`, `IfcOrientedEdge`, `IfcEdgeCurve`, `IfcEdge`, `IfcSubedge`, `IfcVertexPoint` | evaluated in context | walked from their Brep / surface model; a vertex loop bounds a face covering a whole closed surface (sphere, torus) |
+| Topology | `IfcVertex`, `IfcLoop`, `IfcPath` | **refused** | a bare `IfcVertex` / `IfcLoop` carries no geometry; `IfcPath` is referenced by no meshed entity |
+| Swept area solids | `IfcExtrudedAreaSolid`, `IfcExtrudedAreaSolidTapered`, `IfcRevolvedAreaSolid`, `IfcRevolvedAreaSolidTapered`, `IfcFixedReferenceSweptAreaSolid`, `IfcDirectrixDerivedReferenceSweptAreaSolid`³, `IfcSurfaceCurveSweptAreaSolid` | **tessellated** | full profile family; directrix sweeps along any sampled 3-D curve incl. alignment curves; reference surfaces: plane / cylinder / sphere / torus |
+| Other solids | `IfcSweptDiskSolid`, `IfcSweptDiskSolidPolygonal`, `IfcSectionedSolidHorizontal`³, `IfcSectionedSpine`, `IfcCsgSolid`, `IfcBooleanResult`, `IfcBooleanClippingResult` | **tessellated** | mitred tubes, station lofts, real mesh–mesh Booleans |
+| CSG primitives | `IfcBlock`, `IfcRectangularPyramid`, `IfcRightCircularCone`, `IfcRightCircularCylinder`, `IfcSphere` | **tessellated** |  |
+| Half-spaces | `IfcHalfSpaceSolid`, `IfcBoxedHalfSpace`, `IfcPolygonalBoundedHalfSpace` | evaluated in context | Boolean operands on a plane, cylinder, sphere or **torus** base (unbounded on their own); a swept / B-spline base is refused — no closed-form side test |
+| Bounded surfaces | `IfcCurveBoundedPlane`, `IfcCurveBoundedSurface`, `IfcRectangularTrimmedSurface`, `IfcSectionedSurface`³ | **tessellated** | open sheets; `ImplicitOuter` on every basis incl. the doubly periodic torus |
+| Basis surfaces | `IfcPlane`, `IfcCylindricalSurface`, `IfcSphericalSurface`, `IfcToroidalSurface`, `IfcBSplineSurfaceWithKnots`, `IfcRationalBSplineSurfaceWithKnots`, `IfcSurfaceOfLinearExtrusion`, `IfcSurfaceOfRevolution` | evaluated in context | face / trim / half-space / reference surfaces; unbounded (or untrimmed) as items of their own |
+| Annotation and sets | `IfcAnnotationFillArea`, `IfcGeometricSet`, `IfcGeometricCurveSet` | **tessellated** | planar fill with inner boundaries; a set meshes its surface members, its curves are drawn by `with_curves` |
+| Bounded curves | `IfcPolyline`, `IfcIndexedPolyCurve`, `IfcTrimmedCurve`, `IfcCompositeCurve`, `IfcBSplineCurveWithKnots`, `IfcRationalBSplineCurveWithKnots`, `IfcGradientCurve`³, `IfcOffsetCurveByDistances`³, `IfcCircle`, `IfcEllipse` | **sampled** (curve) | `curve_points`; profile boundaries, directrices, edge geometry; drawn as line strips by `with_curves` |
+| Curve parts and parents | `IfcLine`, `IfcClothoid`³, `IfcCosineSpiral`³, `IfcCurveSegment`³, `IfcCompositeCurveSegment`, `IfcReparametrisedCompositeCurveSegment` | evaluated in context | `IfcLine` as trim basis / edge geometry / segment parent; the spirals as `IfcCurveSegment` parents (a segment alone is sampled too) |
+| Curves on surfaces | `IfcPcurve`, `IfcSurfaceCurve`, `IfcIntersectionCurve`, `IfcSeamCurve`, `IfcCompositeCurveOnSurface`, `IfcBoundaryCurve`, `IfcOuterBoundaryCurve` | evaluated in context | boundaries of `IfcCurveBoundedSurface` in the basis parameter space |
+| Spirals | `IfcSineSpiral`³, `IfcSecondOrderPolynomialSpiral`³, `IfcThirdOrderPolynomialSpiral`³, `IfcSeventhOrderPolynomialSpiral`³ | **refused** | the staged schema lists their terms but no page gives the curvature law / term normalisation (docs gap) |
+| Other curves | `IfcPolynomialCurve`³, `IfcSegmentedReferenceCurve`³, `IfcOffsetCurve2D`, `IfcOffsetCurve3D` | **refused** | polynomial: parameter range and its relation to a segment length are not staged; segmented reference curve: the cant rules are only outlined; offset curves: the side a positive distance lies on is not staged (docs gaps) |
+| Placements, points, directions | `IfcAxis1Placement`, `IfcAxis2Placement2D`, `IfcAxis2Placement3D`, `IfcAxis2PlacementLinear`³, `IfcCartesianPoint`, `IfcCartesianPointList2D`, `IfcCartesianPointList3D`, `IfcDirection`, `IfcVector`, `IfcPointByDistanceExpression`³, `IfcCartesianTransformationOperator2D`, `IfcCartesianTransformationOperator2DnonUniform`, `IfcCartesianTransformationOperator3D`, `IfcCartesianTransformationOperator3DnonUniform` | evaluated in context | frames, coordinates, stations; mapped-item / derived-profile operators incl. non-uniform scales and mirrors |
+| Extents | `IfcBoundingBox`, `IfcPlanarExtent`, `IfcPlanarBox` | typed only | the enclosure of a boxed half-space; a `Box` representation is not drawn |
+| Points on geometry | `IfcPointOnCurve`, `IfcPointOnSurface` | **refused** | need each basis curve / surface parameterisation as a point source; only Cartesian vertex geometry is read |
+| Lights | `IfcLightSourceAmbient`, `IfcLightSourceDirectional`, `IfcLightSourceGoniometric`, `IfcLightSourcePositional`, `IfcLightSourceSpot` | **refused** | not geometry; not mapped to scene lights |
+| Text and fill styles | `IfcTextLiteral`, `IfcTextLiteralWithExtent`, `IfcFillAreaStyleHatching`, `IfcFillAreaStyleTiles` | **refused** | text needs a font; fill areas are drawn solid, hatch / tile patterns are not applied |
+
+The 27 abstract supertypes (`IfcBSplineCurve`, `IfcBSplineSurface`,
+`IfcBoundedCurve`, `IfcBoundedSurface`, `IfcCartesianPointList`,
+`IfcCartesianTransformationOperator`, `IfcConic`, `IfcCsgPrimitive3D`,
+`IfcCurve`, `IfcDirectrixCurveSweptAreaSolid`³, `IfcElementarySurface`,
+`IfcGeometricRepresentationItem`, `IfcLightSource`,
+`IfcManifoldSolidBrep`, `IfcOffsetCurve`³, `IfcPlacement`, `IfcPoint`,
+`IfcSectionedSolid`³, `IfcSegment`³, `IfcSolidModel`, `IfcSpiral`³,
+`IfcSurface`, `IfcSweptAreaSolid`, `IfcSweptSurface`,
+`IfcTessellatedFaceSet`, `IfcTessellatedItem`,
+`IfcTopologicalRepresentationItem`) have no instances.
+
+## Fixtures: what loads
+
+Default decoder options; "open items" counts triangle primitives with
+an unbalanced edge after welding equal positions, "non-manifold" edges
+used by more than two triangles. Before = the previous release.
+
+| Model | Products with a shape | Drawn before → after | Triangles before → after | Open items | Non-manifold edges |
+|---|---|---|---|---|---|
+| `ifc4-basin-tessellation` | 1 | 1 → 1 | 234 → 234 | 0 → 0 | 0 → 0 |
+| `ifc4-column-straight-rectangle-tessellation` | 1 | 1 → 1 | 12 → 12 | 0 → 0 | 0 → 0 |
+| `ifc4-tessellated-item` | 1 | 1 → 1 | 12 → 12 | 0 → 0 | 0 → 0 |
+| `ifc4-tessellation-with-individual-colors` | 1 | 1 → 1 | 12 → 12 | 0 → 0 | 0 → 0 |
+| `ifc4-wall-with-opening-and-window` | 3 (1 voiding) | 3 → 2 (wall carved, opening a void) | 36 → 76 | 0 → 0 | 0 → 0 |
+| `synthetic-advanced-brep` | 4 | 4 → 4 | 18 916 → 18 916 | 0 → 0 | 0 → 0 |
+| Annex E listing, fixed-reference swept area solid | 10 | no scene → 1 (8 with `with_curves`) | — → 300 | — → 0 | — → 0 |
+| Annex E listing, sectioned solid horizontal | 10 | no scene → 1 (8 with `with_curves`) | — → 300 | — → 0 | — → 0 |
+| Annex E listing, segmented reference curve | 4 | no scene → no solid (3 curve products with `with_curves`) | — | — | — |
+
+The two Annex E solids close with volumes 2 699.99 and 2 699.85
+against the exact 9 × 300 (the 9-unit section over 300 of alignment).
+The products still undrawn there are the two zero-length terminating
+alignment segments and, in the third listing, the cant curve
+(`IfcSegmentedReferenceCurve`, refused). The listings are read from
+the staged specification pages and are not redistributed here.
+
+## Performance
+
+`cargo run --release --example ifc_load -- …` (one aarch64 laptop,
+medians of three runs, other builds running alongside).
+
+**Load → scene, 100 000 products sharing 8 mapped representations**
+(`--synthetic 100000`: 37.9 MiB, 703 787 instances, plus 100 walls
+with 300 openings; 30.2 M output triangles when baked):
+
+| | Before | After |
+|---|---|---|
+| Parse | 207 MiB/s | 195 MiB/s (same code path; 212 → 214 MiB/s on the 2.0 MiB staged STEP fixture) |
+| Parse + scene, serial | 1 056 s | **0.55 s** (0.20 s parse + 0.35 s scene) |
+| … 16 000 products | 19.8 s | 0.08 s |
+| Peak resident memory, world-space meshes | 1 205 MiB | 1 260 MiB (the 30 M-triangle output dominates; the scene now also carries the hierarchy and node identities) |
+| Peak resident memory, `with_instancing(true)` | — | **528 MiB** (108 meshes; the parsed file alone is 396 MiB, down from 438) |
+
+What changed: product ownership, styled items, colour maps and
+material representations are indexed in one pass over the instance
+graph (each was a scan of the whole file per product — the old cost
+was quadratic); placement chains and the model's plane-angle unit are
+resolved once per model; each distinct representation item is
+tessellated once and written per occurrence straight into the output
+vertex format. Parsed-file memory fell 10 % (exact-capacity keywords
+and argument lists). Baking 100 000 occurrences into world-space
+vertices costs what its output weighs; instancing is the form that
+scales, and stays opt-in because it changes the scene's shape (local
+meshes + node transforms).
+
+**Thread budget** (`--synthetic 20000 --unique`: 20 000 products each
+with its own filleted I-section extrusion, 4.7 M triangles): scene
+build 0.43 s serial → 0.27 s (2 threads) → 0.18 s (4) → 0.13 s (8);
+the scene is identical at every budget (pinned by a test).
+
+**Boolean cost** (`--boolean 256`: a 65 024-triangle sphere minus a
+box straddling its surface):
+
+| | Before | After |
+|---|---|---|
+| Time | 15.6 s | **0.07 s** |
+| Output triangles | 67 078 | 65 038 (same volume) |
+
+Polygons whose box misses the other operand's box are kept or dropped
+unclassified and unsplit, and a large closed operand met by a small
+one is classified through the part of it inside a window around the
+small one (six plane cuts with re-capped sections, linear in the
+mesh) instead of a partition of every face. A curved half-space
+selecting the inside of its base now costs one Boolean instead of two.
 
 ## Phase 4 surface — semantic data layer
 
@@ -665,8 +864,7 @@ other ISO 10303 readers (the STEP AP203 / AP214 / AP242 reader
   tessellated / faceted-Brep / swept-solid / boolean-result /
   mapped-item product shape into the `Scene3D` — product-named nodes,
   per-item primitives, surface-style materials, per-face colour maps;
-  a model with no extractable geometry (only curved/advanced breps)
-  decodes to `Unsupported`.
+  a model with no drawable geometry decodes to `Unsupported`.
 * `--no-default-features` — standalone STEP parser only, std types,
   zero dependencies.
 

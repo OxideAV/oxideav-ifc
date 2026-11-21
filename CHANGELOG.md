@@ -7,7 +7,7 @@ All notable changes to this project will be documented in this file.
 ### Added
 
 - IFC 4.3 alignment curves (`geometry::alignment`): composite curves of `IfcCurveSegment`s over `IfcLine`, `IfcCircle`, `IfcClothoid` and `IfcCosineSpiral` parents (curvature integrated over arc length from the segment placement; the Annex E listings' transition end points reproduce to 1e-6), `IfcGradientCurve` (base curve lifted to its elevation profile) and `IfcOffsetCurveByDistances` (lateral / vertical offsets interpolated between distances). They serve as directrices of the swept and sectioned solids and as profile / boundary curves, and carry their true distance-along, which linear placements and length-valued sweep trims now use. The remaining spirals, `IfcPolynomialCurve` and `IfcSegmentedReferenceCurve` are refused by keyword (no staged definition).
-- `curve_points(step, id)` — any bounded curve item as a 3-D polyline; `IfcDecoder::with_curves(true)` draws curve items (axis / footprint curves, geometric curve set members, alignments) as line strips.
+- `curve_points(step, id)` — any bounded curve item (or a single `IfcCurveSegment`) as a 3-D polyline; `IfcDecoder::with_curves(true)` draws curve items (axis / footprint curves, geometric curve set members, alignments) as line strips.
 - `IfcAnnotationFillArea` (planar region with inner boundaries), `IfcGeometricSet` / `IfcGeometricCurveSet` (their surface members mesh), `IfcTrimmedCurve` over a 3-D `IfcLine`.
 
 ### Fixed
@@ -32,6 +32,7 @@ All notable changes to this project will be documented in this file.
 
 ### Changed
 
+- README: representation-item coverage census over the staged IFC4 ADD2 / IFC4X3 ADD2 schemas, per-fixture load table, load / thread / Boolean measurements.
 - `mesh_boolean` pre-filters spatially: a polygon whose box misses the other operand's box is kept or dropped unclassified (and unsplit), and a large closed operand met by a small one is classified through the part of it inside a window around the small one (plane cuts with re-capped sections) instead of a partition of every face. A 65 024-triangle sphere minus a box: 15.6 s → 0.07 s, same volume, 2 040 fewer output triangles.
 - Parser: keywords and enumeration literals are allocated once at their exact length and argument lists give back their growth slack (−10 % resident memory on a 700 000-instance file, same throughput).
 - The scene build is linear in the model size: product ownership, styled items, colour maps and material representations are indexed in one pass (each was a scan of the whole file per product), placement chains and the plane-angle unit are resolved once per model, and a shared `IfcRepresentationMap` source is meshed once however many items map it.

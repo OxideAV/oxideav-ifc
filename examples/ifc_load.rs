@@ -23,6 +23,7 @@ fn main() {
     let mut openings = true;
     let mut parse_only = false;
     let mut curves = false;
+    let mut unique = false;
     let mut item: Option<u64> = None;
     let mut args = std::env::args().skip(1);
     while let Some(a) = args.next() {
@@ -34,6 +35,7 @@ fn main() {
             "--keep-openings" => openings = false,
             "--parse-only" => parse_only = true,
             "--curves" => curves = true,
+            "--unique" => unique = true,
             "--item" => item = args.next().and_then(|v| v.parse().ok()),
             other => path = Some(other.to_string()),
         }
@@ -43,11 +45,11 @@ fn main() {
         return;
     }
     let bytes: Vec<u8> = match (synth, path) {
-        (Some(n), _) => synthetic::synthetic_model(n).into_bytes(),
+        (Some(n), _) => synthetic::synthetic_model_with(n, !unique).into_bytes(),
         (None, Some(p)) => std::fs::read(&p).expect("readable file"),
         _ => {
             eprintln!(
-                "usage: ifc_load (<file.ifc> | --synthetic <products> | --boolean <segments>) \
+                "usage: ifc_load (<file.ifc> | --synthetic <products> [--unique] | --boolean <segments>) \
                  [--threads <n>] [--instancing] [--keep-openings] [--curves] [--parse-only] [--item <id>]"
             );
             std::process::exit(2);

@@ -385,6 +385,18 @@ pub(super) fn stationed(
             }
             Ok(Some(run))
         }
+        // One segment on its own (the `Segment` representation of an
+        // alignment segment).
+        "IFCCURVESEGMENT" => {
+            let mut run = Stationed::default();
+            for (p, station) in curve_segment(step, inst)? {
+                run.push([p[0], p[1], 0.0], station);
+            }
+            if run.points.len() < 2 {
+                return Err(GeometryError::BadProfile);
+            }
+            Ok(Some(run))
+        }
         "IFCGRADIENTCURVE" => gradient_curve(step, &inst.args, depth).map(Some),
         "IFCOFFSETCURVEBYDISTANCES" => offset_by_distances(step, &inst.args, depth).map(Some),
         // The cant curve displaces and banks its base curve by rules

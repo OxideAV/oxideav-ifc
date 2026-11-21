@@ -140,6 +140,8 @@ fn cosine_spiral_runs_between_the_listed_radii() {
     let heading = (end[1] - before[1]).atan2(end[0] - before[0]);
     // The last chord's direction trails the end heading by half a step.
     assert!(heading > 0.19 && heading < 0.216666666666666, "{heading}");
+    // The segment on its own is the same run.
+    assert_eq!(curve_points(&f, 5).unwrap(), pts);
     // Run against the spiral's sense, the same shape bends the other way.
     let back = curve_points(&f, 8).unwrap();
     let end_back = back[back.len() - 1];
