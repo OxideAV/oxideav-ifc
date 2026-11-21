@@ -672,6 +672,16 @@ impl ParamSurface {
         }
     }
 
+    /// Whether both ends of the `v` extent are poles (every `u` maps to
+    /// one point there): the sphere's latitude range.
+    pub(super) fn pole_bounded_v(&self) -> bool {
+        match self {
+            Self::Elementary(e) => matches!(e.kind, SurfaceKind::Sphere { .. }),
+            Self::Offset { base, .. } => base.pole_bounded_v(),
+            _ => false,
+        }
+    }
+
     /// The largest parameter span a mesh edge may cover in `u` / `v`
     /// before it is subdivided (`None` = the surface is straight in that
     /// direction, never subdivide): the circle density for angular

@@ -230,7 +230,54 @@ pub(super) fn tessellate_curved_face(
         surface_key,
         uv_loops,
         same_sense,
-        centre_seam,
+        SeamPlacement {
+            centre: centre_seam,
+            ..SeamPlacement::default()
+        },
+        pool,
+        triangles,
+    )
+}
+
+/// Mesh a face covering a whole closed surface — a sphere (periodic in
+/// `u`, closed by its poles in `v`) or a torus (periodic in both) —
+/// minus the given hole loops (each in its effective direction, the
+/// face on its left about the outward normal). The surface's own
+/// parameter extent is the outer boundary: the seams are placed clear
+/// of the holes, the two seam sides weld by parameter and a pole row
+/// collapses to one vertex.
+pub(super) fn tessellate_closed_surface_face(
+    surface: &ParamSurface,
+    steps: (Option<f64>, Option<f64>),
+    surface_key: u64,
+    holes: &[Vec<LoopVertex>],
+    same_sense: bool,
+    pool: &mut VertexPool,
+    triangles: &mut Vec<[u32; 3]>,
+) -> Result<(), GeometryError> {
+    // Closed means: every parameter direction is periodic or runs
+    // between two fixed ends of a periodic partner (the sphere's poles).
+    let (period_u, period_v) = (surface.period_u(), surface.period_v());
+    let closed = period_u.is_some() && (period_v.is_some() || surface.pole_bounded_v());
+    if !closed {
+        return Err(GeometryError::BadCoordinates);
+    }
+    let uv_loops = parameter_loops(surface, holes, same_sense)?;
+    let anchor = [
+        period_u.and_then(|p| widest_free_band(&uv_loops, 0, p)),
+        period_v.and_then(|p| widest_free_band(&uv_loops, 1, p)),
+    ];
+    mesh_parameter_loops(
+        surface,
+        steps,
+        surface_key,
+        uv_loops,
+        same_sense,
+        SeamPlacement {
+            centre: [false, false],
+            anchor,
+            whole_domain: true,
+        },
         pool,
         triangles,
     )
@@ -254,6 +301,7 @@ pub(super) fn tessellate_parameter_face(
     steps: (Option<f64>, Option<f64>),
     surface_key: u64,
     loops: &[Vec<Uv>],
+    whole_domain: bool,
     pool: &mut VertexPool,
     triangles: &mut Vec<[u32; 3]>,
 ) -> Result<(), GeometryError> {
@@ -333,17 +381,83 @@ pub(super) fn tessellate_parameter_face(
             _ => false,
         }
     };
-    let centre_seam = [spans(0, period_u), spans(1, period_v)];
+    let (seam, anchor) = if whole_domain {
+        // No outer loop: every loop is a hole in the closed surface.
+        // The seam of each periodic direction goes through the middle
+        // of the widest parameter band no hole reaches, so a hole that
+        // does not wind is never cut and no hole edge lies on a seam.
+        (
+            [false, false],
+            [
+                period_u.and_then(|p| widest_free_band(&uv_loops, 0, p)),
+                period_v.and_then(|p| widest_free_band(&uv_loops, 1, p)),
+            ],
+        )
+    } else {
+        ([spans(0, period_u), spans(1, period_v)], [None, None])
+    };
     mesh_parameter_loops(
         surface,
         steps,
         surface_key,
         uv_loops,
         true,
-        centre_seam,
+        SeamPlacement {
+            centre: seam,
+            anchor,
+            whole_domain,
+        },
         pool,
         triangles,
     )
+}
+
+/// Where the fundamental rectangle's seams go.
+#[derive(Debug, Clone, Copy, Default)]
+struct SeamPlacement {
+    /// Shift the seam half a period off the outer loop's lowest
+    /// parameter (the loop spans the whole period).
+    centre: [bool; 2],
+    /// An explicit seam position per periodic direction.
+    anchor: [Option<f64>; 2],
+    /// The loops are holes in a surface closed in both parameters: with
+    /// no loop at all the whole rectangle is the region.
+    whole_domain: bool,
+}
+
+/// The middle of the widest band of parameter `k` (modulo `period`) that
+/// no loop's bounding interval covers; `None` when the loops cover the
+/// whole period (some loop winds around this direction).
+fn widest_free_band(loops: &[ULoop], k: usize, period: f64) -> Option<f64> {
+    let mut spans: Vec<(f64, f64)> = Vec::with_capacity(loops.len());
+    for l in loops {
+        let (lo, hi) = l.bbox();
+        let len = hi[k] - lo[k];
+        if len >= period || len.is_nan() {
+            return None;
+        }
+        let start = lo[k].rem_euclid(period);
+        spans.push((start, start + len));
+    }
+    if spans.is_empty() {
+        return Some(0.0);
+    }
+    spans.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(core::cmp::Ordering::Equal));
+    // Sweep the sorted intervals once around the period; the band from
+    // the furthest covered point back to the first start closes the turn.
+    let mut covered = spans[0].1;
+    let mut best: (f64, f64) = (0.0, 0.0);
+    for &(start, end) in &spans[1..] {
+        if start - covered > best.1 {
+            best = (covered, start - covered);
+        }
+        covered = covered.max(end);
+    }
+    let closing = spans[0].0 + period - covered;
+    if closing > best.1 {
+        best = (covered, closing);
+    }
+    (best.1 > 1e-9 * period).then_some(best.0 + 0.5 * best.1)
 }
 
 /// Orient, clip to the fundamental rectangle, and mesh the parameter
@@ -356,7 +470,7 @@ fn mesh_parameter_loops(
     surface_key: u64,
     uv_loops: Vec<ULoop>,
     same_sense: bool,
-    centre_seam: [bool; 2],
+    seam: SeamPlacement,
     pool: &mut VertexPool,
     triangles: &mut Vec<[u32; 3]>,
 ) -> Result<(), GeometryError> {
@@ -368,8 +482,19 @@ fn mesh_parameter_loops(
                 l.reverse(surface.period_u(), surface.period_v());
             }
         }
-        let rect = fundamental_rect(surface, &oriented, centre_seam);
-        let pieces = clip_to_rect(&oriented, &rect, surface.period_u(), surface.period_v());
+        let rect = fundamental_rect(surface, &oriented, &seam);
+        let mut pieces = clip_to_rect(&oriented, &rect, surface.period_u(), surface.period_v());
+        if pieces.is_empty() && oriented.is_empty() && seam.whole_domain {
+            // A closed surface with no boundary at all.
+            pieces.push(Piece {
+                outer: (0..4)
+                    .map(|c| PVert::Grid {
+                        uv: perimeter_point(&rect, c as f64),
+                    })
+                    .collect(),
+                holes: Vec::new(),
+            });
+        }
         // Net region area: outer pieces minus their holes.
         let area: f64 = pieces
             .iter()
@@ -552,7 +677,8 @@ fn unwrap_near(x: f64, reference: f64, period: f64) -> f64 {
 /// The rectangle the loops are clipped to: one period in a periodic
 /// direction, the surface's fixed extent otherwise, or the loops' own
 /// range (a cylinder's height is whatever the loops span).
-fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop], centre_seam: [bool; 2]) -> Rect {
+fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop], seam: &SeamPlacement) -> Rect {
+    let centre_seam = seam.centre;
     let mut lo = [f64::INFINITY; 2];
     let mut hi = [f64::NEG_INFINITY; 2];
     for l in loops {
@@ -568,8 +694,13 @@ fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop], centre_seam: [bool;
             // that does not wind is not cut at all — or half a period
             // away when the outer loop spans the whole period (its
             // edges would otherwise lie on the seam itself).
-            let a = loops.first().map_or(0.0, |l| l.bbox().0[0]);
-            let a = if centre_seam[0] { a - 0.5 * p } else { a };
+            let a = match seam.anchor[0] {
+                Some(a) => a,
+                None => {
+                    let a = loops.first().map_or(0.0, |l| l.bbox().0[0]);
+                    if centre_seam[0] { a - 0.5 * p } else { a }
+                }
+            };
             (a, a + p)
         }
         (None, Some(e)) => e,
@@ -577,8 +708,13 @@ fn fundamental_rect(surface: &ParamSurface, loops: &[ULoop], centre_seam: [bool;
     };
     let (v0, v1) = match (surface.period_v(), surface.v_extent()) {
         (Some(p), _) => {
-            let a = loops.first().map_or(0.0, |l| l.bbox().0[1]);
-            let a = if centre_seam[1] { a - 0.5 * p } else { a };
+            let a = match seam.anchor[1] {
+                Some(a) => a,
+                None => {
+                    let a = loops.first().map_or(0.0, |l| l.bbox().0[1]);
+                    if centre_seam[1] { a - 0.5 * p } else { a }
+                }
+            };
             (a, a + p)
         }
         (None, Some(e)) => e,

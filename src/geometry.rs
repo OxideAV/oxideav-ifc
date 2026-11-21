@@ -482,6 +482,11 @@ fn boolean_result(step: &StepFile, args: &[Value], depth: usize) -> Result<TriMe
         // outward) or its outside; the finite tool covers the operand.
         Some((HalfSpaceBase::Curved { surface, inside }, regions)) => {
             let solid = curved_half_space_solid(&base, &surface)?;
+            if inside && regions.is_empty() {
+                // The finite solid already covers the operand's extent:
+                // it is the tool as it stands.
+                return mesh_boolean(&base, &solid, op);
+            }
             let envelope = if regions.is_empty() {
                 base_envelope(&base)?
             } else {
@@ -584,8 +589,10 @@ fn curved_half_space_solid(
             }
         }
         surfaces::SurfaceKind::Sphere { radius } => sphere_mesh(radius),
-        surfaces::SurfaceKind::Plane | surfaces::SurfaceKind::Torus { .. } => {
-            return Err(GeometryError::Unsupported("IFCTOROIDALSURFACE".to_string()));
+        // The torus is bounded: the closed tube itself is the solid.
+        surfaces::SurfaceKind::Torus { major, minor } => torus_mesh(major, minor),
+        surfaces::SurfaceKind::Plane => {
+            return Err(GeometryError::Unsupported("IFCPLANE".to_string()));
         }
         surfaces::SurfaceKind::Cone { .. } => {
             return Err(GeometryError::Unsupported("CONICAL_SURFACE".to_string()));
@@ -593,6 +600,37 @@ fn curved_half_space_solid(
     };
     mesh.transform(frame);
     Ok(mesh)
+}
+
+/// The closed tube of a ring torus (`minor < major`) about the local z
+/// axis: `S(u, v) = ((R + r cos v) cos u, (R + r cos v) sin u, r sin v)`
+/// on a `CIRCLE_SEGMENTS`² grid, wound outward (`∂S/∂u × ∂S/∂v` is the
+/// outward normal).
+fn torus_mesh(major: f64, minor: f64) -> TriMesh {
+    let n = CIRCLE_SEGMENTS;
+    let tau = 2.0 * core::f64::consts::PI;
+    let mut positions: Vec<[f64; 3]> = Vec::with_capacity(n * n);
+    for i in 0..n {
+        let u = tau * (i as f64) / (n as f64);
+        for j in 0..n {
+            let v = tau * (j as f64) / (n as f64);
+            let rho = major + minor * v.cos();
+            positions.push([rho * u.cos(), rho * u.sin(), minor * v.sin()]);
+        }
+    }
+    let at = |i: usize, j: usize| ((i % n) * n + (j % n)) as u32;
+    let mut triangles: Vec<[u32; 3]> = Vec::with_capacity(2 * n * n);
+    for i in 0..n {
+        for j in 0..n {
+            let (a, b, c, d) = (at(i, j), at(i + 1, j), at(i + 1, j + 1), at(i, j + 1));
+            triangles.push([a, b, c]);
+            triangles.push([a, c, d]);
+        }
+    }
+    TriMesh {
+        positions,
+        triangles,
+    }
 }
 
 /// A bounded half-space tool (the union of convex plane regions) as a
@@ -796,11 +834,16 @@ fn half_space_base(step: &StepFile, args: &[Value]) -> Result<HalfSpaceBase, Geo
                 normal: if agreement { n } else { [-n[0], -n[1], -n[2]] },
             }))
         }
-        "IFCCYLINDRICALSURFACE" | "IFCSPHERICALSURFACE" => Ok(HalfSpaceBase::Curved {
-            surface: surfaces::ElementarySurface::from_id(step, surface_id)?,
-            inside: agreement,
-        }),
-        // A toroidal / swept / B-spline base is out of scope.
+        // The curved elementary surfaces: the natural normal points
+        // away from the axis / centre / tube centre circle, so the
+        // negative side is the enclosed region.
+        "IFCCYLINDRICALSURFACE" | "IFCSPHERICALSURFACE" | "IFCTOROIDALSURFACE" => {
+            Ok(HalfSpaceBase::Curved {
+                surface: surfaces::ElementarySurface::from_id(step, surface_id)?,
+                inside: agreement,
+            })
+        }
+        // A swept / B-spline base has no closed-form side test here.
         other => Err(GeometryError::Unsupported(other.to_string())),
     }
 }
@@ -3515,7 +3558,12 @@ fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
         }
     }
     let mut implicit: Vec<Vec<[f64; 2]>> = Vec::new();
-    let mut outer = if implicit_outer {
+    // A basis closed in both parameters (a torus) has no boundary of its
+    // own: the implicit outer is empty and every listed curve a hole.
+    let closed_basis = surface.period_u().is_some() && surface.period_v().is_some();
+    let mut outer = if implicit_outer && closed_basis {
+        Vec::new()
+    } else if implicit_outer {
         // The basis surface's own extent bounds the region; a surface
         // unbounded in a parameter has no implicit outer boundary. A
         // periodic direction is closed by two loops winding around it
@@ -3549,8 +3597,7 @@ fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
                 implicit.push(left);
                 right
             }
-            // Closed in both directions (a torus): no boundary at all.
-            (true, true) => return Err(GeometryError::BadProfile),
+            (true, true) => unreachable!("closed bases are handled above"),
         }
     } else {
         match outers.len() {
@@ -3575,8 +3622,11 @@ fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
     for h in &mut holes {
         orient(h, false);
     }
+    let whole_domain = implicit_outer && closed_basis;
     let mut loops: Vec<Vec<[f64; 2]>> = Vec::with_capacity(holes.len() + 2);
-    loops.push(outer);
+    if !whole_domain {
+        loops.push(outer);
+    }
     loops.extend(implicit);
     loops.extend(holes);
     let mut pool = VertexPool::new();
@@ -3586,6 +3636,7 @@ fn curve_bounded_surface(step: &StepFile, args: &[Value]) -> Result<TriMesh, Geo
         surface.step(),
         basis_id,
         &loops,
+        whole_domain,
         &mut pool,
         &mut triangles,
     )?;
@@ -6565,6 +6616,49 @@ fn face(
     if bound_ids.is_empty() {
         return Err(GeometryError::BadCoordinates);
     }
+    // A bound whose loop is an IfcVertexLoop marks a face with no edge
+    // boundary there: on a closed curved surface (a whole sphere, a
+    // whole torus) the surface's own extent is the outer boundary, and
+    // every edge / poly loop left is a hole in it.
+    if let Some((sid, same_sense)) = curved {
+        let is_vertex_loop = |bid: u64| -> bool {
+            step.get(bid)
+                .and_then(|b| b.args.first().and_then(Value::as_reference))
+                .and_then(|lid| step.get(lid))
+                .is_some_and(|l| l.keyword == "IFCVERTEXLOOP")
+        };
+        if bound_ids.iter().any(|&bid| is_vertex_loop(bid)) {
+            bound_ids.retain(|&bid| !is_vertex_loop(bid));
+            let surface = surfaces::ParamSurface::from_id(step, sid)?;
+            let mut loops: Vec<Vec<trim::LoopVertex>> = Vec::with_capacity(bound_ids.len());
+            for bid in bound_ids {
+                let b = step.get(bid).ok_or(GeometryError::MissingInstance(bid))?;
+                let loop_id = b
+                    .args
+                    .first()
+                    .and_then(Value::as_reference)
+                    .ok_or(GeometryError::BadCoordinates)?;
+                let mut l = interned_loop(step, loop_id, pool)?;
+                if matches!(b.args.get(1).and_then(Value::as_enum), Some("F")) {
+                    l.reverse();
+                }
+                loops.push(
+                    l.iter()
+                        .map(|&(id, p)| trim::LoopVertex { id, p })
+                        .collect(),
+                );
+            }
+            return trim::tessellate_closed_surface_face(
+                &surface,
+                surface.step(),
+                sid,
+                &loops,
+                same_sense,
+                pool,
+                triangles,
+            );
+        }
+    }
     let outer_pos = bound_ids
         .iter()
         .position(|&bid| {
@@ -7691,6 +7785,77 @@ mod tests {
     }
 
     #[test]
+    fn closed_surface_faces_bounded_by_a_vertex_loop() {
+        // A whole sphere (r = 2) and a whole torus (R = 3, r = 1), each
+        // one face whose only bound is a vertex loop: the surface's own
+        // parameter extent is the boundary. Both close through their
+        // seams (and the sphere's poles) with outward normals and no
+        // sliver triangles; SameSense FALSE turns the solid inside out.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCSPHERICALSURFACE(#2,2.);\n#4=IFCTOROIDALSURFACE(#2,3.,1.);\n\
+             #5=IFCCARTESIANPOINT((2.,0.,0.));\n#6=IFCVERTEXPOINT(#5);\n\
+             #7=IFCVERTEXLOOP(#6);\n#8=IFCFACEOUTERBOUND(#7,.T.);\n\
+             #10=IFCADVANCEDFACE((#8),#3,.T.);\n#11=IFCCLOSEDSHELL((#10));\n\
+             #12=IFCADVANCEDBREP(#11);\n\
+             #20=IFCADVANCEDFACE((#8),#4,.T.);\n#21=IFCCLOSEDSHELL((#20));\n\
+             #22=IFCADVANCEDBREP(#21);\n\
+             #30=IFCFACESURFACE((#8),#3,.F.);\n#31=IFCCLOSEDSHELL((#30));\n\
+             #32=IFCFACETEDBREP(#31);",
+        );
+        let pi = core::f64::consts::PI;
+        for (id, exact) in [
+            (12u64, 4.0 / 3.0 * pi * 8.0),
+            (22, 2.0 * pi * pi * 3.0),
+            (32, -4.0 / 3.0 * pi * 8.0),
+        ] {
+            let m = tessellate_item(&f, id).unwrap();
+            assert_watertight(&m);
+            let v = m.signed_volume();
+            assert!(
+                v.abs() < exact.abs() && (exact - v).abs() / exact.abs() < 1e-2,
+                "#{id}: {v} vs {exact}"
+            );
+            assert_eq!(v > 0.0, exact > 0.0, "#{id}");
+            let (open, quality) = open_edges_and_quality(&m);
+            assert!(open.is_empty(), "#{id}");
+            assert!(quality > 1e-3, "#{id}: sliver triangle, quality {quality}");
+        }
+    }
+
+    #[test]
+    fn sphere_face_with_a_vertex_loop_outer_and_an_edge_loop_hole() {
+        // A ball r = 2 truncated at z = 1: the spherical face has a
+        // vertex-loop outer bound and the cut circle (radius √3) as an
+        // inner bound; a planar disk closes it. Volume of the ball
+        // below z = 1 is π·(2r³/3 + r²h − h³/3) with h = 1.
+        let f = parse(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCSPHERICALSURFACE(#2,2.);\n\
+             #5=IFCCARTESIANPOINT((0.,0.,-2.));\n#6=IFCVERTEXPOINT(#5);\n\
+             #7=IFCVERTEXLOOP(#6);\n#8=IFCFACEOUTERBOUND(#7,.T.);\n\
+             #40=IFCCARTESIANPOINT((0.,0.,1.));\n#41=IFCAXIS2PLACEMENT3D(#40,$,$);\n\
+             #42=IFCCIRCLE(#41,1.7320508075688772);\n\
+             #43=IFCCARTESIANPOINT((1.7320508075688772,0.,1.));\n#44=IFCVERTEXPOINT(#43);\n\
+             #45=IFCEDGECURVE(#44,#44,#42,.T.);\n\
+             #46=IFCORIENTEDEDGE(*,*,#45,.F.);\n#47=IFCEDGELOOP((#46));\n#48=IFCFACEBOUND(#47,.T.);\n\
+             #50=IFCADVANCEDFACE((#8,#48),#3,.T.);\n\
+             #51=IFCORIENTEDEDGE(*,*,#45,.T.);\n#52=IFCEDGELOOP((#51));\n\
+             #53=IFCFACEOUTERBOUND(#52,.T.);\n#54=IFCPLANE(#41);\n\
+             #55=IFCADVANCEDFACE((#53),#54,.T.);\n\
+             #60=IFCCLOSEDSHELL((#50,#55));\n#61=IFCADVANCEDBREP(#60);",
+        );
+        let m = tessellate_item(&f, 61).unwrap();
+        assert_watertight(&m);
+        let exact = core::f64::consts::PI * (16.0 / 3.0 + 4.0 - 1.0 / 3.0);
+        let v = m.signed_volume();
+        assert!(v < exact && (exact - v) / exact < 1e-2, "{v} vs {exact}");
+        assert!(m.positions.iter().all(|p| p[2] <= 1.0 + 1e-9));
+        let (_, quality) = open_edges_and_quality(&m);
+        assert!(quality > 1e-3, "sliver triangle, quality {quality}");
+    }
+
+    #[test]
     fn advanced_brep_cylinder_with_inconsistent_flags_still_meshes() {
         // SameSense FALSE on the side with the loops as authored: the
         // region would be empty, so the trimmer retries flipped and the
@@ -8407,6 +8572,207 @@ mod tests {
         let zmax = (pi / 3.0).sin();
         assert!(m.positions.iter().all(|p| p[2] <= zmax + 1e-9));
         assert!(m.positions.iter().any(|p| p[2] < -0.99));
+    }
+
+    /// A closed p-curve polyline boundary (hole) on basis `#3`:
+    /// instances `base..base + n + 3`, the boundary curve at
+    /// `base + n + 3`.
+    fn pcurve_boundary(base: u64, pts: &[[f64; 2]]) -> (String, u64) {
+        let mut src = String::new();
+        let mut ids = Vec::new();
+        for (k, p) in pts.iter().chain(pts.first()).enumerate() {
+            let id = base + k as u64;
+            src.push_str(&format!(
+                "#{id}=IFCCARTESIANPOINT(({:?},{:?}));\n",
+                p[0], p[1]
+            ));
+            ids.push(format!("#{id}"));
+        }
+        let n = base + pts.len() as u64 + 1;
+        src.push_str(&format!(
+            "#{n}=IFCPOLYLINE(({}));\n#{}=IFCPCURVE(#3,#{n});\n\
+             #{}=IFCCOMPOSITECURVESEGMENT(.CONTINUOUS.,.T.,#{});\n\
+             #{}=IFCBOUNDARYCURVE((#{}),.F.);\n",
+            ids.join(","),
+            n + 1,
+            n + 2,
+            n + 1,
+            n + 3,
+            n + 2
+        ));
+        (src, n + 3)
+    }
+
+    /// Edges traversed an unbalanced number of times, and the smallest
+    /// triangle quality (twice the area over the squared longest edge).
+    fn open_edges_and_quality(m: &TriMesh) -> (Vec<(u32, u32)>, f64) {
+        let mut net: std::collections::HashMap<(u32, u32), i32> = std::collections::HashMap::new();
+        let mut worst = f64::INFINITY;
+        for t in &m.triangles {
+            let p: Vec<[f64; 3]> = t.iter().map(|&i| m.positions[i as usize]).collect();
+            let mut longest = 0.0f64;
+            for i in 0..3 {
+                let (x, y) = (t[i], t[(i + 1) % 3]);
+                *net.entry((x.min(y), x.max(y))).or_insert(0) += if x < y { 1 } else { -1 };
+                longest = longest.max(dist(p[i], p[(i + 1) % 3]));
+            }
+            let n = cross_raw(
+                [p[1][0] - p[0][0], p[1][1] - p[0][1], p[1][2] - p[0][2]],
+                [p[2][0] - p[0][0], p[2][1] - p[0][1], p[2][2] - p[0][2]],
+            );
+            let area2 = dot_raw(n, n).sqrt();
+            worst = worst.min(area2 / (longest * longest));
+        }
+        let mut open: Vec<(u32, u32)> = net
+            .into_iter()
+            .filter(|&(_, n)| n != 0)
+            .map(|(e, _)| e)
+            .collect();
+        open.sort_unstable();
+        (open, worst)
+    }
+
+    #[test]
+    fn curve_bounded_surface_torus_with_implicit_outer() {
+        // ImplicitOuter on a torus (R = 3, r = 1), a surface closed in
+        // both parameters: the whole tube minus rectangular parameter
+        // holes. One hole straddles u = 0 and one v = 0, so both seams
+        // have to be placed clear of them; the sheet closes through
+        // both seams (open edges only on the hole rims) with no sliver
+        // triangles, normals outward.
+        let (major, minor) = (3.0f64, 1.0f64);
+        let rects: [[f64; 4]; 3] = [
+            [-0.4, 0.5, 0.6, 1.4],  // straddles the u seam
+            [2.0, 2.9, -0.5, 0.45], // straddles the v seam
+            [4.0, 4.6, 2.5, 3.6],   // on the inner side of the tube
+        ];
+        let hole_area = |r: &[f64; 4]| {
+            minor
+                * ((r[1] - r[0]) * major * (r[3] - r[2])
+                    + (r[1] - r[0]) * minor * (r[3].sin() - r[2].sin()))
+        };
+        let full = 4.0 * core::f64::consts::PI.powi(2) * major * minor;
+        let mut src = String::from(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCTOROIDALSURFACE(#2,3.,1.);\n",
+        );
+        let mut bounds = Vec::new();
+        for (k, r) in rects.iter().enumerate() {
+            let (s, id) = pcurve_boundary(
+                100 + 20 * k as u64,
+                &[[r[0], r[2]], [r[1], r[2]], [r[1], r[3]], [r[0], r[3]]],
+            );
+            src.push_str(&s);
+            bounds.push(id);
+        }
+        src.push_str(&format!(
+            "#30=IFCCURVEBOUNDEDSURFACE(#3,(#{}),.T.);\n\
+             #31=IFCCURVEBOUNDEDSURFACE(#3,(#{},#{},#{}),.T.);",
+            bounds[0], bounds[0], bounds[1], bounds[2]
+        ));
+        let f = parse(&src);
+        for (id, holes) in [(30u64, &rects[..1]), (31, &rects[..])] {
+            let m = tessellate_item(&f, id).unwrap();
+            let exact = full - holes.iter().map(hole_area).sum::<f64>();
+            let a = mesh_area(&m);
+            assert!(
+                a < exact && (exact - a) / exact < 1e-2,
+                "#{id}: {a} vs {exact}"
+            );
+            // Every vertex on the torus.
+            for p in &m.positions {
+                let d = (p[0].hypot(p[1]) - major).hypot(p[2]);
+                assert!((d - minor).abs() < 1e-9, "{p:?}");
+            }
+            let (open, quality) = open_edges_and_quality(&m);
+            assert!(quality > 1e-3, "#{id}: sliver triangle, quality {quality}");
+            // The open edges are exactly the hole rims: every open-edge
+            // vertex lies on one of the hole rectangles' boundaries.
+            assert!(!open.is_empty());
+            let tau = 2.0 * core::f64::consts::PI;
+            for (x, y) in open {
+                for i in [x, y] {
+                    let p = m.positions[i as usize];
+                    let u = p[1].atan2(p[0]);
+                    let v = p[2].atan2(p[0].hypot(p[1]) - major);
+                    let near = |a: f64, b: f64| {
+                        let d = (a - b).rem_euclid(tau);
+                        d.min(tau - d) < 1e-9
+                    };
+                    let within =
+                        |a: f64, lo: f64, hi: f64| (a - lo).rem_euclid(tau) <= hi - lo + 1e-9;
+                    assert!(
+                        holes.iter().any(|r| {
+                            ((near(u, r[0]) || near(u, r[1])) && within(v, r[2], r[3]))
+                                || ((near(v, r[2]) || near(v, r[3])) && within(u, r[0], r[1]))
+                        }),
+                        "#{id}: open edge off the hole rims at u {u} v {v}"
+                    );
+                }
+            }
+            // Outward normals: away from the tube centre circle.
+            for t in &m.triangles {
+                let (p, q, r) = (
+                    m.positions[t[0] as usize],
+                    m.positions[t[1] as usize],
+                    m.positions[t[2] as usize],
+                );
+                let n = cross_raw(
+                    [q[0] - p[0], q[1] - p[1], q[2] - p[2]],
+                    [r[0] - p[0], r[1] - p[1], r[2] - p[2]],
+                );
+                let c = [
+                    (p[0] + q[0] + r[0]) / 3.0,
+                    (p[1] + q[1] + r[1]) / 3.0,
+                    (p[2] + q[2] + r[2]) / 3.0,
+                ];
+                let rho = c[0].hypot(c[1]);
+                let out = [c[0] - major * c[0] / rho, c[1] - major * c[1] / rho, c[2]];
+                assert!(dot_raw(n, out) > 0.0, "#{id}: inward triangle {t:?}");
+            }
+        }
+    }
+
+    #[test]
+    fn curve_bounded_surface_sphere_with_an_equatorial_hole_closes_at_the_poles() {
+        // ImplicitOuter on a sphere with one small hole on the equator:
+        // the sheet closes through the seam meridian and both poles —
+        // open edges only on the hole rim, each pole a single vertex,
+        // no sliver triangles around them.
+        let r = [1.0f64, 1.5, -0.25, 0.25];
+        let (s, id) = pcurve_boundary(
+            100,
+            &[[r[0], r[2]], [r[1], r[2]], [r[1], r[3]], [r[0], r[3]]],
+        );
+        let f = parse(&format!(
+            "#1=IFCCARTESIANPOINT((0.,0.,0.));\n#2=IFCAXIS2PLACEMENT3D(#1,$,$);\n\
+             #3=IFCSPHERICALSURFACE(#2,2.);\n{s}\
+             #30=IFCCURVEBOUNDEDSURFACE(#3,(#{id}),.T.);"
+        ));
+        let m = tessellate_item(&f, 30).unwrap();
+        let exact =
+            4.0 * core::f64::consts::PI * 4.0 - 4.0 * (r[1] - r[0]) * (r[3].sin() - r[2].sin());
+        let a = mesh_area(&m);
+        assert!(a < exact && (exact - a) / exact < 1e-2, "{a} vs {exact}");
+        let (open, quality) = open_edges_and_quality(&m);
+        assert!(quality > 1e-3, "sliver triangle, quality {quality}");
+        for (x, y) in open {
+            for i in [x, y] {
+                let p = m.positions[i as usize];
+                assert!(
+                    p[2].abs() <= 2.0 * 0.25f64.sin() + 1e-9,
+                    "open edge at {p:?}"
+                );
+            }
+        }
+        for pole in [2.0, -2.0] {
+            let n = m
+                .positions
+                .iter()
+                .filter(|p| (p[2] - pole).abs() < 1e-9)
+                .count();
+            assert_eq!(n, 1, "pole {pole}");
+        }
     }
 
     #[test]
@@ -10901,6 +11267,55 @@ mod tests {
         }
         let m = tessellate_item(&f, 11).unwrap();
         assert!(m.positions.iter().all(|p| p[0].hypot(p[1]) <= 1.0 + 1e-9));
+    }
+
+    #[test]
+    fn toroidal_half_space_carves_the_tube() {
+        // A 10×10×2 slab centred on the origin (z ∈ [−1, 1]) against a
+        // half-space whose base is a torus (R = 3, r = 0.5) in the slab's
+        // mid-plane: AgreementFlag TRUE is the inside of the tube (the
+        // negative side of the outward surface normal), FALSE everything
+        // else. The tube lies wholly inside the slab, so the volumes
+        // follow the tessellated torus exactly and partition the slab.
+        let f = parse(
+            "#1=IFCRECTANGLEPROFILEDEF(.AREA.,$,$,10.,10.);\n\
+             #2=IFCDIRECTION((0.,0.,1.));\n\
+             #40=IFCCARTESIANPOINT((0.,0.,-1.));\n#41=IFCAXIS2PLACEMENT3D(#40,$,$);\n\
+             #3=IFCEXTRUDEDAREASOLID(#1,#41,#2,2.);\n\
+             #4=IFCCARTESIANPOINT((0.,0.,0.));\n#5=IFCAXIS2PLACEMENT3D(#4,$,$);\n\
+             #6=IFCTOROIDALSURFACE(#5,3.,0.5);\n\
+             #7=IFCHALFSPACESOLID(#6,.T.);\n#8=IFCHALFSPACESOLID(#6,.F.);\n\
+             #10=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#7);\n\
+             #11=IFCBOOLEANRESULT(.DIFFERENCE.,#3,#8);\n\
+             #12=IFCBOOLEANRESULT(.INTERSECTION.,#3,#7);\n\
+             #20=IFCCARTESIANPOINT((0.,0.,1.));\n#21=IFCAXIS2PLACEMENT3D(#20,$,$);\n\
+             #22=IFCTOROIDALSURFACE(#21,3.,0.5);\n#23=IFCHALFSPACESOLID(#22,.T.);\n\
+             #24=IFCBOOLEANCLIPPINGRESULT(.DIFFERENCE.,#3,#23);",
+        );
+        let tube = torus_mesh(3.0, 0.5);
+        assert_closed(&tube);
+        let tube_vol = tube.signed_volume();
+        // Pappus: 2π²Rr² up to the chord error of the 48-gons.
+        let exact = 2.0 * core::f64::consts::PI.powi(2) * 3.0 * 0.25;
+        assert!(tube_vol < exact && (exact - tube_vol) / exact < 1e-2);
+        for (id, want) in [(10u64, 200.0 - tube_vol), (11, tube_vol), (12, tube_vol)] {
+            let m = tessellate_item(&f, id).unwrap();
+            assert_closed(&m);
+            assert!(
+                (m.signed_volume() - want).abs() < 1e-6,
+                "#{id}: {} != {want}",
+                m.signed_volume()
+            );
+        }
+        // A tube centred on the slab's top face: half of it is carved
+        // out as an open groove.
+        let m = tessellate_item(&f, 24).unwrap();
+        assert_closed(&m);
+        assert!(
+            (m.signed_volume() - (200.0 - 0.5 * tube_vol)).abs() < 1e-6,
+            "{}",
+            m.signed_volume()
+        );
     }
 
     #[test]

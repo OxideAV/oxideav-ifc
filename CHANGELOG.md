@@ -6,11 +6,16 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- Half-space solids on an `IfcToroidalSurface` base: `AgreementFlag` TRUE is the inside of the tube, FALSE its outside; the closed tube is the Boolean tool (`IfcHalfSpaceSolid`, and the boxed / polygonal-bounded subtypes restrict it as for the other curved bases).
+- `IfcCurveBoundedSurface` with `ImplicitOuter` on a basis closed in both parameters (a torus): the whole surface minus the listed boundaries; both seams are placed in the widest parameter band no boundary reaches, so a hole straddling `u = 0` or `v = 0` is not cut.
+- Faces of a closed curved surface bounded by an `IfcVertexLoop` (a whole sphere, a whole torus; optionally with edge-loop holes) mesh over the surface's own parameter extent — watertight through the seams and the sphere's poles.
+
 - `new(..)` (every field, in declaration order) on the parsed records that have no `Default`: `Classification`, `ClassificationReference`, `DocumentInformation`, `DocumentReference`, `ProjectedCrs`, `MapConversion`, `RigidOperation`, `SiteGeolocation`, `HeaderRecord`, `Material`, `MaterialLayer`, `MaterialLayerSet`, `MaterialProfile`, `MaterialProfileSet`, `MaterialConstituent`, `MaterialConstituentSet`, `EntityPart`, `ParsedInstance`, `Property`, `PropertySet`, `Quantity`, `ElementQuantity`, `RuleViolation`, `EntitySchema`, `UnitScale`.
 - `with_<field>` setters on the `Default`-able records `StepLimits`, `StepFile`, `Header`, `FileDescription`, `FileName`.
 
 ### Changed
 
+- A curved half-space selecting the inside of its base (`AgreementFlag` TRUE, no enclosure) uses the finite base solid directly as the Boolean tool — one mesh–mesh Boolean instead of two.
 - `#[non_exhaustive]` on the growable enums `Error`, `ClassificationParent`, `ClassificationAssignment`, `DocumentAssignment`, `MaterialAssignment`, `PropertyValue`, `QuantityValue`, `EntityKind`, `SpatialKind`, `RigidCoordinateKind`, `PrefixedDerivedUnit`, and on every record listed under Added. `Value` (the ISO 10303-21 parameter grammar) and `BooleanOperator` (union / intersection / difference) stay exhaustive; `Transform` and `TriMesh` stay plain value types. `GeometryError` stays exhaustive for now because a sibling matches it exhaustively.
 
 ## [0.0.4](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.3...v0.0.4) - 2026-10-23

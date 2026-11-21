@@ -747,6 +747,7 @@ impl FaceMesher {
             surface.steps,
             surface_key,
             loops,
+            false,
             &mut self.pool,
             &mut self.triangles,
         );
