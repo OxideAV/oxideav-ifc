@@ -4,6 +4,20 @@ All notable changes to this project will be documented in this file.
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-ifc/compare/v0.0.4...v0.0.5) - 2026-11-21
+
+### Other
+
+- IfcPointOnCurve / IfcPointOnSurface as point geometry; fuzz: dense-host Booleans
+- a source item under a styled mapped item inherits that style; scene tests
+- the shared generator's test-only entry point is not dead code
+- coverage census, fixture and performance tables; sample bare curve segments
+- IFC 4.3 alignment curves, curve sampling, fill areas; operator axes per IfcBaseAxis
+- spatial pre-filter and window-localised classifiers; parser: exact-capacity keywords and lists
+- linear scene build — hierarchy, opening subtraction, shared representations, thread budget
+- toroidal half-spaces, closed-surface faces (torus implicit outer, vertex-loop bounds)
+- API hygiene: #[non_exhaustive] on growable enums + parsed records, constructors / with_* setters
+
 ### Added
 
 - IFC 4.3 alignment curves (`geometry::alignment`): composite curves of `IfcCurveSegment`s over `IfcLine`, `IfcCircle`, `IfcClothoid` and `IfcCosineSpiral` parents (curvature integrated over arc length from the segment placement; the Annex E listings' transition end points reproduce to 1e-6), `IfcGradientCurve` (base curve lifted to its elevation profile) and `IfcOffsetCurveByDistances` (lateral / vertical offsets interpolated between distances). They serve as directrices of the swept and sectioned solids and as profile / boundary curves, and carry their true distance-along, which linear placements and length-valued sweep trims now use. The remaining spirals, `IfcPolynomialCurve` and `IfcSegmentedReferenceCurve` are refused by keyword (no staged definition).
